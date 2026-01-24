@@ -1,0 +1,22 @@
+{
+  "project": "Momentum Weighted Scaling (MWS)",
+  "authoritative": {
+    "policy": "mws_policy.json",
+    "policy_contract": "mws_policy_contract.py",
+    "macro_lens": "MWS_Macro_Lens_Addendum_v3_0_5.md"
+  },
+  "data": {
+    "historical_prices": "mws_ticker_history.csv",
+    "recent_performance": "mws_recent_performance.csv",
+    "run_results": "mws_run_results.csv",
+    "tracker_state": "mws_tracker.json"
+  },
+  "outputs": {
+    "equity_curve": "mws_equity_curve.png"
+  },
+  "execution": {
+    "python_runner": "mws_titanium_runner.py",
+    "daily_emailer": "daily-emailer/DailyEmailRunner.js"
+  },
+  "notes": "All paths are relative to repo root. Policy and contract files are authoritative unless explicitly overridden in chat."
+}
