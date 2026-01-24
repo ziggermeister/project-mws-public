@@ -1,0 +1,451 @@
+{
+  "meta": {
+    "policy_name": "MWS v2.6.15",
+    "policy_version": "v2.6.16+contract_safe+caps_v1",
+    "policy_family": "Titanium MWS",
+    "last_updated": "2026-01-24",
+    "notes": "Adds explicit per-ticker caps for AI/thematics and other inducted tickers; aligns L1 max_totals with attainable L2 caps; retains default reference-only contract for any ticker absent from ticker_constraints."
+  },
+  "governance": {
+    "reporting_baselines": {
+      "active_benchmarks": [
+        "VTI",
+        "QQQ"
+      ],
+      "corr_anchor_ticker": "VTI",
+      "corr_anchor_tickers": [
+        "VTI",
+        "QQQ"
+      ],
+      "chart_start_date": "2026-01-05"
+    },
+    "fixed_asset_prices": {
+      "CASH": 1.0,
+      "TREASURY_NOTE": 45000
+    },
+    "execution": {
+      "enforce_sells_first": true,
+      "max_turnover": 0.2,
+      "max_turnover_stress": 0.22
+    },
+    "lifecycle_rules": {
+      "review_days_default": 30,
+      "stages": {
+        "reference": {
+          "eligible_for_momentum": false,
+          "eligible_for_allocation": false,
+          "requires_review": false
+        },
+        "inducted": {
+          "eligible_for_momentum": true,
+          "eligible_for_allocation": true,
+          "requires_review": true
+        },
+        "activated": {
+          "eligible_for_momentum": false,
+          "eligible_for_allocation": false,
+          "requires_review": true
+        },
+        "overlay": {
+          "eligible_for_momentum": false,
+          "eligible_for_allocation": false,
+          "requires_review": true
+        }
+      },
+      "notes": "Canonical intent: only inducted is allocatable. Activated is evaluation-only (non-allocatable), overlay is managed separately, reference is benchmark-only."
+    },
+    "reference_tickers": [
+      "AGG"
+    ],
+    "defaults": {
+      "merge_order": [
+        "governance.defaults.ticker_constraints",
+        "ticker_constraints.<TICKER>"
+      ],
+      "ticker_constraints": {
+        "lifecycle": {
+          "stage": "reference"
+        },
+        "exclude_from_momentum": true,
+        "exclude_from_denominator": true,
+        "notes": "DEFAULT CONTRACT: Any ticker not explicitly present in ticker_constraints is reference-only (not held, not allocatable)."
+      },
+      "portfolio_accounting": {
+        "sleeve_exposure_source": "ticker_to_sleeves_only",
+        "unmapped_ticker_behavior": "exclude_from_sleeve_caps_and_floors",
+        "notes": "Contract: L1/L2 sleeve accounting uses only ticker_to_sleeves. Activated tickers intentionally omitted from ticker_to_sleeves do not affect sleeve cap/floor enforcement."
+      }
+    }
+  },
+  "allocation": {
+    "denominator_mode": "allocatable_ex_bucket_a",
+    "band_normalization": "percentile_in_band"
+  },
+  "cash_reserve": {
+    "target_cash_usd": 3800,
+    "enabled": false,
+    "notes": "Disabled: Bucket A is Treasuries-only; cash remains in Bucket B and may be idle."
+  },
+  "sleeves": {
+    "level1": {
+      "growth": {
+        "children": [
+          "ai_tech",
+          "biotech",
+          "core_equity"
+        ],
+        "max_total": 0.65
+      },
+      "defensive": {
+        "children": [
+          "real_assets",
+          "defense_energy"
+        ],
+        "max_total": 0.3
+      },
+      "speculative": {
+        "children": [
+          "crypto"
+        ],
+        "max_total": 0.05
+      }
+    },
+    "level2": {
+      "ai_tech": {
+        "floor": 0.22,
+        "cap": 0.32
+      },
+      "biotech": {
+        "floor": 0.04,
+        "cap": 0.12
+      },
+      "core_equity": {
+        "floor": 0.18,
+        "cap": 0.38
+      },
+      "real_assets": {
+        "floor": 0.08,
+        "cap": 0.16
+      },
+      "defense_energy": {
+        "floor": 0.06,
+        "cap": 0.14
+      },
+      "crypto": {
+        "floor": 0.0,
+        "cap": 0.05,
+        "stress_cap_total": 0.045
+      }
+    }
+  },
+  "ticker_to_sleeves": {
+    "VTI": {
+      "core_equity": 1.0
+    },
+    "VXUS": {
+      "core_equity": 1.0
+    },
+    "QQQM": {
+      "ai_tech": 0.7,
+      "core_equity": 0.3
+    },
+    "SOXQ": {
+      "ai_tech": 1.0
+    },
+    "CHAT": {
+      "ai_tech": 1.0
+    },
+    "DTCR": {
+      "ai_tech": 1.0
+    },
+    "BOTZ": {
+      "ai_tech": 1.0
+    },
+    "GRID": {
+      "ai_tech": 1.0
+    },
+    "XBI": {
+      "biotech": 1.0
+    },
+    "ITA": {
+      "defense_energy": 1.0
+    },
+    "XLE": {
+      "defense_energy": 1.0
+    },
+    "IAUM": {
+      "real_assets": 1.0
+    },
+    "SIVR": {
+      "real_assets": 1.0
+    }
+  },
+  "ticker_constraints": {
+    "VTI": {
+      "min_total": 0.1,
+      "max_total": 0.25,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "VXUS": {
+      "max_total": 0.15,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "QQQM": {
+      "max_total": 0.08,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "SOXQ": {
+      "max_total": 0.1,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "CHAT": {
+      "max_total": 0.08,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "DTCR": {
+      "max_total": 0.06,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "BOTZ": {
+      "max_total": 0.02,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "GRID": {
+      "max_total": 0.02,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "IAUM": {
+      "max_total": 0.08,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "SIVR": {
+      "min_total": 0.03,
+      "max_total": 0.08,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "XBI": {
+      "max_total": 0.06,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "ITA": {
+      "max_total": 0.1,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "XLE": {
+      "band_total": [
+        0.025,
+        0.035
+      ],
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "QTUM": {
+      "max_total": 0.02,
+      "exclude_from_momentum": true,
+      "exclude_from_denominator": true,
+      "lifecycle": {
+        "stage": "activated",
+        "benchmark_proxy": "QQQ",
+        "entered_stage_date": "2026-01-05",
+        "vol_90d_stress_cap": 0.045
+      }
+    },
+    "URNM": {
+      "max_total": 0.04,
+      "exclude_from_momentum": true,
+      "exclude_from_denominator": true,
+      "lifecycle": {
+        "stage": "activated",
+        "benchmark_proxy": "XLE",
+        "entered_stage_date": "2026-01-05"
+      }
+    },
+    "REMX": {
+      "max_total": 0.04,
+      "exclude_from_momentum": true,
+      "exclude_from_denominator": true,
+      "lifecycle": {
+        "stage": "activated",
+        "benchmark_proxy": "VTI",
+        "entered_stage_date": "2026-01-05"
+      }
+    },
+    "IBIT": {
+      "exclude_from_momentum": true,
+      "exclude_from_denominator": true,
+      "lifecycle": {
+        "stage": "activated",
+        "benchmark_proxy": "VTI",
+        "entered_stage_date": "2026-01-05",
+        "vol_90d_stress_cap": 0.045
+      }
+    },
+    "DBMF": {
+      "min_total": 0.03,
+      "max_total": 0.06,
+      "lifecycle": {
+        "stage": "overlay"
+      },
+      "is_overlay": true,
+      "exclude_from_momentum": true,
+      "exclude_from_denominator": true,
+      "overlay_name": "managed_futures_stabilizer"
+    },
+    "KMLM": {
+      "min_total": 0.03,
+      "max_total": 0.06,
+      "lifecycle": {
+        "stage": "overlay"
+      },
+      "is_overlay": true,
+      "exclude_from_momentum": true,
+      "exclude_from_denominator": true,
+      "overlay_name": "managed_futures_stabilizer"
+    },
+    "CASH": {
+      "lifecycle": {
+        "stage": "reference"
+      },
+      "exclude_from_momentum": true,
+      "exclude_from_denominator": false
+    },
+    "TREASURY_NOTE": {
+      "lifecycle": {
+        "stage": "reference"
+      },
+      "exclude_from_momentum": true,
+      "exclude_from_denominator": true
+    },
+    "QQQ": {
+      "lifecycle": {
+        "stage": "reference"
+      },
+      "exclude_from_momentum": true,
+      "exclude_from_denominator": true,
+      "notes": "Benchmark Proxy only (not held / not allocatable)"
+    }
+  },
+  "signals": {
+    "momentum_blend": {
+      "weights": {
+        "tr_12m": 0.45,
+        "slope_6m": 0.35,
+        "residual_3m": 0.2
+      }
+    },
+    "volatility_model": {
+      "method": "EWMA",
+      "lookback_days": 126
+    }
+  },
+  "overlays": {
+    "managed_futures_stabilizer": {
+      "enabled": true,
+      "tickers": [
+        "DBMF",
+        "KMLM"
+      ],
+      "band_total": [
+        0.06,
+        0.12
+      ],
+      "per_ticker_band": [
+        0.03,
+        0.06
+      ],
+      "target_split": {
+        "DBMF": 0.5,
+        "KMLM": 0.5
+      },
+      "exclude_from_momentum": true,
+      "exclude_from_denominator": true,
+      "rebalance_rule": "manual_or_band",
+      "notes": "Managed futures stabilizer sleeve."
+    }
+  },
+  "validators": {
+    "overlay_contract_enforced": {
+      "enabled": true,
+      "severity": "error",
+      "assertions": [
+        {
+          "overlay_ticker": "DBMF",
+          "exclude_from_momentum": true,
+          "exclude_from_denominator": true,
+          "cap_min": 0.03,
+          "cap_max": 0.06,
+          "scope": "total_portfolio"
+        },
+        {
+          "overlay_ticker": "KMLM",
+          "exclude_from_momentum": true,
+          "exclude_from_denominator": true,
+          "cap_min": 0.03,
+          "cap_max": 0.06,
+          "scope": "total_portfolio"
+        }
+      ]
+    },
+    "default_reference_contract": {
+      "enabled": true,
+      "severity": "error",
+      "notes": "Any ticker absent from ticker_constraints must be treated as reference-only via governance.defaults.ticker_constraints."
+    }
+  },
+  "definitions": {
+    "buckets": {
+      "bucket_a_protected_liquidity": {
+        "name": "Bucket A — Protected Liquidity",
+        "included_assets": "Treasuries only (CUSIP prefix 912)",
+        "excluded_assets": "Cash does not satisfy Bucket A",
+        "minimum_usd": 45000,
+        "included_types": [
+          "TREASURY_NOTE",
+          "TREASURY_BILL",
+          "TREASURY_BOND"
+        ],
+        "included_cusip_prefixes": [
+          "912"
+        ]
+      },
+      "bucket_b_deployable": {
+        "name": "Bucket B — Deployable Capital",
+        "included_assets": "All non-Treasury assets plus cash",
+        "notes": "Sole denominator for MWS allocation/optimization."
+      }
+    },
+    "denominators": {
+      "allocatable_ex_bucket_a": {
+        "exclude_bucket_a": true,
+        "exclude_cash": false,
+        "exclude_overlays": true,
+        "notes": "Bucket A excluded; cash included; overlays excluded."
+      }
+    }
+  }
+}

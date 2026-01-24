@@ -1,0 +1,44 @@
+{
+  "as_of_date": "2026-01-21",
+  "frequency": "DAILY",
+  "model": "MWS v2.6.16",
+  "project": "Investing",
+  "tickers": [
+    "VTI", "VXUS", "QQQM", "SOXQ", "CHAT", "BOTZ", "GRID", "DTCR", "ITA", "XLE",
+    "XBI", "IAUM", "SIVR", "REMX", "DBMF", "KMLM", "QTUM", "URNM", "IBIT",
+    "QQQ", "SOXX", "SRVR", "IBB", "GLD", "SLV", "PICK", "AGG"
+  ],
+  "notes": [
+    "Authoritative Gatekeeper: Tickers listed here are the only ones fetched.",
+    "The 'positions' metadata below is preserved for the Python runner's classification logic."
+  ],
+  "positions": [
+    { "ticker": "VTI", "classification": "core_equity", "type": "inductee" },
+    { "ticker": "VXUS", "classification": "core_equity", "type": "inductee" },
+    { "ticker": "QQQM", "classification": "ai_tech_growth", "type": "inductee" },
+    { "ticker": "SOXQ", "classification": "ai_tech_growth", "type": "inductee" },
+    { "ticker": "CHAT", "classification": "ai_tech_growth", "type": "inductee" },
+    { "ticker": "BOTZ", "classification": "ai_tech_growth", "type": "inductee" },
+    { "ticker": "GRID", "classification": "ai_tech_growth", "type": "reference" },
+    { "ticker": "DTCR", "classification": "ai_tech_growth", "type": "inductee" },
+    { "ticker": "ITA", "classification": "defense_energy", "type": "inductee" },
+    { "ticker": "XLE", "classification": "defense_energy", "type": "reference" },
+    { "ticker": "XBI", "classification": "biotech", "type": "inductee" },
+    { "ticker": "IAUM", "classification": "real_assets", "type": "inductee" },
+    { "ticker": "SIVR", "classification": "real_assets", "type": "inductee" },
+    { "ticker": "REMX", "classification": "real_assets", "type": "inductee" },
+    { "ticker": "DBMF", "classification": "overlay_diversifier", "type": "inductee" },
+    { "ticker": "KMLM", "classification": "overlay_diversifier", "type": "inductee" },
+    { "ticker": "QTUM", "classification": "ai_tech_growth", "type": "trial" },
+    { "ticker": "URNM", "classification": "real_assets", "type": "trial" },
+    { "ticker": "IBIT", "classification": "crypto", "type": "trial" },
+    { "ticker": "QQQ", "classification": "reference", "type": "reference" },
+    { "ticker": "SOXX", "classification": "reference", "type": "reference" },
+    { "ticker": "SRVR", "classification": "reference", "type": "reference" },
+    { "ticker": "IBB", "classification": "reference", "type": "reference" },
+    { "ticker": "GLD", "classification": "reference", "type": "reference" },
+    { "ticker": "SLV", "classification": "reference", "type": "reference" },
+    { "ticker": "PICK", "classification": "reference", "type": "reference" },
+    { "ticker": "AGG", "classification": "reference", "type": "reference" }
+  ]
+}
