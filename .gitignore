@@ -9,4 +9,3 @@ temp/
 
 # Common secret patterns
 *.env
-daily-emailer/.clasp.json
