@@ -1,0 +1,11 @@
+# OS / junk
+.DS_Store
+
+# Never publish scratch
+temp/
+
+# Avoid publishing holdings files
+*.gsheet
+
+# Common secret patterns
+*.env
