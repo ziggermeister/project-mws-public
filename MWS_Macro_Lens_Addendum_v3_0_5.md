@@ -1,113 +1,216 @@
-# Titanium MWS v3.0.5 Master Governance File (2026-01-16)
-
-**Objective:** Maintain a robust, momentum-driven portfolio with strictly enforced risk tiers, multi-asset trend stabilizers, and a formal "Ghost vs. Citizen" lifecycle for new assets.
-
-## 0. Stabilizer Sleeve Design
-* **Objective:** Provide *sellable, non-correlated liquidity* during equity stress events.
-* **Rules:** Stabilizer sleeve is **excluded from momentum ranking** and **excluded from momentum sleeve denominators**.
-* **Instruments:**
-    * **DBMF** (CTA replication / smoother profile)
-    * **KMLM** (rules-based trend / higher convexity)
-* **Combined stabilizer band:** **6%–12%** (Allows for drift).
-* **Per-ticker band:** **3%–6%** each (Max 6% prevents nuisance rebalancing).
-* **Initial target:** **~5% DBMF / ~5% KMLM** (10% total).
-* **Execution rules (mechanical):**
-    * Outside stress: rebalance only if either holding breaches its **3%–6%** band.
-    * During equity stress: Manually shift Policy to "Gear 2" (Target 7% KMLM / 3% DBMF).
+# Momentum-Weighted Scaling (MWS) v2.6.16
+## Macro Lens & Governance Addendum
+**As-of:** 2026-01-24  
+**Authoritative Source:** mws_policy.json  
+**Role:** Advisory / explanatory only. Policy JSON is binding.
 
 ---
 
-## 1. Inflation / Rates / Duration
-Watch CPI/PCE, real yields, curve shape, and Fed guidance. Rising real yields pressure long-duration growth; falling yields support it. Rate shocks can break cross-asset correlations.
+## 0. Scope & Precedence
+
+This document explains how the Momentum-Weighted Scaling (MWS) system is intended to operate **given the current policy configuration**.  
+If any conflict exists:
+
+1. `mws_policy.json` is authoritative  
+2. Execution code is authoritative over prose  
+3. This document provides interpretation and macro context only
 
 ---
 
-## 2. Credit / Liquidity Conditions
-Watch spreads and liquidity. Tight liquidity punishes high beta/thematic ETFs.
+## 1. Portfolio Architecture
+
+### Bucket A — Protected Capital
+- Contents:
+  - `TREASURY_NOTE` (fixed price: **$45,000**)
+- Characteristics:
+  - Excluded from momentum
+  - Excluded from allocatable denominator
+  - Serves as drawdown buffer and liquidity anchor
+- Enforcement:
+  - Hard minimum enforced by policy
+  - Not eligible for trade funding
+
+### Bucket B — Deployable Capital
+- Contents:
+  - All inducted assets
+  - Activated assets (held but non-allocatable)
+  - Cash
+- Characteristics:
+  - Subject to sleeve caps, floors, and turnover limits
+  - Cash is included in the denominator but excluded from momentum
 
 ---
 
-## 3. Equity Breadth / Leadership
-Watch breadth and leadership concentration. Narrow breadth can mask fragility even when momentum looks strong.
+## 2. Asset Lifecycle & Eligibility (Policy-Exact)
+
+| Lifecycle State | Allocatable | Momentum Eligible | Counts Toward Sleeves |
+|-----------------|-------------|-------------------|-----------------------|
+| reference       | No          | No                | No                    |
+| activated       | No          | No                | No                    |
+| inducted        | Yes         | Yes               | Yes                   |
+| overlay         | No          | No                | No                    |
+
+**Key rules**
+- Only **inducted** tickers participate in optimization
+- Activated tickers are live pilots:
+  - No top-ups allowed
+  - Trimmed only if explicit caps are breached
+- Reference tickers are informational only
 
 ---
 
-## 4. Commodities / Energy / Supply Shocks
-Watch oil shocks, disruptions, and OPEC dynamics. Second-order effects flow through inflation expectations and policy tightening risk.
+## 3. Momentum Engine
+
+Momentum is computed **only on inducted tickers** using:
+
+- 12-month total return (TR12)
+- 6-month trend slope
+- 3-month residual vs VTI
+
+Weights:
+- TR12: 45%
+- Slope: 35%
+- Residual: 20%
+
+Normalization:
+- Percentile-based within the inducted universe
+
+Momentum determines **relative desirability**, not absolute allocation.
 
 ---
 
-## 5. USD / FX / EM Risk
-Watch Dollar Index and EM stress. Strong USD often pressures EM and some commodity complexes.
+## 4. Risk & Correlation Governance
+
+- Volatility: EWMA (126d) used internally
+- Correlation anchors: VTI, QQQ
+- Used to:
+  - Penalize clustering
+  - Select trim candidates when sleeves must shrink
+- Momentum does not override risk constraints
 
 ---
 
-## 6. AI / Semis Cycle
-Watch AI capex and the semiconductor cycle. Momentum can persist; reversals can be abrupt.
+## 5. Sleeve Structure
+
+### Core Equity
+- Broad market exposure (e.g. VTI, VXUS)
+- Governed by global caps and floors
+
+### AI / Technology
+- Examples: SOXQ, BOTZ, CHAT
+- High beta, liquidity-sensitive
+
+### Biotech
+- XBI
+- Explicit sleeve floor enforced
+
+### Real Assets
+- Examples: SIVR, IAUM
+- Governed by:
+  - Sleeve cap (16%)
+  - Per-ticker caps
+- When trimming is mandatory, selection is risk-driven
+
+### Defense / Energy
+- Examples: ITA, XLE
+- XLE has explicit band floor (2.5%)
+
+### Stabilizers (Trend / CTA)
+- DBMF, KMLM
+- Rules:
+  - Excluded from momentum
+  - Excluded from denominator
+  - Combined band: 6%–12%
+  - Per-ticker band: 3%–6%
+- Purpose:
+  - Crisis convexity
+  - Sellable liquidity
+- Rebalanced manually or on band breach only
 
 ---
 
-## 7. Crypto Regime
-Crypto correlations can change quickly; treat as its own regime. **IBIT remains a ranked discrete asset exposure** under policy floors/caps.
+## 6. Crypto (Special Regime)
+
+- IBIT
+- Lifecycle: activated
+- Excluded from momentum and denominator
+- Governed by explicit caps and volatility stress rules
+- Not part of core optimization
 
 ---
 
-## 8. Geopolitics / Defense
-Markets typically transmit geopolitics through energy, inflation expectations, and risk sentiment. Defense reacts more to sustained posture/procurement than single headlines.
+## 7. Cash Governance & Funding
+
+- Cash:
+  - Included in allocatable denominator
+  - Excluded from momentum
+- Does not:
+  - Satisfy sleeve floors
+  - Prevent hard cap enforcement
+
+### Funding Invariant (Execution Layer)
+
+```
+cash_used + total_sells == total_buys
+cash_used = min(cash_available, total_buys)
+```
+
+Implications:
+- Residual cash is always used before generating sells
+- If cash fully funds buys, no sells are required
+- “Sells-first” refers to execution ordering only
 
 ---
 
-## 9. SEPP Liquidity Governance (Exact Thresholds)
-**Objective:** Maintain sufficient SEPP liability coverage using Bucket A (Treasuries-only), without relying on discretionary forced sales.
+## 8. Two-Stage Trim Logic
 
-**Bucket A definition:** U.S. Treasuries only (CUSIP prefix **912***).
+### Stage 1 — Target Convergence (Mandatory)
+Triggered when:
+- A sleeve exceeds target
+- A cap is breached
 
-**Exact thresholds:**
-* **ERROR (violation):** Bucket A Liquidity < **$45,000**
-* **WARNING:** Bucket A Liquidity < **$90,000**
+Selection priority:
+1. Risk contribution
+2. Volatility
+3. Correlation clustering
+
+Momentum does not protect assets here.
+
+### Stage 2 — Funding Relaxation (Optional)
+Triggered when:
+- Cash reduces required sells
+
+Relaxation priority:
+- Lowest momentum first
+- Floor-bound assets are never relaxed
 
 ---
 
-## 10. Overlay Assets: DBMF/KMLM Treatment
-**Classification:** Overlays / Multi-Asset Strategy ETFs.
-* **Momentum treatment:** Excluded from MWS momentum ranking.
-* **Interaction:** DBMF/KMLM are **multi-asset strategy wrappers**, separate from discrete assets like IAUM/IBIT.
+## 9. Turnover Governance
+
+- Normal max turnover: 20%
+- Stress max turnover: 22%
+- Includes all buys and sells
+- Enforced at execution time
 
 ---
 
-## 11. Macro Awareness Control (Required Pre-Run Step)
-Before any MWS run is interpreted or acted upon, the operator must review macro context to interpret risk and qualify confidence. Macro context must **never** override momentum rankings or modify caps/floors mid-run.
+## 10. Review Cadence (Advisory)
+
+- Weekly: Momentum diagnostics
+- Monthly: Lifecycle review
+- Quarterly: Macro lens review
 
 ---
 
-## 12. Ticker Lifecycle & Admission Protocol (v3.0.5)
+## 11. Design Philosophy (Non-Binding)
 
-**Objective:** Enforce a strict "Up or Out" progression. Prevent portfolio bloat by treating new assets as "Ghosts" until they earn "Citizen" status.
+- Momentum selects what is attractive
+- Risk controls how much is allowed
+- Cash determines what is no longer required
+- Policy is deterministic; macro is explanatory
 
-### **Stage 1: Experimental (The Sandbox)**
-* **Role:** Watchlist / Paper Trade.
-* **Capital:** 0% – 1%.
-* **Governance:** **Ghost.** Excluded from Sleeve Floors & Caps.
-* **Kill Rule:** 90 Days. If momentum/thesis fails, delete.
+---
 
-### **Stage 2: Activated (Proof of Work)**
-* **Role:** Live Pilot. Skin in the game.
-* **Capital:** 2.0% – 2.5% (Strict).
-* **Governance:** **Ghost.** Excluded from Sleeve Floors & Caps.
-* **Drift:** Excess > 2.5% is trimmed at rebalance. No top-ups allowed.
-* **Current Status:**
-    * **URNM:** **ACTIVATED** (Stage 2).
-    * **QTUM:** **ACTIVATED** (Stage 2).
-    * **IBIT:** **ACTIVATED** (Permanent Pilot).
+**End of Document**
 
-### **Stage 3: Probation (The Gauntlet)**
-* **Role:** Full Allocation on Short Leash.
-* **Capital:** Full Target (e.g., 4%).
-* **Governance:** **Citizen.** Counts toward Sleeve Floors & Caps.
-* **Review:** Monthly. Hard breach = Demotion.
-* **Current Status:** **XBI, BOTZ, CHAT.**
-
-### **Stage 4: Inductee (The Core)**
-* **Role:** Structural Infrastructure.
-* **Governance:** **Citizen.** Managed purely by MWS Math.
-* **Current Status:** **VTI, VXUS, QQQM, SOXQ, ITA, XLE, IAUM, SIVR, GRID, DTCR.**
