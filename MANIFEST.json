@@ -3,7 +3,7 @@
   "authoritative": {
     "policy": "mws_policy.json",
     "policy_contract": "mws_policy_contract.py",
-    "macro_lens": "MWS_Macro_Lens_Addendum_v3_0_5.md"
+    "macro_lens": "mws_macro.md""
   },
   "data": {
     "historical_prices": "mws_ticker_history.csv",
