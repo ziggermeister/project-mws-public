@@ -1,46 +1,34 @@
 /**
  * ============================================================
- * TITANIUM MWS: UNIFIED RUNNER (v13.6) + 2-PANEL DASHBOARD
+ * TITANIUM MWS (with CLASP): UNIFIED RUNNER (v13.6) + 2-PANEL DASHBOARD
  * ============================================================
- * Changes embedded:
- *  - 2-panel dashboard charts (performance + cumulative excess return)
- *  - Email embeds both charts (stacked)
- *  - Runner now calls generateDashboardCharts2Panel(policy)
+ * Design rule:
+ *  - CONFIG is DEFAULTS ONLY.
+ *  - All runtime values MUST come from C = getC_() (CONFIG merged with CONFIG_PVT.json).
  *
- * Fixes vs v13.5 (retained):
- * 1) NO SpreadsheetApp.create() anywhere (avoids daily create quota).
- *    - Reuses CONFIG.SCRATCH_SHEET_ID for BOTH:
- *      a) Live batch prices
- *      b) Backfill chunk GOOGLEFINANCE pulls (single-sheet reuse)
+ * Your private config file is looked up via Script Properties key:
+ *   MWS_PRIVATE_CONFIG_FILE_ID
  *
- * 2) Performance log (Drive CSV) is now:
- *    - schema-stable (no blank columns)
- *    - non-truncating (never drops future rows)
- *    - upsert-by-date (append if missing, replace if present)
- *    - recalculates derived columns with fixed header width
- *
- * 3) Email table layout preserved (two-row header) + compact cells.
+ * You provided:
+ *   MWS_PRIVATE_CONFIG_FILE_ID = "1V4ovKySo59hevMcXuvu5dGu66xPAvP8R"
+ * ============================================================
  */
 
 const CONFIG = {
+  // Safe fallback (will be overridden by CONFIG_PVT.json)
   EMAIL_RECIPIENT: "bhatnagar.vivek@gmail.com",
 
-  POLICY_FILE_ID: "1E-ReSc1HmjvFM1PAbTz_uFEq3JnYdC7P",
-  STATE_FILE_ID: "1Fuc-nAxuhopwvhDQYO7qamcK4ra5Tu0l",
-  HIST_FILE_ID: "14a897FtVg5mlte98EUd2blytgmwQOt2s",
-  HOLDINGS_FILE_ID: "1LtcfZpnsnOnj4HimL6S9g0c8itJRKtOb",
-
-  // Updated per your instruction
-  LOG_FILE_ID: "1jX3x1XJTD4HWYbWl2TZ-1d-qABJa_ST9",
-
-  // IMPORTANT: set this to your existing scratch spreadsheet ID (already have it)
-  // This must be a Google Sheets file you own.
-  SCRATCH_SHEET_ID: "1e1G75w_Qd0QDhD_Sn4IQApKLHrX3RWmnAa2Pa0jIt6A",
+  // IDs are expected from CONFIG_PVT.json; keep null defaults here.
+  POLICY_FILE_ID: null,
+  STATE_FILE_ID: null,
+  HIST_FILE_ID: null,
+  LOG_FILE_ID: null,
+  HOLDINGS_FILE_ID: null,
+  SCRATCH_SHEET_ID: null,
   SCRATCH_SHEET_NAME: "TMP",
 
+  // Runtime
   RUNTIME_BUDGET_MS: 5 * 60 * 1000,
-
-  // GOOGLEFINANCE is slow; keep conservative sleeps
   GOOGLEFINANCE_SLEEP_MS: 2500,
 
   MIN_BACKFILL_DAYS: 366,
@@ -48,32 +36,68 @@ const CONFIG = {
 
   REVIEW_DAYS: 30,
 
-  // You asked: alpha/corr vs VTI (broad US) and QQQ (Nasdaq)
+  // Defaults (CONFIG_PVT.json does NOT need to define these)
   BASELINES: ["VTI", "QQQ"],
   MIN_CORR_RETURNS: 6,
-
-  // Corr “red flag” threshold (unchanged behavior, but now clean display)
   CORR_ALERT_THRESHOLD: 0.85
 };
 
+/**
+ * One-time initializer (optional): sets your private config file ID into Script Properties.
+ * Run this once manually in Apps Script to store the file ID you provided.
+ */
+function initPrivateConfigFileId() {
+  const PRIVATE_ID = "1V4ovKySo59hevMcXuvu5dGu66xPAvP8R";
+  PropertiesService.getScriptProperties().setProperty("MWS_PRIVATE_CONFIG_FILE_ID", PRIVATE_ID);
+  console.log(`[INIT] Set MWS_PRIVATE_CONFIG_FILE_ID=${PRIVATE_ID}`);
+}
+
+function loadConfig_() {
+  const fileId = PropertiesService.getScriptProperties().getProperty("MWS_PRIVATE_CONFIG_FILE_ID");
+  if (!fileId) throw new Error("Missing Script Property: MWS_PRIVATE_CONFIG_FILE_ID");
+  const file = DriveApp.getFileById(fileId);
+  return JSON.parse(file.getBlob().getDataAsString());
+}
+
+let CACHED_CFG = null;
+
+function getC_() {
+  if (CACHED_CFG) return CACHED_CFG;
+  const cfg = loadConfig_(); // your private JSON
+  CACHED_CFG = Object.assign({}, CONFIG, cfg);
+  return CACHED_CFG;
+}
+
+/**
+ * ============================================================
+ * ENTRYPOINT
+ * ============================================================
+ */
 function runDailyRoutine() {
   const START = Date.now();
   const TZ = Session.getScriptTimeZone();
   const TODAY = Utilities.formatDate(new Date(), TZ, "yyyy-MM-dd");
   const alerts = [];
 
-  console.log(`[START] Titanium Unified v13.6 | Date=${TODAY}`);
+  let C = null;
 
   try {
-    const policy = JSON.parse(DriveApp.getFileById(CONFIG.POLICY_FILE_ID).getBlob().getDataAsString());
-    const state = JSON.parse(DriveApp.getFileById(CONFIG.STATE_FILE_ID).getBlob().getDataAsString());
+    C = getC_();
+    console.log(`[START] Titanium Unified v13.6 | Date=${TODAY}`);
+
+    // Basic config sanity (fail fast with clear errors)
+    assertConfig_(C);
+
+    const policy = JSON.parse(DriveApp.getFileById(C.POLICY_FILE_ID).getBlob().getDataAsString());
+    const state = JSON.parse(DriveApp.getFileById(C.STATE_FILE_ID).getBlob().getDataAsString());
 
     console.log(`[POLICY] name=${policy?.meta?.policy_name || "N/A"} version=${policy?.meta?.policy_version || "N/A"}`);
 
     // Universe
-    const trackerTickers = normalizeInventory(state);
-    const policyRequired = getPolicyRequiredTickers(policy);
-    CONFIG.BASELINES.forEach(b => policyRequired.add(String(b).trim().toUpperCase()));
+    const trackerTickers = normalizeInventory_(state);
+    const policyRequired = getPolicyRequiredTickers_(policy);
+
+    (C.BASELINES || []).forEach(b => policyRequired.add(String(b).trim().toUpperCase()));
 
     const requiredSet = new Set([...trackerTickers, ...policyRequired]);
     const requiredTickers = [...requiredSet].sort();
@@ -85,26 +109,41 @@ function runDailyRoutine() {
     console.log(`[UNIVERSE] tracker=${trackerTickers.length}, policy_required=${policyRequired.size}, total_required=${requiredTickers.length}`);
 
     // HIST maintenance (purge + backfill + today)
-    const sync = updateHistDatabase(TODAY, requiredTickers, policyRequired, TZ, START);
+    const sync = updateHistDatabase_(TODAY, requiredTickers, policyRequired, TZ, START);
     if (sync.purgedTickers.length) alerts.push(`PURGE: Removed rows for: ${sync.purgedTickers.join(", ")}`);
     if (sync.unfinishedTickers.length) alerts.push(`SYNC: Unfinished backfill for ${sync.unfinishedTickers.length} tickers (will resume next run).`);
 
     // Snapshot + perf log update
-    const snapshot = processSnapshot(policy, TZ, alerts);
+    const snapshot = processSnapshot_(policy, TZ, alerts);
 
     // Charts from perf log (2 panels)
     let charts = null;
-    try { charts = generateDashboardCharts2Panel(policy); }
-    catch (e) { console.error(`[CHART] Skipped: ${e.message}`); alerts.push(`CHART: ${e.message}`); }
+    try {
+      charts = generateDashboardCharts2Panel_(policy);
+    } catch (e) {
+      console.error(`[CHART] Skipped: ${e.message}`);
+      alerts.push(`CHART: ${e.message}`);
+    }
 
     // Email
-    sendDailyEmail(snapshot, charts, TODAY, alerts);
+    sendDailyEmail_(snapshot, charts, TODAY, alerts);
 
     console.log(`[FINISH] OK. Elapsed=${((Date.now() - START) / 1000).toFixed(1)}s`);
   } catch (e) {
-    console.error(`[FATAL] ${e.stack}`);
-    MailApp.sendEmail(CONFIG.EMAIL_RECIPIENT, "⚠️ MWS FATAL ERROR", e.stack);
+    const stack = e && e.stack ? e.stack : String(e);
+    console.error(`[FATAL] ${stack}`);
+
+    // Robust fatal email: use merged config if available, else CONFIG fallback
+    const to = (C && C.EMAIL_RECIPIENT) ? C.EMAIL_RECIPIENT : CONFIG.EMAIL_RECIPIENT;
+    MailApp.sendEmail(to, "⚠️ MWS FATAL ERROR", stack);
   }
+}
+
+function assertConfig_(C) {
+  const req = ["POLICY_FILE_ID", "STATE_FILE_ID", "HIST_FILE_ID", "LOG_FILE_ID", "HOLDINGS_FILE_ID", "SCRATCH_SHEET_ID", "SCRATCH_SHEET_NAME", "EMAIL_RECIPIENT"];
+  const missing = req.filter(k => !C[k] || String(C[k]).includes("PUT_YOUR"));
+  if (missing.length) throw new Error(`Missing required config keys in CONFIG_PVT.json: ${missing.join(", ")}`);
+  if (!Array.isArray(C.BASELINES) || C.BASELINES.length < 1) throw new Error("C.BASELINES must be a non-empty array (e.g., [\"VTI\",\"QQQ\"]).");
 }
 
 /**
@@ -112,7 +151,7 @@ function runDailyRoutine() {
  * POLICY REQUIRED TICKERS
  * ============================================================
  */
-function getPolicyRequiredTickers(policy) {
+function getPolicyRequiredTickers_(policy) {
   const set = new Set();
 
   const baselines = policy?.governance?.reporting_baselines || {};
@@ -137,21 +176,22 @@ function getPolicyRequiredTickers(policy) {
  * ============================================================
  * HIST DATABASE ENGINE (PURGE + BACKFILL + TODAY)
  * ============================================================
- * Major change: no temp spreadsheet creation. We reuse SCRATCH sheet.
+ * No SpreadsheetApp.create(). Reuses scratch sheet.
  */
-function updateHistDatabase(today, requiredTickers, policyRequiredSet, tz, startTime) {
+function updateHistDatabase_(today, requiredTickers, policyRequiredSet, tz, startTime) {
   const props = PropertiesService.getScriptProperties();
+  const C = getC_();
 
-  const csvFile = DriveApp.getFileById(CONFIG.HIST_FILE_ID);
+  const csvFile = DriveApp.getFileById(C.HIST_FILE_ID);
   const raw = csvFile.getBlob().getDataAsString().replace(/^\ufeff/g, "").trim();
   const parsed = Utilities.parseCsv(raw);
   if (!parsed || parsed.length < 2) throw new Error("HIST CSV empty or malformed.");
 
   const header = parsed[0];
-  const col = buildColumnMap(header);
+  const col = buildColumnMap_(header);
   col.width = header.length;
 
-  let rows = parsed.slice(1).map(r => normalizeRowWidth(r, col.width));
+  let rows = parsed.slice(1).map(r => normalizeRowWidth_(r, col.width));
 
   // Existing tickers in HIST
   const existingTickers = new Set(
@@ -161,9 +201,9 @@ function updateHistDatabase(today, requiredTickers, policyRequiredSet, tz, start
   const requiredSet = new Set(requiredTickers);
   const purgedTickers = [...existingTickers].filter(t => !requiredSet.has(t));
 
-  // Purge tickers not required (safe: policyRequired already included in requiredSet)
+  // Purge tickers not required
   if (purgedTickers.length) {
-    console.log(`[PURGE] Tickers removed from required set: ${purgedTickers.join(", ")}`);
+    console.log(`[PURGE] Removing tickers from HIST: ${purgedTickers.join(", ")}`);
     rows = rows.filter(r => requiredSet.has(String(r[col.ticker]).trim().toUpperCase()));
     purgedTickers.forEach(t => props.deleteProperty(`CURSOR_${t}`));
   }
@@ -187,15 +227,15 @@ function updateHistDatabase(today, requiredTickers, policyRequiredSet, tz, start
     if (!bounds[t].max || d > bounds[t].max) bounds[t].max = d;
   });
 
-  const requiredStart = addDaysYMD(today, -CONFIG.MIN_BACKFILL_DAYS, tz);
+  const requiredStart = addDaysYMD_(today, -Number(C.MIN_BACKFILL_DAYS), tz);
   const unfinishedTickers = new Set();
 
-  // Backfill: single-sheet reuse, one chunk per run per ticker (resumable)
   const scratch = openScratch_();
   const sh = ensureScratchSheet_(scratch);
 
+  // Backfill: one chunk per ticker per run
   for (const t of requiredTickers) {
-    if (Date.now() - startTime > CONFIG.RUNTIME_BUDGET_MS) { unfinishedTickers.add(t); continue; }
+    if (Date.now() - startTime > Number(C.RUNTIME_BUDGET_MS)) { unfinishedTickers.add(t); continue; }
 
     const minHave = bounds[t]?.min;
     const needsYear = (!minHave || minHave > requiredStart);
@@ -206,12 +246,12 @@ function updateHistDatabase(today, requiredTickers, policyRequiredSet, tz, start
 
     let chunkEnd;
     if (cursor && /^\d{4}-\d{2}-\d{2}$/.test(cursor)) chunkEnd = cursor;
-    else if (minHave && /^\d{4}-\d{2}-\d{2}$/.test(minHave)) chunkEnd = addDaysYMD(minHave, -1, tz);
-    else chunkEnd = addDaysYMD(today, -1, tz);
+    else if (minHave && /^\d{4}-\d{2}-\d{2}$/.test(minHave)) chunkEnd = addDaysYMD_(minHave, -1, tz);
+    else chunkEnd = addDaysYMD_(today, -1, tz);
 
     if (chunkEnd < requiredStart) { props.deleteProperty(cursorKey); continue; }
 
-    const tentativeStart = addDaysYMD(chunkEnd, -(CONFIG.CHUNK_DAYS - 1), tz);
+    const tentativeStart = addDaysYMD_(chunkEnd, -(Number(C.CHUNK_DAYS) - 1), tz);
     const chunkStart = (tentativeStart < requiredStart) ? requiredStart : tentativeStart;
 
     console.log(`[BACKFILL] ${t} request ${chunkStart}..${chunkEnd} (minHave=${minHave || "NONE"} requiredStart=${requiredStart})`);
@@ -219,12 +259,9 @@ function updateHistDatabase(today, requiredTickers, policyRequiredSet, tz, start
     const ingested = ingestBackfillChunk_(sh, t, chunkStart, chunkEnd, requiredStart, today, tz, map, col);
     console.log(`[BACKFILL] ${t} ingested=${ingested} rows`);
 
-    // Cursor moves backward
-    const nextEnd = addDaysYMD(chunkStart, -1, tz);
+    const nextEnd = addDaysYMD_(chunkStart, -1, tz);
     if (nextEnd >= requiredStart) props.setProperty(cursorKey, nextEnd);
     else props.deleteProperty(cursorKey);
-
-    // Only do ONE chunk per ticker per run (keeps runtime bounded)
   }
 
   // Live prices for all required tickers (single-sheet batch)
@@ -243,7 +280,6 @@ function updateHistDatabase(today, requiredTickers, policyRequiredSet, tz, start
     }
   });
 
-  // Write back stable CSV
   const finalRows = Object.values(map).sort((a, b) => {
     const da = String(a[col.date]);
     const db = String(b[col.date]);
@@ -252,22 +288,20 @@ function updateHistDatabase(today, requiredTickers, policyRequiredSet, tz, start
     return da.localeCompare(db) || ta.localeCompare(tb);
   });
 
-  csvFile.setContent([header].concat(finalRows).map(r => normalizeRowWidth(r, col.width).join(",")).join("\n"));
+  csvFile.setContent([header].concat(finalRows).map(r => normalizeRowWidth_(r, col.width).join(",")).join("\n"));
 
   return { purgedTickers, unfinishedTickers: Array.from(unfinishedTickers) };
 }
 
-/**
- * Pull one GOOGLEFINANCE chunk using the scratch sheet, ingest into HIST map, then clear.
- */
 function ingestBackfillChunk_(sheet, ticker, chunkStart, chunkEnd, requiredStart, today, tz, map, col) {
+  const C = getC_();
   sheet.clearContents();
   sheet.getRange("A1").setFormula(
     `=GOOGLEFINANCE("${ticker}","price",DATEVALUE("${chunkStart}"),DATEVALUE("${chunkEnd}"))`
   );
 
   SpreadsheetApp.flush();
-  Utilities.sleep(CONFIG.GOOGLEFINANCE_SLEEP_MS);
+  Utilities.sleep(Number(C.GOOGLEFINANCE_SLEEP_MS));
 
   const values = sheet.getDataRange().getValues();
   if (!values || values.length < 2) return 0;
@@ -299,17 +333,19 @@ function ingestBackfillChunk_(sheet, ticker, chunkStart, chunkEnd, requiredStart
  * SNAPSHOT + ANALYTICS
  * ============================================================
  */
-function processSnapshot(policy, tz, alerts) {
-  const histRaw = DriveApp.getFileById(CONFIG.HIST_FILE_ID).getBlob().getDataAsString().replace(/^\ufeff/g, "").trim();
+function processSnapshot_(policy, tz, alerts) {
+  const C = getC_();
+
+  const histRaw = DriveApp.getFileById(C.HIST_FILE_ID).getBlob().getDataAsString().replace(/^\ufeff/g, "").trim();
   const hist = Utilities.parseCsv(histRaw);
-  const col = buildColumnMap(hist[0]);
+  const col = buildColumnMap_(hist[0]);
   const rows = hist.slice(1);
 
   const allDates = [...new Set(rows.map(r => String(r[col.date])))]
     .filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d))
     .sort();
-  if (!allDates.length) throw new Error("HIST has no valid date rows.");
 
+  if (!allDates.length) throw new Error("HIST has no valid date rows.");
   const asOfDate = allDates[allDates.length - 1];
 
   // Price map
@@ -323,7 +359,7 @@ function processSnapshot(policy, tz, alerts) {
   });
 
   // Portfolio total from holdings
-  const holdings = Utilities.parseCsv(DriveApp.getFileById(CONFIG.HOLDINGS_FILE_ID).getBlob().getDataAsString()).slice(1);
+  const holdings = Utilities.parseCsv(DriveApp.getFileById(C.HOLDINGS_FILE_ID).getBlob().getDataAsString()).slice(1);
   let totalVal = 0;
 
   holdings.forEach(r => {
@@ -334,7 +370,7 @@ function processSnapshot(policy, tz, alerts) {
     totalVal += qty * px;
   });
 
-  // Ghost analytics for activated tickers vs VTI + QQQ
+  // Ghost analytics for activated tickers vs baselines
   const tc = policy?.ticker_constraints || {};
   const ghosts = [];
 
@@ -346,16 +382,16 @@ function processSnapshot(policy, tz, alerts) {
     const startStr = String(lc.entered_stage_date || "").trim();
 
     const baselineResults = {};
-    CONFIG.BASELINES.forEach(b => {
-      baselineResults[b] = calculateAlphaAndCorrVsBenchmark(rows, col, T, b, startStr);
+    (C.BASELINES || []).forEach(b => {
+      baselineResults[b] = calculateAlphaAndCorrVsBenchmark_(rows, col, T, b, startStr);
     });
 
     let status = "ACTIVE";
-    const daysActive = diffDaysYMD(asOfDate, startStr);
+    const daysActive = diffDaysYMD_(asOfDate, startStr);
     if (daysActive === null) status = "⚠️ BAD POLICY DATE";
     else if (daysActive < 14) status = "🆕 ONBOARDING";
     else {
-      const daysLeft = CONFIG.REVIEW_DAYS - daysActive;
+      const daysLeft = Number(C.REVIEW_DAYS) - daysActive;
       status = (daysLeft < 0) ? "⚠️ REVIEW DUE" : `⏳ REVIEW IN ${daysLeft}d`;
     }
 
@@ -368,7 +404,7 @@ function processSnapshot(policy, tz, alerts) {
     });
   });
 
-  // Performance log update (stable schema + no truncation)
+  // Performance log update
   try {
     const bl = policy?.governance?.reporting_baselines || {};
     const benches = (bl.active_benchmarks || []).map(x => String(x).trim().toUpperCase());
@@ -390,12 +426,8 @@ function processSnapshot(policy, tz, alerts) {
   return { asOfDate, totalVal, ghosts };
 }
 
-/**
- * Alpha = (TR_ticker - TR_benchmark) since policy start, aligned on shared dates
- * Corr  = Pearson correlation of DAILY RETURNS (ticker vs benchmark), aligned on shared dates
- * Display: no (n=...), no "today()", no extra date columns.
- */
-function calculateAlphaAndCorrVsBenchmark(rows, col, ticker, bench, startStr) {
+function calculateAlphaAndCorrVsBenchmark_(rows, col, ticker, bench, startStr) {
+  const C = getC_();
   const T = String(ticker).trim().toUpperCase();
   const B = String(bench).trim().toUpperCase();
 
@@ -420,7 +452,7 @@ function calculateAlphaAndCorrVsBenchmark(rows, col, ticker, bench, startStr) {
 
   if (tMap.size < 2 || bMap.size < 2) return { ok: false, err: "NO_DATA", policyStart: startStr, bench: B };
 
-  const dates = intersectSortedKeys(tMap, bMap);
+  const dates = intersectSortedKeys_(tMap, bMap);
   if (dates.length < 2) return { ok: false, err: "GAP", policyStart: startStr, bench: B };
 
   const d0 = dates[0];
@@ -447,13 +479,13 @@ function calculateAlphaAndCorrVsBenchmark(rows, col, ticker, bench, startStr) {
     y.push((bc / bp) - 1);
   }
 
-  if (x.length >= (CONFIG.MIN_CORR_RETURNS || 6)) {
-    corrNum = pearson(x, y);
+  if (x.length >= Number(C.MIN_CORR_RETURNS || 6)) {
+    corrNum = pearson_(x, y);
   }
 
   const alphaStr = `${alpha >= 0 ? "🟢" : "🔴"} ${(alpha * 100).toFixed(1)}%`;
   const corrStr = (isFinite(corrNum))
-    ? `${corrNum <= CONFIG.CORR_ALERT_THRESHOLD ? "🟢" : "🔴"} ${corrNum.toFixed(2)}`
+    ? `${corrNum <= Number(C.CORR_ALERT_THRESHOLD) ? "🟢" : "🔴"} ${corrNum.toFixed(2)}`
     : `N/A`;
 
   return {
@@ -469,34 +501,33 @@ function calculateAlphaAndCorrVsBenchmark(rows, col, ticker, bench, startStr) {
 
 /**
  * ============================================================
- * EMAIL (two-row header table) + 2-panel chart
+ * EMAIL + 2-PANEL DASHBOARD
  * ============================================================
  */
-function sendDailyEmail(snapshot, charts, runDateStr, alerts) {
+function sendDailyEmail_(snapshot, charts, runDateStr, alerts) {
+  const C = getC_();
   const subject = (alerts.length ? "⚠️ " : "✅ ") + `MWS Report: ${runDateStr}`;
   const headColor = alerts.length ? "#d32f2f" : "#2e7d32";
 
-  const bVTI = CONFIG.BASELINES[0] || "VTI";
-  const bQQQ = CONFIG.BASELINES[1] || "QQQ";
+  const bVTI = (C.BASELINES && C.BASELINES[0]) ? C.BASELINES[0] : "VTI";
+  const bQQQ = (C.BASELINES && C.BASELINES[1]) ? C.BASELINES[1] : "QQQ";
 
-  // Date range in header row 2 col 1: min policy start → as-of
-  const minPolicyStart = getMinPolicyStart(snapshot.ghosts) || snapshot.asOfDate;
-  const rangeLabel = `(${fmtMDY(minPolicyStart)}→${fmtMDY(snapshot.asOfDate)})`;
+  const minPolicyStart = getMinPolicyStart_(snapshot.ghosts) || snapshot.asOfDate;
+  const rangeLabel = `(${fmtMDY_(minPolicyStart)}→${fmtMDY_(snapshot.asOfDate)})`;
 
   let html = `<div style="font-family: Arial, sans-serif; color:#333; max-width: 900px; margin:auto; border: 1px solid #eee; padding: 14px;">`;
   html += `<div style="border-bottom:2px solid #f0f0f0; padding-bottom:8px; margin-bottom:10px;">
       <div style="font-size:22px; font-weight:700; color:${headColor};">Titanium MWS Unified (v13.6)</div>
     </div>`;
 
-  // Portfolio line
   html += `<div style="font-size:16px; font-weight:700; color:#222; margin: 0 0 10px 0;">
-      Portfolio: $${snapshot.totalVal.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+      Portfolio: $${Number(snapshot.totalVal).toLocaleString(undefined, { minimumFractionDigits: 2 })}
     </div>`;
 
   if (alerts.length) {
     html += `<div style="background:#fff4f4; border-left:5px solid #d32f2f; padding:10px 12px; margin:10px 0 14px 0;">
       <b style="color:#d32f2f;">System alerts</b>
-      <ul style="margin:6px 0 0 18px; padding:0; font-size:12px; color:#444;">${alerts.map(a => `<li>${escapeHtml(a)}</li>`).join("")}</ul>
+      <ul style="margin:6px 0 0 18px; padding:0; font-size:12px; color:#444;">${alerts.map(a => `<li>${escapeHtml_(a)}</li>`).join("")}</ul>
     </div>`;
   }
 
@@ -505,11 +536,11 @@ function sendDailyEmail(snapshot, charts, runDateStr, alerts) {
       <thead>
         <tr style="background:#f4f4f4; color:#666; text-align:left;">
           <th style="padding:10px; border:1px solid #eee; width:26%;">Ticker / Status</th>
-          <th style="padding:10px; border:1px solid #eee; width:37%; text-align:center;" colspan="2">vs S&amp;P (${escapeHtml(bVTI)})</th>
-          <th style="padding:10px; border:1px solid #eee; width:37%; text-align:center;" colspan="2">vs Nasdaq (${escapeHtml(bQQQ)})</th>
+          <th style="padding:10px; border:1px solid #eee; width:37%; text-align:center;" colspan="2">vs S&amp;P (${escapeHtml_(bVTI)})</th>
+          <th style="padding:10px; border:1px solid #eee; width:37%; text-align:center;" colspan="2">vs Nasdaq (${escapeHtml_(bQQQ)})</th>
         </tr>
         <tr style="background:#f8f8f8; color:#666; text-align:left;">
-          <th style="padding:8px 10px; border:1px solid #eee; font-weight:600;">${escapeHtml(rangeLabel)}</th>
+          <th style="padding:8px 10px; border:1px solid #eee; font-weight:600;">${escapeHtml_(rangeLabel)}</th>
           <th style="padding:8px 10px; border:1px solid #eee; font-weight:600;">Alpha</th>
           <th style="padding:8px 10px; border:1px solid #eee; font-weight:600;">Correlation</th>
           <th style="padding:8px 10px; border:1px solid #eee; font-weight:600;">Alpha</th>
@@ -524,8 +555,8 @@ function sendDailyEmail(snapshot, charts, runDateStr, alerts) {
 
       html += `<tr>
         <td style="padding:10px; border:1px solid #eee; vertical-align:top;">
-          <b>${escapeHtml(g.ticker)}</b><br>
-          <span style="font-size:11px; color:#666;">${escapeHtml(g.status)}</span>
+          <b>${escapeHtml_(g.ticker)}</b><br>
+          <span style="font-size:11px; color:#666;">${escapeHtml_(g.status)}</span>
         </td>
 
         <td style="padding:10px; border:1px solid #eee; vertical-align:top; white-space:nowrap;">${formatCellValue_(rVTI, "alpha")}</td>
@@ -541,7 +572,6 @@ function sendDailyEmail(snapshot, charts, runDateStr, alerts) {
     html += `<div style="font-size:12px; color:#777;">No activated lifecycle tickers found in policy.</div>`;
   }
 
-  // 2-panel dashboard (stacked)
   if (charts && charts.perf) {
     html += `<div style="margin-top:10px; border-top:2px solid #f0f0f0; padding-top:12px; text-align:center;">
       <img src="cid:chart_perf" style="width:100%; height:auto; display:block; margin:auto;">
@@ -560,7 +590,7 @@ function sendDailyEmail(snapshot, charts, runDateStr, alerts) {
   if (charts && charts.alpha) inlineImages.chart_alpha = charts.alpha;
 
   MailApp.sendEmail({
-    to: CONFIG.EMAIL_RECIPIENT,
+    to: C.EMAIL_RECIPIENT,
     subject: subject,
     htmlBody: html,
     inlineImages: inlineImages
@@ -568,67 +598,48 @@ function sendDailyEmail(snapshot, charts, runDateStr, alerts) {
 }
 
 function formatCellValue_(res, kind) {
-  if (!res || !res.ok) return `<span style="color:#999;">${escapeHtml(res?.err || "ERR")}</span>`;
-  if (kind === "alpha") return escapeHtml(res.alpha);
-  if (kind === "corr") return escapeHtml(res.corr);
+  if (!res || !res.ok) return `<span style="color:#999;">${escapeHtml_(res?.err || "ERR")}</span>`;
+  if (kind === "alpha") return escapeHtml_(res.alpha);
+  if (kind === "corr") return escapeHtml_(res.corr);
   return `<span style="color:#999;">ERR</span>`;
 }
 
 /**
  * ============================================================
  * PERFORMANCE LOG (Drive CSV) - schema-stable, non-truncating
- * Dedupe guarantee: exactly ONE row per date.
- *
- * Canonical schema:
- * Date,PortfolioValue,Price_<bench1>,...,PortfolioPct,Pct_<bench1>,...,Diff_<bench1>,...
- *
- * Derived:
- * PortfolioPct = (PortfolioValue/basePV)-1
- * Pct_<b>      = (Price_<b>/basePrice_<b>)-1
- * Diff_<b>     = PortfolioPct - Pct_<b>
+ * ============================================================
  */
 function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, benchPrices, policy) {
-  const file = DriveApp.getFileById(CONFIG.LOG_FILE_ID);
+  const C = getC_();
+  const file = DriveApp.getFileById(C.LOG_FILE_ID);
   const raw = file.getBlob().getDataAsString().replace(/^\ufeff/g, "").trim();
   const rows = raw ? Utilities.parseCsv(raw) : [];
 
   const b = policy?.governance?.reporting_baselines || {};
   const chartStart = String(b.chart_start_date || "").trim();
 
-  // Canonical header for current benches
   const header = buildPerfLogHeader_(benches);
 
-  // Load existing data rows, normalize width, keep only valid date rows
   let data = [];
   if (rows.length >= 2) {
     data = rows.slice(1)
-      .map(r => normalizeRowWidth(r, header.length))
+      .map(r => normalizeRowWidth_(r, header.length))
       .filter(r => /^\d{4}-\d{2}-\d{2}$/.test(String(r[0] || "")));
   }
 
-  // --- DEDUPE BY DATE ---
+  // DEDUPE BY DATE
   data = data.filter(r => String(r[0]) !== dateStr);
 
-  // Build the new base row (derived columns blank for now; recomputed below)
   const newRow = new Array(header.length).fill("");
   newRow[0] = dateStr;
   newRow[1] = Number(portfolioVal).toFixed(2);
-
-  for (let i = 0; i < benches.length; i++) {
-    newRow[2 + i] = Number(benchPrices[i]).toFixed(2);
-  }
+  for (let i = 0; i < benches.length; i++) newRow[2 + i] = Number(benchPrices[i]).toFixed(2);
 
   data.push(newRow);
-
-  // Sort ascending by date
   data.sort((a, b) => String(a[0]).localeCompare(String(b[0])));
 
-  // Determine base row for normalization
-  // Preferred: chart_start_date; else first row.
   let baseIndex = -1;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(chartStart)) {
-    baseIndex = data.findIndex(r => String(r[0]) === chartStart);
-  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(chartStart)) baseIndex = data.findIndex(r => String(r[0]) === chartStart);
   if (baseIndex === -1) baseIndex = 0;
   if (!data.length) throw new Error("Perf log has no rows after upsert.");
 
@@ -638,43 +649,35 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
   const baseB = benches.map((_, i) => parseFloat(data[baseIndex][2 + i]));
   if (baseB.some(x => !isFinite(x) || x <= 0)) throw new Error("Perf log base benchmark price invalid.");
 
-  // Recompute derived columns for every row
   const portPctCol = 2 + benches.length;
   const pctStartCol = portPctCol + 1;
   const diffStartCol = pctStartCol + benches.length;
 
   const out = data.map((r, ri) => {
-    const row = normalizeRowWidth(r, header.length);
+    const row = normalizeRowWidth_(r, header.length);
 
     const pv = parseFloat(row[1]);
     const pPort = (isFinite(pv) && pv > 0) ? ((pv / basePV) - 1) : NaN;
 
-    // PortfolioPct
     row[portPctCol] = (ri < baseIndex) ? "N/A" : (isFinite(pPort) ? pPort.toFixed(4) : "N/A");
 
-    // Pct_<bench_i>
     for (let i = 0; i < benches.length; i++) {
       const px = parseFloat(row[2 + i]);
       const pB = (isFinite(px) && px > 0) ? ((px / baseB[i]) - 1) : NaN;
       row[pctStartCol + i] = (ri < baseIndex) ? "N/A" : (isFinite(pB) ? pB.toFixed(4) : "N/A");
     }
 
-    // Diff_<bench_i>
     for (let i = 0; i < benches.length; i++) {
-      if (ri < baseIndex) {
-        row[diffStartCol + i] = "N/A";
-        continue;
-      }
+      if (ri < baseIndex) { row[diffStartCol + i] = "N/A"; continue; }
       const pB = parseFloat(row[pctStartCol + i]);
       if (!isFinite(pPort) || !isFinite(pB)) row[diffStartCol + i] = "N/A";
       else row[diffStartCol + i] = (pPort - pB).toFixed(4);
     }
 
-    return normalizeRowWidth(row, header.length);
+    return normalizeRowWidth_(row, header.length);
   });
 
-  // Write back stable CSV
-  file.setContent([header].concat(out).map(r => normalizeRowWidth(r, header.length).join(",")).join("\n"));
+  file.setContent([header].concat(out).map(r => normalizeRowWidth_(r, header.length).join(",")).join("\n"));
 }
 
 function buildPerfLogHeader_(benches) {
@@ -690,17 +693,13 @@ function buildPerfLogHeader_(benches) {
  * ============================================================
  * CHARTS (2-panel dashboard from perf log CSV)
  * ============================================================
- * Panel 1: Cumulative performance since chart_start_date
- * Panel 2: Cumulative excess return (PortfolioPct - BenchmarkPct) i.e. Diff_<bench>
  */
-function generateDashboardCharts2Panel(policy) {
+function generateDashboardCharts2Panel_(policy) {
+  const C = getC_();
   const b = policy?.governance?.reporting_baselines;
   if (!b) throw new Error("Policy missing governance.reporting_baselines");
 
-  const raw = DriveApp.getFileById(CONFIG.LOG_FILE_ID)
-    .getBlob().getDataAsString()
-    .replace(/^\ufeff/g, "").trim();
-
+  const raw = DriveApp.getFileById(C.LOG_FILE_ID).getBlob().getDataAsString().replace(/^\ufeff/g, "").trim();
   const parsed = raw ? Utilities.parseCsv(raw) : [];
   if (parsed.length < 3) throw new Error("Performance log too short (need >=2 rows).");
 
@@ -719,7 +718,6 @@ function generateDashboardCharts2Panel(policy) {
   const diffIdx = benches.map(sym => header.indexOf(`Diff_${sym}`));
   if (diffIdx.some(i => i === -1)) throw new Error("Perf log missing one or more Diff_<bench> columns.");
 
-  // Only use audited rows (non-N/A)
   const dr = rows.filter(r => String((r[portPctIdx] ?? "")).trim() !== "N/A");
   if (dr.length < 2) throw new Error("Performance log has <2 audited rows.");
 
@@ -729,9 +727,6 @@ function generateDashboardCharts2Panel(policy) {
   return { perf, alpha };
 }
 
-/**
- * Panel 1: Portfolio + Bench cumulative % series
- */
 function buildPerfPanelChart_(dr, benches, portPctIdx, pctIdx, chartStartDate) {
   const dt = Charts.newDataTable()
     .addColumn(Charts.ColumnType.STRING, "Date")
@@ -748,7 +743,7 @@ function buildPerfPanelChart_(dr, benches, portPctIdx, pctIdx, chartStartDate) {
     const dateShort = String(r[0]).substring(5); // MM-DD
 
     const pPort = parseFloat(String(r[portPctIdx]).replace("%", ""));
-    let row = [
+    const row = [
       dateShort,
       isFinite(pPort) ? pPort : null,
       (isLast && isFinite(pPort)) ? (pPort * 100).toFixed(2) + "%" : null
@@ -765,12 +760,9 @@ function buildPerfPanelChart_(dr, benches, portPctIdx, pctIdx, chartStartDate) {
     dt.addRow(row);
   });
 
-  // Interleave series + annotations
   const cols = [0];
   const n = benches.length;
-  for (let k = 0; k <= n; k++) {
-    cols.push(k * 2 + 1, { sourceColumn: k * 2 + 2, role: "annotation" });
-  }
+  for (let k = 0; k <= n; k++) cols.push(k * 2 + 1, { sourceColumn: k * 2 + 2, role: "annotation" });
 
   return Charts.newLineChart()
     .setDataTable(dt)
@@ -782,12 +774,8 @@ function buildPerfPanelChart_(dr, benches, portPctIdx, pctIdx, chartStartDate) {
     .getAs("image/png");
 }
 
-/**
- * Panel 2: Excess return vs each benchmark (Diff_<bench>)
- */
 function buildAlphaPanelChart_(dr, benches, diffIdx, chartStartDate) {
-  const dt = Charts.newDataTable()
-    .addColumn(Charts.ColumnType.STRING, "Date");
+  const dt = Charts.newDataTable().addColumn(Charts.ColumnType.STRING, "Date");
 
   benches.forEach(t => {
     dt.addColumn(Charts.ColumnType.NUMBER, ` vs ${t}`);
@@ -799,7 +787,6 @@ function buildAlphaPanelChart_(dr, benches, diffIdx, chartStartDate) {
     const dateShort = String(r[0]).substring(5); // MM-DD
 
     const row = [dateShort];
-
     benches.forEach((t, j) => {
       const v = parseFloat(String(r[diffIdx[j]]).replace("%", ""));
       row.push(
@@ -811,11 +798,8 @@ function buildAlphaPanelChart_(dr, benches, diffIdx, chartStartDate) {
     dt.addRow(row);
   });
 
-  // Interleave each series with its annotation column
   const cols = [0];
-  for (let k = 0; k < benches.length; k++) {
-    cols.push(k * 2 + 1, { sourceColumn: k * 2 + 2, role: "annotation" });
-  }
+  for (let k = 0; k < benches.length; k++) cols.push(k * 2 + 1, { sourceColumn: k * 2 + 2, role: "annotation" });
 
   return Charts.newLineChart()
     .setDataTable(dt)
@@ -829,7 +813,7 @@ function buildAlphaPanelChart_(dr, benches, diffIdx, chartStartDate) {
 
 /**
  * ============================================================
- * LIVE PRICES (batch) - scratch sheet reuse (NO create)
+ * LIVE PRICES (batch) - scratch sheet reuse
  * ============================================================
  */
 function getBatchPricesScratch_(tickers) {
@@ -838,7 +822,6 @@ function getBatchPricesScratch_(tickers) {
 
   sh.clearContents();
 
-  // Column A: ticker, Column B: formula
   tickers.forEach((t, i) => {
     sh.getRange(i + 1, 1).setValue(t);
     sh.getRange(i + 1, 2).setFormula(`=IFERROR(GOOGLEFINANCE("${t}"), 0)`);
@@ -861,17 +844,17 @@ function getBatchPricesScratch_(tickers) {
 }
 
 function openScratch_() {
-  if (!CONFIG.SCRATCH_SHEET_ID || CONFIG.SCRATCH_SHEET_ID.includes("PUT_YOUR")) {
-    throw new Error("CONFIG.SCRATCH_SHEET_ID is not set. Provide your existing scratch spreadsheet ID.");
+  const C = getC_();
+  if (!C.SCRATCH_SHEET_ID || String(C.SCRATCH_SHEET_ID).includes("PUT_YOUR")) {
+    throw new Error("C.SCRATCH_SHEET_ID is not set. Provide your existing scratch spreadsheet ID.");
   }
-  return SpreadsheetApp.openById(CONFIG.SCRATCH_SHEET_ID);
+  return SpreadsheetApp.openById(C.SCRATCH_SHEET_ID);
 }
 
 function ensureScratchSheet_(ss) {
-  let sh = ss.getSheetByName(CONFIG.SCRATCH_SHEET_NAME);
-  if (!sh) sh = ss.insertSheet(CONFIG.SCRATCH_SHEET_NAME);
-
-  // Keep sheet small/clean
+  const C = getC_();
+  let sh = ss.getSheetByName(C.SCRATCH_SHEET_NAME);
+  if (!sh) sh = ss.insertSheet(C.SCRATCH_SHEET_NAME);
   sh.clearContents();
   return sh;
 }
@@ -881,7 +864,7 @@ function ensureScratchSheet_(ss) {
  * HELPERS
  * ============================================================
  */
-function buildColumnMap(header) {
+function buildColumnMap_(header) {
   const h = header.map(v => String(v).trim().toLowerCase());
   const dateIdx = h.indexOf("date");
   const tickerIdx = h.indexOf("ticker");
@@ -896,14 +879,14 @@ function buildColumnMap(header) {
   return { date: dateIdx, ticker: tickerIdx, price: priceIdx };
 }
 
-function normalizeRowWidth(row, width) {
+function normalizeRowWidth_(row, width) {
   const r = Array.isArray(row) ? row.slice() : [];
   while (r.length < width) r.push("");
   if (r.length > width) r.length = width;
   return r;
 }
 
-function normalizeInventory(state) {
+function normalizeInventory_(state) {
   const raw = state.inventory || state.tickers || [];
   return [...new Set(
     raw.map(item => {
@@ -913,33 +896,33 @@ function normalizeInventory(state) {
   )].sort();
 }
 
-function addDaysYMD(ymd, deltaDays, tz) {
-  const d = ymdToLocalDate(ymd);
+function addDaysYMD_(ymd, deltaDays, tz) {
+  const d = ymdToLocalDate_(ymd);
   d.setDate(d.getDate() + deltaDays);
   return Utilities.formatDate(d, tz, "yyyy-MM-dd");
 }
 
-function ymdToLocalDate(ymd) {
+function ymdToLocalDate_(ymd) {
   const parts = String(ymd).split("-").map(Number);
   return new Date(parts[0], parts[1] - 1, parts[2]);
 }
 
-function diffDaysYMD(laterYMD, earlierYMD) {
+function diffDaysYMD_(laterYMD, earlierYMD) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(laterYMD))) return null;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(earlierYMD))) return null;
-  const a = ymdToLocalDate(earlierYMD);
-  const b = ymdToLocalDate(laterYMD);
+  const a = ymdToLocalDate_(earlierYMD);
+  const b = ymdToLocalDate_(laterYMD);
   return Math.floor((b.getTime() - a.getTime()) / 86400000);
 }
 
-function intersectSortedKeys(m1, m2) {
+function intersectSortedKeys_(m1, m2) {
   const out = [];
   m1.forEach((_, k) => { if (m2.has(k)) out.push(k); });
   out.sort();
   return out;
 }
 
-function pearson(x, y) {
+function pearson_(x, y) {
   const n = Math.min(x.length, y.length);
   if (n < 2) return NaN;
 
@@ -956,7 +939,7 @@ function pearson(x, y) {
   return den === 0 ? NaN : (num / den);
 }
 
-function escapeHtml(s) {
+function escapeHtml_(s) {
   return String(s)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -965,7 +948,7 @@ function escapeHtml(s) {
     .replace(/'/g, "&#039;");
 }
 
-function getMinPolicyStart(ghosts) {
+function getMinPolicyStart_(ghosts) {
   let min = null;
   (ghosts || []).forEach(g => {
     const s = String(g.policyStart || "").trim();
@@ -975,18 +958,19 @@ function getMinPolicyStart(ghosts) {
   return min;
 }
 
-function fmtMDY(ymd) {
+function fmtMDY_(ymd) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(ymd))) return String(ymd || "");
   const Y = ymd.substring(0, 4), M = ymd.substring(5, 7), D = ymd.substring(8, 10);
   return `${M}/${D}/${Y}`;
 }
 
 // numeric helpers (kept for convenience)
-function toNum(v) {
+function toNum_(v) {
   const x = parseFloat(v);
   return isFinite(x) ? x : NaN;
 }
-function safeNumOrBlank(v) {
+function safeNumOrBlank_(v) {
   const x = parseFloat(v);
   return isFinite(x) ? x : "";
 }
+
