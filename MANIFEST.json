@@ -11,6 +11,9 @@
     "run_results": "mws_run_results.csv",
     "tracker_state": "mws_tracker.json"
   },
+  "input": {
+      "current_holdings": "mws_holdings.csv"
+  }
   "outputs": {
     "equity_curve": "mws_equity_curve.png"
   },
