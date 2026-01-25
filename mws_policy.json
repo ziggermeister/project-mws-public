@@ -24,9 +24,27 @@
       "TREASURY_NOTE": 45000
     },
     "execution": {
-      "enforce_sells_first": true,
       "max_turnover": 0.2,
-      "max_turnover_stress": 0.22
+      "max_turnover_stress": 0.22,
+
+      "trade_order": {
+        "sells_first": true
+      },
+
+      "funding_priority": {
+        "use_cash_first": true,
+        "cash_definition": ["CASH"],
+
+        "funding_invariant": "total_sells + cash_used == total_buys",
+        "cash_used_rule": "cash_used = min(cash_available, total_buys)",
+
+        "notes": [
+          "Use residual cash to fund buys before generating any sells.",
+          "Sells-first refers to execution ordering only, after cash funding is applied.",
+          "Cash cannot satisfy sleeve floors or prevent hard cap enforcement; floors/caps still determine target weights.",
+          "If cash_available >= total_buys, then total_sells must be 0."
+        ]
+      }
     },
     "lifecycle_rules": {
       "review_days_default": 30,
