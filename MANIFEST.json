@@ -3,17 +3,18 @@
   "authoritative": {
     "policy": "mws_policy.json",
     "policy_contract": "mws_policy_contract.py",
-    "macro_lens": "mws_macro.md""
+    "macro_lens": "mws_macro.md"
   },
   "data": {
     "historical_prices": "mws_ticker_history.csv",
     "recent_performance": "mws_recent_performance.csv",
     "run_results": "mws_run_results.csv",
-    "tracker_state": "mws_tracker.json"
+    "tracker_state": "mws_tracker.json",
+    "signal_tracker": "mws_signal_tracker.csv"
   },
   "input": {
       "current_holdings": "mws_holdings.csv"
-  }
+  },
   "outputs": {
     "equity_curve": "mws_equity_curve.png"
   },

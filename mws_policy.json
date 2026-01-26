@@ -282,17 +282,6 @@
         "stage": "inducted"
       }
     },
-    "QTUM": {
-      "max_total": 0.02,
-      "exclude_from_momentum": true,
-      "exclude_from_denominator": true,
-      "lifecycle": {
-        "stage": "activated",
-        "benchmark_proxy": "QQQ",
-        "entered_stage_date": "2026-01-05",
-        "vol_90d_stress_cap": 0.045
-      }
-    },
     "URNM": {
       "max_total": 0.04,
       "exclude_from_momentum": true,
@@ -311,16 +300,6 @@
         "stage": "activated",
         "benchmark_proxy": "VTI",
         "entered_stage_date": "2026-01-05"
-      }
-    },
-    "IBIT": {
-      "exclude_from_momentum": true,
-      "exclude_from_denominator": true,
-      "lifecycle": {
-        "stage": "activated",
-        "benchmark_proxy": "VTI",
-        "entered_stage_date": "2026-01-05",
-        "vol_90d_stress_cap": 0.045
       }
     },
     "DBMF": {

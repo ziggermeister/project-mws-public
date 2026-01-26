@@ -5,7 +5,7 @@
   "project": "Investing",
   "tickers": [
     "VTI", "VXUS", "QQQM", "SOXQ", "CHAT", "BOTZ", "GRID", "DTCR", "ITA", "XLE",
-    "XBI", "IAUM", "SIVR", "REMX", "DBMF", "KMLM", "QTUM", "URNM", "IBIT",
+    "XBI", "IAUM", "SIVR", "REMX", "DBMF", "KMLM", "URNM",
     "QQQ", "SOXX", "SRVR", "IBB", "GLD", "SLV", "PICK", "AGG"
   ],
   "notes": [
@@ -29,9 +29,7 @@
     { "ticker": "REMX", "classification": "real_assets", "type": "inductee" },
     { "ticker": "DBMF", "classification": "overlay_diversifier", "type": "inductee" },
     { "ticker": "KMLM", "classification": "overlay_diversifier", "type": "inductee" },
-    { "ticker": "QTUM", "classification": "ai_tech_growth", "type": "trial" },
     { "ticker": "URNM", "classification": "real_assets", "type": "trial" },
-    { "ticker": "IBIT", "classification": "crypto", "type": "trial" },
     { "ticker": "QQQ", "classification": "reference", "type": "reference" },
     { "ticker": "SOXX", "classification": "reference", "type": "reference" },
     { "ticker": "SRVR", "classification": "reference", "type": "reference" },

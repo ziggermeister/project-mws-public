@@ -4,6 +4,9 @@
 # Never publish scratch
 temp/
 
+Private config
+daily-emailer/CONFIG_PVT.json
+
 # Avoid publishing holdings files
 *.gsheet
 
