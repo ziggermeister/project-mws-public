@@ -91,6 +91,9 @@
       "portfolio_accounting": {
         "sleeve_exposure_source": "ticker_to_sleeves_only",
         "unmapped_ticker_behavior": "exclude_from_sleeve_caps_and_floors",
+        "exclude_overlays_from_sleeves": true,
+        "overlay_reporting_mode": "separate_sleeve_tree",
+        "overlay_l1_name": "stabilizers",
         "notes": "Contract: L1/L2 sleeve accounting uses only ticker_to_sleeves. Activated tickers intentionally omitted from ticker_to_sleeves do not affect sleeve cap/floor enforcement."
       }
     }
@@ -117,15 +120,25 @@
       "defensive": {
         "children": [
           "real_assets",
-          "defense_energy"
+          "defense_energy",
+          "strategic_materials"
         ],
-        "max_total": 0.3
+        "max_total": 0.30
       },
       "speculative": {
         "children": [
           "crypto"
         ],
         "max_total": 0.05
+      },
+      "stabilizers": {
+        "children": ["managed_futures"],
+        "non_budgeted": true,
+        "exclude_from_momentum": true,
+        "exclude_from_denominator": true,
+        "floor": 0.06,
+        "cap": 0.12,
+        "notes": "Non-allocatable overlay sleeve. Excluded from momentum + denominators; used for vol/drawdown shaping."
       }
     },
     "level2": {
@@ -153,6 +166,21 @@
         "floor": 0.0,
         "cap": 0.05,
         "stress_cap_total": 0.045
+      },
+      "strategic_materials": {
+        "floor": 0.04,
+        "cap": 0.10,
+        "notes": "Strategic scarcity equities (uranium, rare earths, critical inputs). Pro-cyclical but geopolitically defensive."
+      },
+      "managed_futures": {
+        "non_budgeted": true,
+        "floor": 0.06,
+        "cap": 0.12,
+        "eligible_for_allocation": false,
+        "eligible_for_momentum": false,
+        "exclude_from_momentum": true,
+        "exclude_from_denominator": true,
+        "notes": "Overlay sleeve (DBMF, KMLM). Target split handled by overlays.managed_futures."
       }
     }
   },
@@ -196,6 +224,21 @@
     },
     "SIVR": {
       "real_assets": 1.0
+    },
+    "URNM": {
+      "strategic_materials": 1.0
+    },
+    "REMX": {
+      "strategic_materials": 1.0
+    },
+    "DBMF": {
+      "managed_futures": 1.0
+    },
+    "KMLM": {
+      "managed_futures": 1.0
+    },
+    "IBIT":{
+      "crypto": 1.0
     }
   },
   "ticker_constraints": {
@@ -284,22 +327,14 @@
     },
     "URNM": {
       "max_total": 0.04,
-      "exclude_from_momentum": true,
-      "exclude_from_denominator": true,
       "lifecycle": {
-        "stage": "activated",
-        "benchmark_proxy": "XLE",
-        "entered_stage_date": "2026-01-05"
+        "stage": "inducted"
       }
     },
     "REMX": {
       "max_total": 0.04,
-      "exclude_from_momentum": true,
-      "exclude_from_denominator": true,
       "lifecycle": {
-        "stage": "activated",
-        "benchmark_proxy": "VTI",
-        "entered_stage_date": "2026-01-05"
+        "stage": "inducted"
       }
     },
     "DBMF": {
@@ -311,7 +346,9 @@
       "is_overlay": true,
       "exclude_from_momentum": true,
       "exclude_from_denominator": true,
-      "overlay_name": "managed_futures_stabilizer"
+      "eligible_for_allocation": false,
+      "eligible_for_momentum": false,
+      "overlay_name": "managed_futures"
     },
     "KMLM": {
       "min_total": 0.03,
@@ -322,7 +359,9 @@
       "is_overlay": true,
       "exclude_from_momentum": true,
       "exclude_from_denominator": true,
-      "overlay_name": "managed_futures_stabilizer"
+      "eligible_for_allocation": false,
+      "eligible_for_momentum": false,
+      "overlay_name": "managed_futures"
     },
     "CASH": {
       "lifecycle": {
@@ -345,6 +384,13 @@
       "exclude_from_momentum": true,
       "exclude_from_denominator": true,
       "notes": "Benchmark Proxy only (not held / not allocatable)"
+    },
+    "IBIT": {
+      "max_total": 0.05,
+      "min_total": 0.0,
+      "lifecycle": {
+        "stage": "inducted"
+        }
     }
   },
   "signals": {
@@ -361,7 +407,7 @@
     }
   },
   "overlays": {
-    "managed_futures_stabilizer": {
+    "managed_futures": {
       "enabled": true,
       "tickers": [
         "DBMF",
