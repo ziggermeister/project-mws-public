@@ -12,3 +12,7 @@ daily-emailer/CONFIG_PVT.json
 
 # Common secret patterns
 *.env
+
+# chart
+mws_equity_curve.png
+
