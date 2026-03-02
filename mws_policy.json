@@ -1,10 +1,10 @@
 {
   "meta": {
     "policy_name": "MWS v2.6.15",
-    "policy_version": "v2.6.16+contract_safe+caps_v1",
+    "policy_version": "v2.7.1+fully_calibrated",
     "policy_family": "Titanium MWS",
-    "last_updated": "2026-01-24",
-    "notes": "Adds explicit per-ticker caps for AI/thematics and other inducted tickers; aligns L1 max_totals with attainable L2 caps; retains default reference-only contract for any ticker absent from ticker_constraints."
+    "last_updated": "2026-03-02",
+    "notes": "v2.7.1: Round 2 calibration complete. All TBD_round2 thresholds resolved. Adds trigger_precedence block, split signal_drift (sleeve/ticker), Brent 3-day cumulative trigger, turnover_clipped reporting flag. Prior: v2.7.0+structural_engine."
   },
   "governance": {
     "reporting_baselines": {
@@ -17,32 +17,85 @@
         "VTI",
         "QQQ"
       ],
-      "chart_start_date": "2026-01-05"
+      "chart_start_date": "2026-01-02"
     },
     "fixed_asset_prices": {
       "CASH": 1.0,
-      "TREASURY_NOTE": 45000
+      "TREASURY_NOTE": {
+        "price_type": "market",
+        "fallback_price": 45000,
+        "fallback_condition": "use_only_if_market_price_unavailable",
+        "compliance_tolerance_pct": 0.03,
+        "bucket_a_breach_if": "market_price \u00d7 face_value < bucket_a_minimum_usd",
+        "notes": "Treasury note must use live market pricing for Bucket A compliance checks. Hardcoded fallback price retained for system startup only. Compliance tolerance (acceptable deviation from par) TBD Round 2."
+      }
     },
     "execution": {
       "max_turnover": 0.2,
       "max_turnover_stress": 0.22,
-
       "trade_order": {
         "sells_first": true
       },
-
       "funding_priority": {
         "use_cash_first": true,
-        "cash_definition": ["CASH"],
-
+        "cash_definition": [
+          "CASH"
+        ],
         "funding_invariant": "total_sells + cash_used == total_buys",
         "cash_used_rule": "cash_used = min(cash_available, total_buys)",
-
         "notes": [
           "Use residual cash to fund buys before generating any sells.",
           "Sells-first refers to execution ordering only, after cash funding is applied.",
           "Cash cannot satisfy sleeve floors or prevent hard cap enforcement; floors/caps still determine target weights.",
           "If cash_available >= total_buys, then total_sells must be 0."
+        ]
+      },
+      "max_turnover_window": "per_rebalance_event",
+      "max_turnover_annualized": 0.6,
+      "notes": "max_turnover (0.20) applies per rebalance event. max_turnover_stress (0.22) applies during soft_limit drawdown breach. max_turnover_annualized (0.60) is the binding annual ceiling \u2014 sufficient for two major portfolio rotations per year. turnover_reporting flags provide visibility when either cap is the operative constraint.",
+      "turnover_reporting": {
+        "turnover_clipped_by_annual_cap": false,
+        "turnover_clipped_by_event_cap": false,
+        "notes": "Flags set to true at runtime when a rebalance is constrained by the annual or per-event turnover cap. Diagnostic telemetry only \u2014 does not block execution but requires acknowledgement in rebalance log."
+      },
+      "trigger_precedence": {
+        "description": "When multiple triggers fire simultaneously, actions execute in this priority order. Higher-priority actions override or suspend lower-priority actions.",
+        "order": [
+          {
+            "priority": 1,
+            "trigger": "drawdown_rules.hard_limit",
+            "action": "reduce_all_positions_to_sleeve_floors",
+            "overrides": "all_lower_priority_triggers",
+            "notes": "Survival mode. Portfolio protection overrides all optimization."
+          },
+          {
+            "priority": 2,
+            "trigger": "validators.bucket_a_minimum",
+            "action": "halt_all_buys_restore_bucket_a",
+            "overrides": "priorities_3_through_5",
+            "notes": "Liquidity floor is non-negotiable. Restore before any rebalancing."
+          },
+          {
+            "priority": 3,
+            "trigger": "validators.l1_sleeve_caps OR validators.l2_sleeve_caps OR validators.l2_sleeve_floors OR validators.per_ticker_caps OR validators.per_ticker_floors",
+            "action": "enforce_cap_floor_compliance_sells_first",
+            "overrides": "priorities_4_through_5",
+            "notes": "Structural compliance. Caps and floors enforced before signal-driven trades."
+          },
+          {
+            "priority": 4,
+            "trigger": "validators.turnover_limit",
+            "action": "clip_rebalance_to_turnover_cap_set_reporting_flag",
+            "overrides": "priority_5",
+            "notes": "If turnover cap binds, partial rebalance executed in priority order of violation severity."
+          },
+          {
+            "priority": 5,
+            "trigger": "rebalance_triggers.signal_drift OR rebalance_triggers.band_breach OR rebalance_triggers.calendar",
+            "action": "execute_momentum_driven_rebalance",
+            "overrides": "none",
+            "notes": "Normal optimization. Executes only after all higher-priority constraints are satisfied."
+          }
         ]
       }
     },
@@ -70,7 +123,46 @@
           "requires_review": true
         }
       },
-      "notes": "Canonical intent: only inducted is allocatable. Activated is evaluation-only (non-allocatable), overlay is managed separately, reference is benchmark-only."
+      "notes": "Canonical intent: only inducted is allocatable. Activated is evaluation-only (non-allocatable), overlay is managed separately, reference is benchmark-only.",
+      "transitions": {
+        "reference_to_inducted": {
+          "requires": [
+            "manual_approval",
+            "observation_period_days: 30",
+            "positive_momentum_blend_consecutive_days: 15"
+          ],
+          "review_days": 30,
+          "notes": "Ticker must pass observation period and show positive momentum before entering allocatable universe."
+        },
+        "inducted_to_reference": {
+          "triggers": [
+            "blend_score_negative_consecutive_days: 20",
+            "manual_demotion"
+          ],
+          "exit_rule": "reduce_to_zero_over_N_rebalance_cycles",
+          "exit_cycles": 2,
+          "notes": "Demotion does not force immediate liquidation. Position winds down over exit_cycles."
+        },
+        "inducted_dormant": {
+          "condition": "lifecycle.stage == inducted AND current_weight == 0",
+          "re_entry_trigger": {
+            "momentum_blend_positive_consecutive_days": 15,
+            "vix_below": 28,
+            "vix_trend_clause": "TBD_round3: add VIX_5d_MA < VIX_20d_MA as alternative gate",
+            "notes": "VIX < 28 allows re-entry while market is elevated but not in panic. Intentionally more permissive than 25 to avoid missing face-ripping rallies in dormant names (particularly crypto) while VIX is falling from a peak. VIX trend clause (5d MA < 20d MA) to be added Round 3."
+          },
+          "initial_weight": "sleeve_floor_minimum",
+          "notes": "Handles tickers that are inducted but not currently held (e.g. IBIT). Prevents discretionary re-entry without a signal."
+        },
+        "any_to_activated": {
+          "triggers": [
+            "manual_review_flag",
+            "compliance_hold"
+          ],
+          "effect": "eligible_for_momentum: false, eligible_for_allocation: false",
+          "notes": "Activated is a holding pen for tickers under review. Not allocatable."
+        }
+      }
     },
     "reference_tickers": [
       "AGG"
@@ -96,6 +188,37 @@
         "overlay_l1_name": "stabilizers",
         "notes": "Contract: L1/L2 sleeve accounting uses only ticker_to_sleeves. Activated tickers intentionally omitted from ticker_to_sleeves do not affect sleeve cap/floor enforcement."
       }
+    },
+    "rebalance_triggers": {
+      "calendar": {
+        "enabled": true,
+        "rule": "first_monday_of_month",
+        "notes": "Standing monthly rebalance regardless of band status."
+      },
+      "band_breach": {
+        "enabled": true,
+        "hold_days_before_trigger": 3,
+        "applies_to": [
+          "l2_sleeves",
+          "per_ticker_caps",
+          "overlay_bands"
+        ],
+        "notes": "Rebalance triggered when any tracked band is breached for hold_days_before_trigger consecutive days."
+      },
+      "signal_drift": {
+        "enabled": true,
+        "sleeve_drift_threshold": 0.05,
+        "sleeve_drift_units": "abs_weight_delta_pct_points",
+        "ticker_drift_threshold": 0.015,
+        "ticker_drift_units": "abs_weight_delta_pct_points",
+        "notes": "Rebalance triggered when any sleeve drifts >5pp from target weight, or any ticker drifts >1.5pp from target weight. Both measured as absolute percentage point delta (actual minus target). Sleeve-level: e.g. ai_tech swelling from 32% to 37% triggers rebalance. Ticker-level: e.g. a 4%-capped ticker reaching 5.5% triggers trim."
+      },
+      "stress_override": {
+        "enabled": true,
+        "condition": "drawdown_rules.soft_limit_breached == true",
+        "action": "freeze_new_buys",
+        "notes": "Stress state suspends calendar and signal_drift triggers. Only band_breach enforcement continues."
+      }
     }
   },
   "allocation": {
@@ -105,7 +228,10 @@
   "cash_reserve": {
     "target_cash_usd": 3800,
     "enabled": false,
-    "notes": "Disabled: Bucket A is Treasuries-only; cash remains in Bucket B and may be idle."
+    "notes": "Disabled: Bucket A is Treasuries-only; cash remains in Bucket B and may be idle.",
+    "disabled_date": "2026-01-24",
+    "review_date": "2026-07-01",
+    "re_enable_condition": "bucket_a_value < 42000"
   },
   "sleeves": {
     "level1": {
@@ -123,7 +249,7 @@
           "defense_energy",
           "strategic_materials"
         ],
-        "max_total": 0.30
+        "max_total": 0.3
       },
       "speculative": {
         "children": [
@@ -132,7 +258,9 @@
         "max_total": 0.05
       },
       "stabilizers": {
-        "children": ["managed_futures"],
+        "children": [
+          "managed_futures"
+        ],
         "non_budgeted": true,
         "exclude_from_momentum": true,
         "exclude_from_denominator": true,
@@ -169,7 +297,7 @@
       },
       "strategic_materials": {
         "floor": 0.04,
-        "cap": 0.10,
+        "cap": 0.1,
         "notes": "Strategic scarcity equities (uranium, rare earths, critical inputs). Pro-cyclical but geopolitically defensive."
       },
       "managed_futures": {
@@ -216,9 +344,6 @@
     "ITA": {
       "defense_energy": 1.0
     },
-    "XLE": {
-      "defense_energy": 1.0
-    },
     "IAUM": {
       "real_assets": 1.0
     },
@@ -237,7 +362,7 @@
     "KMLM": {
       "managed_futures": 1.0
     },
-    "IBIT":{
+    "IBIT": {
       "crypto": 1.0
     }
   },
@@ -317,13 +442,16 @@
       }
     },
     "XLE": {
-      "band_total": [
-        0.025,
-        0.035
-      ],
       "lifecycle": {
-        "stage": "inducted"
-      }
+        "stage": "overlay"
+      },
+      "is_overlay": true,
+      "overlay_name": "geopolitical_stress",
+      "exclude_from_momentum": false,
+      "momentum_scoring_use": "reference_only",
+      "exclude_from_denominator": true,
+      "eligible_for_allocation": false,
+      "notes": "XLE reclassified to geopolitical_stress_overlay per v2.7.0. band_total governed by overlays.geopolitical_stress."
     },
     "URNM": {
       "max_total": 0.04,
@@ -390,7 +518,7 @@
       "min_total": 0.0,
       "lifecycle": {
         "stage": "inducted"
-        }
+      }
     }
   },
   "signals": {
@@ -404,6 +532,19 @@
     "volatility_model": {
       "method": "EWMA",
       "lookback_days": 126
+    },
+    "momentum_to_weight": {
+      "method": "percentile_in_band",
+      "universe": "inducted_only",
+      "exclude_overlays": true,
+      "exclude_dormant": false,
+      "percentile_lookback_days": 63,
+      "scaling": "linear",
+      "floor_behavior": "hold_at_floor_if_positive_momentum",
+      "floor_exit_behavior": "reduce_to_zero_if_blend_negative_for_N_days",
+      "floor_exit_days": 20,
+      "cap_behavior": "do_not_exceed_per_ticker_max_total",
+      "notes": "Momentum scores percentile-ranked over 63-day lookback within inducted universe. Rank maps linearly to target weight within [min_total, max_total] band. Linear scaling is the conservative baseline \u2014 revisit convex scaling in Round 3 once actual allocation output can be evaluated. Floor exit: reduce position to zero after 20 consecutive days of negative blend. Exit threshold (20d) intentionally longer than re-entry threshold (15d) \u2014 requires more conviction to exit than to re-enter."
     }
   },
   "overlays": {
@@ -429,6 +570,40 @@
       "exclude_from_denominator": true,
       "rebalance_rule": "manual_or_band",
       "notes": "Managed futures stabilizer sleeve."
+    },
+    "geopolitical_stress": {
+      "enabled": true,
+      "tickers": [
+        "XLE"
+      ],
+      "band_total": [
+        0.02,
+        0.06
+      ],
+      "exclude_from_allocation": true,
+      "exclude_from_denominator": true,
+      "retain_momentum_scoring": true,
+      "momentum_scoring_use": "reference_only",
+      "rebalance_rule": "manual_or_geopolitical_trigger",
+      "geopolitical_trigger_definition": {
+        "conditions": {
+          "brent_1d_pct_change_gte": 0.06,
+          "brent_3d_cumulative_pct_change_gte": 0.08,
+          "vix_spot_gte": 30,
+          "vix_inversion": "VIX_spot > VIX_3m AND VIX_spot >= 25"
+        },
+        "trigger_logic": "ANY",
+        "trigger_effect": "advisory_review_required",
+        "auto_execute": false,
+        "condition_notes": {
+          "brent_1d_pct_change_gte": "6% single-day Brent spike = acute supply shock (missile strike, port closure, sudden embargo). Catches the panic bid.",
+          "brent_3d_cumulative_pct_change_gte": "8% 3-day cumulative Brent move = sustained escalation (slow-rolling naval blockade, multi-day Hormuz disruption). Catches what the single-day threshold misses.",
+          "vix_spot_gte": "VIX \u2265 30 = market-wide stress regime.",
+          "vix_inversion": "Term structure inversion signals acute near-term panic premium."
+        },
+        "notes": "ADVISORY ONLY. Trigger flags a review window; execution remains manual and discretionary within band_total [0.02, 0.06]. XLE position managed via GTC limit orders, not algorithmic execution."
+      },
+      "notes": "XLE is a discretionary geopolitical hedge, not a systematic momentum allocation. Excluded from the allocation engine and denominator. Momentum score retained for situational awareness only \u2014 not used to drive weight. Band managed manually via GTC limit orders. Band thresholds TBD Round 2."
     }
   },
   "validators": {
@@ -458,12 +633,90 @@
       "enabled": true,
       "severity": "error",
       "notes": "Any ticker absent from ticker_constraints must be treated as reference-only via governance.defaults.ticker_constraints."
+    },
+    "l1_sleeve_caps": {
+      "enabled": true,
+      "severity": "error",
+      "notes": "L1 sleeve totals must not exceed level1[sleeve].max_total."
+    },
+    "l2_sleeve_caps": {
+      "enabled": true,
+      "severity": "error",
+      "notes": "L2 sleeve weights (as % of denominator) must not exceed level2[sleeve].cap."
+    },
+    "l2_sleeve_floors": {
+      "enabled": true,
+      "severity": "error",
+      "notes": "L2 sleeve weights must not fall below level2[sleeve].floor."
+    },
+    "per_ticker_caps": {
+      "enabled": true,
+      "severity": "error",
+      "notes": "Individual ticker weights (as % of total portfolio) must not exceed ticker_constraints[ticker].max_total."
+    },
+    "per_ticker_floors": {
+      "enabled": true,
+      "severity": "error",
+      "notes": "Individual ticker weights must not fall below ticker_constraints[ticker].min_total."
+    },
+    "per_ticker_bands": {
+      "enabled": true,
+      "severity": "error",
+      "notes": "Tickers with band_total must remain within [band_total[0], band_total[1]]. Currently: none (XLE moved to overlay)."
+    },
+    "funding_invariant": {
+      "enabled": true,
+      "severity": "error",
+      "assertion": "total_sells + cash_used == total_buys",
+      "notes": "Must hold for every rebalance event."
+    },
+    "turnover_limit": {
+      "enabled": true,
+      "severity": "warning",
+      "window": "per_rebalance_event",
+      "threshold": "max_turnover",
+      "stress_threshold": "max_turnover_stress",
+      "notes": "Warning on per-event breach (>20%). Error if annualized cap (60%) is projected to be breached within current calendar year. Sets turnover_reporting flags."
+    },
+    "bucket_a_minimum": {
+      "enabled": true,
+      "severity": "error",
+      "assertion": "market_value(TREASURY_NOTE) >= definitions.buckets.bucket_a_protected_liquidity.minimum_usd",
+      "notes": "Must use market price, not fixed fallback price, for this check."
+    },
+    "drawdown_limit": {
+      "enabled": true,
+      "severity": "error",
+      "soft_threshold": "drawdown_rules.soft_limit",
+      "hard_threshold": "drawdown_rules.hard_limit",
+      "notes": "Soft breach triggers buy freeze. Hard breach triggers forced reduction to floors."
+    },
+    "signal_staleness": {
+      "enabled": true,
+      "severity": "warning",
+      "max_stale_days": 3,
+      "notes": "Warn if momentum signal inputs (price data) have not been updated within max_stale_days."
+    },
+    "momentum_data_missing": {
+      "enabled": true,
+      "severity": "warning",
+      "notes": "Warn if any inducted ticker has insufficient price history to compute momentum blend."
+    },
+    "lifecycle_review_overdue": {
+      "enabled": true,
+      "severity": "warning",
+      "notes": "Warn if any inducted ticker has not been reviewed within lifecycle_rules.review_days_default days."
+    },
+    "rebalance_trigger_overdue": {
+      "enabled": true,
+      "severity": "warning",
+      "notes": "Warn if calendar rebalance has not been acted upon within 3 business days of scheduled date (first Monday of month)."
     }
   },
   "definitions": {
     "buckets": {
       "bucket_a_protected_liquidity": {
-        "name": "Bucket A — Protected Liquidity",
+        "name": "Bucket A \u2014 Protected Liquidity",
         "included_assets": "Treasuries only (CUSIP prefix 912)",
         "excluded_assets": "Cash does not satisfy Bucket A",
         "minimum_usd": 45000,
@@ -477,7 +730,7 @@
         ]
       },
       "bucket_b_deployable": {
-        "name": "Bucket B — Deployable Capital",
+        "name": "Bucket B \u2014 Deployable Capital",
         "included_assets": "All non-Treasury assets plus cash",
         "notes": "Sole denominator for MWS allocation/optimization."
       }
@@ -490,5 +743,32 @@
         "notes": "Bucket A excluded; cash included; overlays excluded."
       }
     }
+  },
+  "objectives": {
+    "primary": "outperform_vti_net_of_turnover_costs",
+    "secondary": "limit_max_drawdown",
+    "benchmark_primary": "VTI",
+    "benchmark_secondary": "QQQ",
+    "time_horizon_years": 10,
+    "target_annual_alpha_bps": 150,
+    "notes": "Primary: outperform VTI by \u2265150bps net of estimated turnover costs. Cost model assumes 8bps per dollar traded (spread + slippage for liquid ETFs). Secondary: limit peak-to-trough drawdown per drawdown_rules.",
+    "alpha_measurement": "net_of_turnover_costs",
+    "alpha_cost_model_bps_per_dollar_traded": 8,
+    "benchmark": "VTI"
+  },
+  "drawdown_rules": {
+    "enabled": true,
+    "measurement": "peak_to_trough_rolling_252d",
+    "soft_limit": 0.2,
+    "soft_limit_action": "freeze_new_buys_review_required",
+    "hard_limit": 0.28,
+    "hard_limit_action": "reduce_all_positions_to_sleeve_floors",
+    "recovery_condition": {
+      "drawdown_below": 0.12,
+      "consecutive_days": 10,
+      "action": "resume_normal_rebalancing"
+    },
+    "stress_turnover_cap": "max_turnover_stress",
+    "notes": "Soft limit (20%): freeze new buys, require manual review. Hard limit (28%): force reduction of all positions to sleeve floors. Recovery: resume normal rebalancing once drawdown < 12% for 10 consecutive days. 20% soft aligns with conventional bear market definition. 8pp gap (20\u219228) provides managed response window before hard limit fires."
   }
 }

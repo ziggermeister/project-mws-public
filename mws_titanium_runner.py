@@ -473,7 +473,7 @@ def compute_portfolio_alpha_from_log(policy: dict) -> Dict[str, str]:
 def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
     """
     Generates a 2-panel chart:
-      Panel 1: Titanium (MWS) vs VTI (S&P) vs QQQ (Nasdaq) cumulative performance
+      Panel 1: Titanium (MWS) vs VTI (Total Market) vs QQQ (Nasdaq) cumulative performance
       Panel 2: Cumulative alpha vs VTI and QQQ
 
     NOTE: Shading removed (will be added later).
@@ -566,15 +566,50 @@ def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
             2, 1, figsize=(14, 9), sharex=True,
             gridspec_kw={"height_ratios": [2, 1]}
         )
+        
+        # --- Right-side labels (Panel 1): bold black, 2 decimals ---
+        def _label_last(ax, x_ser: pd.Series, y_ser: pd.Series, text: str,
+                        y_nudge_pts: int = 0, color: str = "black") -> None:
+            if x_ser is None or y_ser is None or len(x_ser) == 0 or len(y_ser) == 0:
+                return
+
+            x_last = x_ser.iloc[-1]
+            y_last = float(y_ser.iloc[-1])
+
+            # 🔵 Visible dot at endpoint
+            ax.scatter(
+                x_last,
+                y_last,
+                s=100,              # size of dot
+                zorder=5,
+                color=color,
+                edgecolor="white",
+                linewidth=1
+            )
+
+            # Label
+            ax.annotate(
+                text,
+                xy=(x_last, y_last),
+                xytext=(10, y_nudge_pts),
+                textcoords="offset points",
+                ha="left",
+                va="center",
+                fontsize=11,
+                fontweight="light",
+                color="black",
+                clip_on=False
+            )
+            
 
         # Panel 1: performance
-        ax1.plot(df_plot[date_c], df_plot[port_col], label="Titanium (MWS)", linewidth=2)
+        ax1.plot(df_plot[date_c], df_plot[port_col], label="Titanium (MWS)", linewidth=2, color="blue")
 
         if pct_vti:
-            ax1.plot(df_plot[date_c], pd.to_numeric(df_plot[pct_vti], errors="coerce"), label="VTI (S&P)", linewidth=2)
+            ax1.plot(df_plot[date_c], pd.to_numeric(df_plot[pct_vti], errors="coerce"), label="VTI (Total Market)", linewidth=2, color="orange")
 
         if pct_qqq:
-            ax1.plot(df_plot[date_c], pd.to_numeric(df_plot[pct_qqq], errors="coerce"), label="QQQ (Nasdaq)", linewidth=2)
+            ax1.plot(df_plot[date_c], pd.to_numeric(df_plot[pct_qqq], errors="coerce"), label="QQQ (Nasdaq)", linewidth=2, color="green")
 
         ax1.set_title(f"Titanium Performance ({title_suffix})")
         ax1.grid(True, alpha=0.3)
@@ -583,42 +618,23 @@ def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
 
         # Panel 2: cumulative alpha
         if alpha_vti is not None:
-            ax2.plot(df_plot[date_c], alpha_vti, label="Alpha vs VTI (S&P)", linewidth=2)
+            ax2.plot(df_plot[date_c], alpha_vti, label="Alpha vs VTI (Total Market)", linewidth=2, color="orange")
         if alpha_qqq is not None:
-            ax2.plot(df_plot[date_c], alpha_qqq, label="Alpha vs QQQ (Nasdaq)", linewidth=2)
+            ax2.plot(df_plot[date_c], alpha_qqq, label="Alpha vs QQQ (Nasdaq)", linewidth=2, color="green")
 
         ax2.axhline(0, linewidth=1)
-        ax2.set_title(f"Cumulative Alpha vs. Nasdaq and S&P (since {chart_start_str})")
+        ax2.set_title(f"Cumulative Alpha vs. Nasdaq and Total Market (since {chart_start_str})")
         ax2.grid(True, alpha=0.3)
         ax2.legend()
         ax2.yaxis.set_major_formatter(lambda x, pos: f"{x*100:.0f}%")
 
-        # --- Right-side labels (Panel 1): bold black, 2 decimals ---
-        def _label_last(ax, x_ser: pd.Series, y_ser: pd.Series, text: str, y_nudge_pts: int = 0) -> None:
-            if x_ser is None or y_ser is None or len(x_ser) == 0 or len(y_ser) == 0:
-                return
-            x_last = x_ser.iloc[-1]
-            y_last = float(y_ser.iloc[-1])
-            ax.annotate(
-                text,
-                xy=(x_last, y_last),
-                xytext=(10, y_nudge_pts),
-                textcoords="offset points",
-                ha="left",
-                va="center",
-                fontsize=12,
-                fontweight="bold",
-                color="black",
-                clip_on=False
-            )
-
         series_for_labels = []
-        series_for_labels.append(("Titanium (MWS)", df_plot[date_c], pd.to_numeric(df_plot[port_col], errors="coerce")))
+        series_for_labels.append(("Titanium MWS:", df_plot[date_c], pd.to_numeric(df_plot[port_col], errors="coerce")))
 
         if pct_vti:
-            series_for_labels.append(("VTI (S&P)", df_plot[date_c], pd.to_numeric(df_plot[pct_vti], errors="coerce")))
+            series_for_labels.append(("Total Market:", df_plot[date_c], pd.to_numeric(df_plot[pct_vti], errors="coerce")))
         if pct_qqq:
-            series_for_labels.append(("QQQ (Nasdaq)", df_plot[date_c], pd.to_numeric(df_plot[pct_qqq], errors="coerce")))
+            series_for_labels.append(("Nasdaq:", df_plot[date_c], pd.to_numeric(df_plot[pct_qqq], errors="coerce")))
 
         last_vals = []
         for name, xs, ys in series_for_labels:
@@ -627,6 +643,33 @@ def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
                 continue
             xs2 = df_plot.loc[ys2.index, date_c]
             last_vals.append((name, xs2, ys2, float(ys2.iloc[-1])))
+            
+        # --- Right-side labels (Panel 2) ---
+        series2_for_labels = []
+        if alpha_vti is not None:
+            series2_for_labels.append(("vs Total Market:", df_plot[date_c], alpha_vti))
+        if alpha_qqq is not None:
+            series2_for_labels.append(("vs Nasdaq:", df_plot[date_c], alpha_qqq))
+
+        last2_vals = []
+        for name, xs, ys in series2_for_labels:
+            ys2 = pd.to_numeric(ys, errors="coerce").dropna()
+            if ys2.empty:
+                continue
+            xs2 = df_plot.loc[ys2.index, date_c]
+            last2_vals.append((name, xs2, ys2, float(ys2.iloc[-1])))
+
+        last2_vals.sort(key=lambda x: x[3])
+        nudges2 = {name: 0 for (name, *_rest) in last2_vals}
+        for i in range(1, len(last2_vals)):
+            prev = last2_vals[i - 1]
+            cur = last2_vals[i]
+            if abs(cur[3] - prev[3]) < 0.0025:
+                nudges2[cur[0]] = nudges2[prev[0]] + 12
+
+        for name, xs, ys, v in last2_vals:
+            _label_last(ax2, xs, ys, f"{name} {v*100:.2f}%", y_nudge_pts=nudges2.get(name, 0))
+            
 
         last_vals.sort(key=lambda x: x[3])
         nudges = {name: 0 for (name, *_rest) in last_vals}
@@ -637,7 +680,7 @@ def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
                 nudges[cur[0]] = nudges[prev[0]] + 12
 
         for name, xs, ys, v in last_vals:
-            _label_last(ax1, xs, ys, f"{v*100:.2f}%", y_nudge_pts=nudges.get(name, 0))
+            _label_last(ax1, xs, ys, f"{name} {v*100:.2f}%", y_nudge_pts=nudges.get(name, 0))
 
         plt.tight_layout()
         plt.savefig(CHART_FILENAME)
