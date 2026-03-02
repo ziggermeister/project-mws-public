@@ -4,9 +4,9 @@ VXUS,821.29764,core_equity
 SOXQ,844.23585,ai_tech_growth
 CHAT,892.41565,ai_tech_growth
 QQQM,99.61856,ai_tech_growth
-BOTZ,436.32757,ai_tech_growth
+BOTZ,421.32757,ai_tech_growth
 DTCR,1791.00000,ai_tech_growth
-GRID,170.00000,ai_tech_growth
+GRID,137.00000,ai_tech_growth
 IAUM,952.50306,real_assets
 SIVR,419.64679,real_assets
 URNM,218.19625,real_assets
@@ -17,4 +17,4 @@ XBI,318.91797,biotech
 DBMF,1138.00000,overlay_diversifier
 KMLM,1311.00000,overlay_diversifier
 TREASURY_NOTE,1.00000,bucket_a
-CASH,31882.58,bucket_b
+CASH,38485.92,bucket_b

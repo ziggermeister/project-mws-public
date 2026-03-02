@@ -411,7 +411,7 @@
       }
     },
     "GRID": {
-      "max_total": 0.02,
+      "max_total": 0.03,
       "lifecycle": {
         "stage": "inducted"
       }
