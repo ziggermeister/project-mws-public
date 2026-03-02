@@ -284,14 +284,49 @@ def run_titanium_audit(policy: dict, state: dict, hist: pd.DataFrame, hold: pd.D
 def calculate_portfolio_value(policy: dict, hold: pd.DataFrame, hist: pd.DataFrame) -> Tuple[float, str]:
     """
     Includes policy.governance.fixed_asset_prices for CASH / TREASURY_NOTE / etc.
+
+    v2.7.1 compatibility: fixed_asset_prices entries may be plain scalars (legacy)
+    or structured objects { price_type, fallback_price, ... } (v2.7.1+).
+    Resolver handles both formats without crashing.
     """
     print("[LOG] Phase 2: Calculating Portfolio Value...")
 
     latest_prices = hist.sort_values("Date").groupby("Ticker").last()["AdjClose"]
     asof = str(hist["Date"].max().date())
 
-    fixed = (policy.get("governance", {}) or {}).get("fixed_asset_prices", {}) or {}
-    fixed = {str(k).strip().upper(): float(v) for k, v in fixed.items() if k is not None}
+    fixed_raw = (policy.get("governance", {}) or {}).get("fixed_asset_prices", {}) or {}
+
+    def _resolve_fixed_price(ticker: str) -> Optional[float]:
+        """
+        Returns a fixed price for ticker if one is defined in fixed_asset_prices,
+        otherwise returns None (caller falls back to live HIST price).
+        Handles both legacy scalar format and v2.7.1 structured object format.
+        """
+        entry = fixed_raw.get(ticker)
+        if entry is None:
+            return None
+
+        # v2.7.1 structured object format: { "price_type": "market"|"fixed", "fallback_price": N, ... }
+        if isinstance(entry, dict):
+            price_type = str(entry.get("price_type", "fixed")).strip().lower()
+            if price_type == "market":
+                # Prefer live HIST price; fall back to fallback_price if unavailable
+                live = latest_prices.get(ticker)
+                if live is not None and np.isfinite(float(live)) and float(live) > 0:
+                    return float(live)
+                fallback = entry.get("fallback_price")
+                return float(fallback) if fallback is not None else None
+            else:
+                # price_type == "fixed" or unrecognized: use fallback_price directly
+                fallback = entry.get("fallback_price")
+                return float(fallback) if fallback is not None else None
+
+        # Legacy scalar format: CASH: 1.0, or any plain number
+        try:
+            v = float(entry)
+            return v if np.isfinite(v) else None
+        except (TypeError, ValueError):
+            return None
 
     total_val = 0.0
     if hold is not None and not hold.empty:
@@ -302,14 +337,15 @@ def calculate_portfolio_value(policy: dict, hold: pd.DataFrame, hist: pd.DataFra
             except Exception:
                 qty = 0.0
 
-            if ticker in fixed:
-                px = float(fixed[ticker])
+            fixed_px = _resolve_fixed_price(ticker)
+            if fixed_px is not None:
+                px = fixed_px
             else:
                 px = float(latest_prices.get(ticker, 0.0) or 0.0)
 
             total_val += qty * px
 
-    print(f"\n🚀 TITANIUM COMMAND CENTER | AS-OF: {asof}")
+    print(f"\n🚀 TITANIUM COMMAND CENTER | AS-OF: {asof} | policy_compat=v2.7.1")
     print(f"🌍 REGIME: 🟢 BULL | PORTFOLIO: ${total_val:,.2f}")
     return total_val, asof
 
