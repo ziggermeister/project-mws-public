@@ -6,7 +6,7 @@
   "tickers": [
     "VTI", "VXUS", "QQQM", "SOXQ", "CHAT", "BOTZ", "GRID", "DTCR", "ITA", "XLE",
     "XBI", "IAUM", "SIVR", "REMX", "DBMF", "KMLM", "URNM",
-    "QQQ", "SOXX", "SRVR", "IBB", "GLD", "SLV", "PICK", "AGG", "IBIT", "COPX"
+    "QQQ", "SOXX", "SRVR", "IBB", "GLD", "SLV", "PICK", "AGG", "IBIT", "COPX", "INDEXCBOE:VIX"
   ],
   "notes": [
     "Authoritative Gatekeeper: Tickers listed here are the only ones fetched.",
@@ -39,7 +39,9 @@
     { "ticker": "PICK", "classification": "reference", "type": "reference" },
     { "ticker": "AGG", "classification": "reference", "type": "reference" },
     { "ticker": "IBIT", "classification": "crypto", "type": "inductee" },
-    { "ticker": "COPX", "classification": "real_assets", "type": "inductee" }
+    { "ticker": "COPX", "classification": "real_assets", "type": "inductee" },
+    { "ticker": "INDEXCBOE:VIX", "classification": "reference", "type": "reference" }
+    
 
   ]
 }
