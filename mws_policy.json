@@ -364,7 +364,8 @@
     },
     "IBIT": {
       "crypto": 1.0
-    }
+    },
+    "COPX": { "strategic_materials": 1.0 }
   },
   "ticker_constraints": {
     "VTI": {
@@ -518,7 +519,14 @@
       "min_total": 0.0,
       "lifecycle": {
         "stage": "inducted"
-      }
+      },
+      "exclude_from_momentum": false,
+      "exclude_from_denominator": false,
+      "notes": "Inducted. Fully allocatable via momentum engine."
+    },
+    "COPX": {
+        "max_total": 0.03,
+        "lifecycle": { "stage": "inducted" }
     }
   },
   "signals": {
