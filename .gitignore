@@ -16,3 +16,8 @@ daily-emailer/CONFIG_PVT.json
 # chart
 mws_equity_curve.png
 
+#other untracked files
+convert.py
+data_pull.py
+mws_portfolio_balancer.py
+
