@@ -183,6 +183,7 @@ function updateHistDatabase_(today, requiredTickers, policyRequiredSet, tz, star
   const C = getC_();
 
   const csvFile = DriveApp.getFileById(C.HIST_FILE_ID);
+  //console.log(`[HIST] writing file="${csvFile.getName()}" id=${csvFile.getId()}`);
   const raw = csvFile.getBlob().getDataAsString().replace(/^\ufeff/g, "").trim();
   const parsed = Utilities.parseCsv(raw);
   if (!parsed || parsed.length < 2) throw new Error("HIST CSV empty or malformed.");
@@ -236,7 +237,6 @@ function updateHistDatabase_(today, requiredTickers, policyRequiredSet, tz, star
   // Backfill: one chunk per ticker per run
   for (const t of requiredTickers) {
     if (Date.now() - startTime > Number(C.RUNTIME_BUDGET_MS)) { unfinishedTickers.add(t); continue; }
-
     const minHave = bounds[t]?.min;
     const needsYear = (!minHave || minHave > requiredStart);
     if (!needsYear) continue;
@@ -270,6 +270,8 @@ function updateHistDatabase_(today, requiredTickers, policyRequiredSet, tz, star
   requiredTickers.forEach(t => {
     const p = livePrices[t] || 0;
     if (p > 0) {
+    if (!(p > 0)) console.warn(`[LIVE] Missing/0 price for required ticker ${t} on ${today} (raw=${p})`);
+
       const row = new Array(col.width).fill("");
       row[col.date] = today;
       row[col.ticker] = t;
@@ -362,11 +364,29 @@ function processSnapshot_(policy, tz, alerts) {
   const holdings = Utilities.parseCsv(DriveApp.getFileById(C.HOLDINGS_FILE_ID).getBlob().getDataAsString()).slice(1);
   let totalVal = 0;
 
+
   holdings.forEach(r => {
     const t = String(r[0] || "").trim().toUpperCase();
     const qty = parseFloat(r[1]) || 0;
-    const fixed = policy?.governance?.fixed_asset_prices?.[t];
-    const px = (fixed !== undefined) ? fixed : (priceByKey[`${asOfDate}|${t}`] || 0);
+    //const fixed = policy?.governance?.fixed_asset_prices?.[t];
+    //const px = (fixed !== undefined) ? fixed : (priceByKey[`${asOfDate}|${t}`] || 0);
+    const fixedEntry = policy?.governance?.fixed_asset_prices?.[t];
+    let px;
+    if (fixedEntry === undefined) {
+      // No fixed price — use live price from HIST
+      px = priceByKey[`${asOfDate}|${t}`] || 0;
+    } else if (typeof fixedEntry === 'object') {
+      // v2.7.1 structured format
+      if (fixedEntry.price_type === 'market') {
+        // Prefer live price; fall back to fallback_price if not in HIST
+        px = priceByKey[`${asOfDate}|${t}`] || fixedEntry.fallback_price || 0;
+      } else {
+        px = fixedEntry.fallback_price || 0;
+      }
+    } else {
+      // Plain scalar (CASH = 1.0, any legacy entries)
+      px = fixedEntry;
+    }
     totalVal += qty * px;
   });
 
@@ -820,6 +840,7 @@ function getBatchPricesScratch_(tickers) {
   const scratch = openScratch_();
   const sh = ensureScratchSheet_(scratch);
 
+
   sh.clearContents();
 
   tickers.forEach((t, i) => {
@@ -839,7 +860,6 @@ function getBatchPricesScratch_(tickers) {
     const v = parseFloat(r[1]);
     if (k) out[k] = isFinite(v) ? v : 0;
   });
-
   return out;
 }
 
