@@ -1,17 +1,16 @@
 Ticker,Shares,Class
 VTI,286.72109,core_equity
 VXUS,834.29764,core_equity
-SOXQ,893.23585,ai_tech
-CHAT,893.69084,ai_tech
-QQQM,77.35555,ai_tech
+SOXQ,885.20777,ai_tech
+CHAT,882.48017,ai_tech
 BOTZ,421.32757,ai_tech
-DTCR,1804.00000,ai_tech
+DTCR,1782.00000,ai_tech
 GRID,137.00000,ai_tech
 IAUM,871.24099,real_assets
 SIVR,435.64679,real_assets
 URNM,248.19625,strategic_materials
 REMX,207.00262,strategic_materials
-COPX,121.66216,strategic_materials
+COPX,114.82534,strategic_materials
 ITA,201.54988,defense_energy
 XLE,849.67720,defense_energy
 XBI,318.91797,biotech
@@ -19,4 +18,4 @@ DBMF,1174.00000,overlay_diversifier
 KMLM,1311.00000,overlay_diversifier
 IBIT,0.00000,crypto
 TREASURY_NOTE,1.00000,bucket_a
-CASH,31401.93,bucket_b
+CASH,53056.05,bucket_b

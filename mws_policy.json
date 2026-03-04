@@ -1,10 +1,10 @@
 {
   "meta": {
     "policy_name": "MWS v2.6.15",
-    "policy_version": "v2.7.1+fully_calibrated",
+    "policy_version": "v2.7.2",
     "policy_family": "Titanium MWS",
-    "last_updated": "2026-03-02",
-    "notes": "v2.7.1: Round 2 calibration complete. All TBD_round2 thresholds resolved. Adds trigger_precedence block, split signal_drift (sleeve/ticker), Brent 3-day cumulative trigger, turnover_clipped reporting flag. Prior: v2.7.0+structural_engine."
+    "last_updated": "2026-03-04",
+    "notes": "v2.7.2: QQQM removed. XLE reclassified from geopolitical_stress overlay to defense_energy sleeve (inducted). Geopolitical_stress overlay disabled. Prior: v2.7.1+fully_calibrated."
   },
   "governance": {
     "reporting_baselines": {
@@ -319,10 +319,6 @@
     "VXUS": {
       "core_equity": 1.0
     },
-    "QQQM": {
-      "ai_tech": 0.7,
-      "core_equity": 0.3
-    },
     "SOXQ": {
       "ai_tech": 1.0
     },
@@ -365,7 +361,12 @@
     "IBIT": {
       "crypto": 1.0
     },
-    "COPX": { "strategic_materials": 1.0 }
+    "COPX": {
+      "strategic_materials": 1.0
+    },
+    "XLE": {
+      "defense_energy": 1.0
+    }
   },
   "ticker_constraints": {
     "VTI": {
@@ -377,12 +378,6 @@
     },
     "VXUS": {
       "max_total": 0.15,
-      "lifecycle": {
-        "stage": "inducted"
-      }
-    },
-    "QQQM": {
-      "max_total": 0.08,
       "lifecycle": {
         "stage": "inducted"
       }
@@ -443,16 +438,11 @@
       }
     },
     "XLE": {
+      "max_total": 0.08,
       "lifecycle": {
-        "stage": "overlay"
+        "stage": "inducted"
       },
-      "is_overlay": true,
-      "overlay_name": "geopolitical_stress",
-      "exclude_from_momentum": false,
-      "momentum_scoring_use": "reference_only",
-      "exclude_from_denominator": true,
-      "eligible_for_allocation": false,
-      "notes": "XLE reclassified to geopolitical_stress_overlay per v2.7.0. band_total governed by overlays.geopolitical_stress."
+      "notes": "Reclassified from geopolitical_stress overlay to defense_energy sleeve 2026-03-04. Max_total 8% consistent with ITA. Excluded_from_denominator removed \u2014 now included in Bucket B."
     },
     "URNM": {
       "max_total": 0.04,
@@ -525,8 +515,10 @@
       "notes": "Inducted. Fully allocatable via momentum engine."
     },
     "COPX": {
-        "max_total": 0.03,
-        "lifecycle": { "stage": "inducted" }
+      "max_total": 0.03,
+      "lifecycle": {
+        "stage": "inducted"
+      }
     }
   },
   "signals": {
@@ -580,10 +572,8 @@
       "notes": "Managed futures stabilizer sleeve."
     },
     "geopolitical_stress": {
-      "enabled": true,
-      "tickers": [
-        "XLE"
-      ],
+      "enabled": false,
+      "tickers": [],
       "band_total": [
         0.02,
         0.06
@@ -611,7 +601,7 @@
         },
         "notes": "ADVISORY ONLY. Trigger flags a review window; execution remains manual and discretionary within band_total [0.02, 0.06]. XLE position managed via GTC limit orders, not algorithmic execution."
       },
-      "notes": "XLE is a discretionary geopolitical hedge, not a systematic momentum allocation. Excluded from the allocation engine and denominator. Momentum score retained for situational awareness only \u2014 not used to drive weight. Band managed manually via GTC limit orders. Band thresholds TBD Round 2."
+      "notes": "Disabled 2026-03-04. XLE reclassified back to defense_energy sleeve. Geopolitical overlay structure retained for potential future use."
     }
   },
   "validators": {
@@ -670,7 +660,7 @@
     "per_ticker_bands": {
       "enabled": true,
       "severity": "error",
-      "notes": "Tickers with band_total must remain within [band_total[0], band_total[1]]. Currently: none (XLE moved to overlay)."
+      "notes": "Tickers with band_total must remain within [band_total[0], band_total[1]]. Currently: none."
     },
     "funding_invariant": {
       "enabled": true,
