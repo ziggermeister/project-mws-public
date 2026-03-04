@@ -1,6 +1,6 @@
 /**
  * ============================================================
- * TITANIUM MWS (with CLASP): UNIFIED RUNNER (v13.6) + 2-PANEL DASHBOARD
+ * TITANIUM MWS (with CLASP): UNIFIED RUNNER (v13.7) + 2-PANEL DASHBOARD
  * ============================================================
  * Design rule:
  *  - CONFIG is DEFAULTS ONLY.
@@ -83,7 +83,7 @@ function runDailyRoutine() {
 
   try {
     C = getC_();
-    console.log(`[START] Titanium Unified v13.6 | Date=${TODAY}`);
+    console.log(`[START] Titanium Unified v13.7 | Date=${TODAY}`);
 
     // Basic config sanity (fail fast with clear errors)
     assertConfig_(C);
@@ -183,7 +183,6 @@ function updateHistDatabase_(today, requiredTickers, policyRequiredSet, tz, star
   const C = getC_();
 
   const csvFile = DriveApp.getFileById(C.HIST_FILE_ID);
-  //console.log(`[HIST] writing file="${csvFile.getName()}" id=${csvFile.getId()}`);
   const raw = csvFile.getBlob().getDataAsString().replace(/^\ufeff/g, "").trim();
   const parsed = Utilities.parseCsv(raw);
   if (!parsed || parsed.length < 2) throw new Error("HIST CSV empty or malformed.");
@@ -237,6 +236,7 @@ function updateHistDatabase_(today, requiredTickers, policyRequiredSet, tz, star
   // Backfill: one chunk per ticker per run
   for (const t of requiredTickers) {
     if (Date.now() - startTime > Number(C.RUNTIME_BUDGET_MS)) { unfinishedTickers.add(t); continue; }
+
     const minHave = bounds[t]?.min;
     const needsYear = (!minHave || minHave > requiredStart);
     if (!needsYear) continue;
@@ -270,8 +270,6 @@ function updateHistDatabase_(today, requiredTickers, policyRequiredSet, tz, star
   requiredTickers.forEach(t => {
     const p = livePrices[t] || 0;
     if (p > 0) {
-    if (!(p > 0)) console.warn(`[LIVE] Missing/0 price for required ticker ${t} on ${today} (raw=${p})`);
-
       const row = new Array(col.width).fill("");
       row[col.date] = today;
       row[col.ticker] = t;
@@ -364,12 +362,9 @@ function processSnapshot_(policy, tz, alerts) {
   const holdings = Utilities.parseCsv(DriveApp.getFileById(C.HOLDINGS_FILE_ID).getBlob().getDataAsString()).slice(1);
   let totalVal = 0;
 
-
   holdings.forEach(r => {
     const t = String(r[0] || "").trim().toUpperCase();
     const qty = parseFloat(r[1]) || 0;
-    //const fixed = policy?.governance?.fixed_asset_prices?.[t];
-    //const px = (fixed !== undefined) ? fixed : (priceByKey[`${asOfDate}|${t}`] || 0);
     const fixedEntry = policy?.governance?.fixed_asset_prices?.[t];
     let px;
     if (fixedEntry === undefined) {
@@ -537,7 +532,7 @@ function sendDailyEmail_(snapshot, charts, runDateStr, alerts) {
 
   let html = `<div style="font-family: Arial, sans-serif; color:#333; max-width: 900px; margin:auto; border: 1px solid #eee; padding: 14px;">`;
   html += `<div style="border-bottom:2px solid #f0f0f0; padding-bottom:8px; margin-bottom:10px;">
-      <div style="font-size:22px; font-weight:700; color:${headColor};">Titanium MWS Unified (v13.6)</div>
+      <div style="font-size:22px; font-weight:700; color:${headColor};">Titanium MWS Unified (v13.7)</div>
     </div>`;
 
   html += `<div style="font-size:16px; font-weight:700; color:#222; margin: 0 0 10px 0;">
@@ -647,6 +642,17 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
       .filter(r => /^\d{4}-\d{2}-\d{2}$/.test(String(r[0] || "")));
   }
 
+  // Preserve EventLabel values written by Python before deduping/sorting
+  // (normalizeRowWidth_ pads short rows with "", which would wipe them otherwise)
+  const elCol = header.indexOf("EventLabel");
+  const savedLabels = {};
+  if (elCol >= 0) {
+    data.forEach(r => {
+      const lbl = String(r[elCol] || "").trim();
+      if (lbl) savedLabels[String(r[0])] = lbl;
+    });
+  }
+
   // DEDUPE BY DATE
   data = data.filter(r => String(r[0]) !== dateStr);
 
@@ -657,6 +663,14 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
 
   data.push(newRow);
   data.sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+
+  // Restore EventLabels after sort — GAS never writes these, only carries them through
+  if (elCol >= 0) {
+    data.forEach(r => {
+      const lbl = savedLabels[String(r[0])];
+      if (lbl) r[elCol] = lbl;
+    });
+  }
 
   let baseIndex = -1;
   if (/^\d{4}-\d{2}-\d{2}$/.test(chartStart)) baseIndex = data.findIndex(r => String(r[0]) === chartStart);
@@ -706,6 +720,7 @@ function buildPerfLogHeader_(benches) {
   h.push("PortfolioPct");
   benches.forEach(b => h.push(`Pct_${b}`));
   benches.forEach(b => h.push(`Diff_${b}`));
+  h.push("EventLabel");  // written by Python runner; never modified by GAS
   return h;
 }
 
@@ -840,7 +855,6 @@ function getBatchPricesScratch_(tickers) {
   const scratch = openScratch_();
   const sh = ensureScratchSheet_(scratch);
 
-
   sh.clearContents();
 
   tickers.forEach((t, i) => {
@@ -860,6 +874,7 @@ function getBatchPricesScratch_(tickers) {
     const v = parseFloat(r[1]);
     if (k) out[k] = isFinite(v) ? v : 0;
   });
+
   return out;
 }
 
@@ -983,14 +998,3 @@ function fmtMDY_(ymd) {
   const Y = ymd.substring(0, 4), M = ymd.substring(5, 7), D = ymd.substring(8, 10);
   return `${M}/${D}/${Y}`;
 }
-
-// numeric helpers (kept for convenience)
-function toNum_(v) {
-  const x = parseFloat(v);
-  return isFinite(x) ? x : NaN;
-}
-function safeNumOrBlank_(v) {
-  const x = parseFloat(v);
-  return isFinite(x) ? x : "";
-}
-
