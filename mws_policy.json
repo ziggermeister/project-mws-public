@@ -425,7 +425,7 @@
     },
     "SIVR": {
       "min_total": 0.03,
-      "max_total": 0.08,
+      "max_total": 0.06,
       "lifecycle": {
         "stage": "inducted"
       }
