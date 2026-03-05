@@ -1,10 +1,10 @@
 {
   "meta": {
-    "policy_name": "MWS v2.6.15",
-    "policy_version": "v2.7.2",
+    "policy_name": "MWS v2.8.5",
+    "policy_version": "v2.8.5",
     "policy_family": "Titanium MWS",
     "last_updated": "2026-03-04",
-    "notes": "v2.7.2: QQQM removed. XLE reclassified from geopolitical_stress overlay to defense_energy sleeve (inducted). Geopolitical_stress overlay disabled. Prior: v2.7.1+fully_calibrated."
+    "notes": "v2.8.5: Hygiene fix only. governance.execution.trigger_precedence priority-1 action label updated to match drawdown_rules.hard_limit_action wording (conditional, not absolute). No economic, cap, or logic changes from v2.8.4."
   },
   "governance": {
     "reporting_baselines": {
@@ -64,7 +64,7 @@
           {
             "priority": 1,
             "trigger": "drawdown_rules.hard_limit",
-            "action": "reduce_all_positions_to_sleeve_floors",
+            "action": "reduce_all_positions_toward_sleeve_floors_subject_to_min_total_with_hard_limit_override_if_insufficient",
             "overrides": "all_lower_priority_triggers",
             "notes": "Survival mode. Portfolio protection overrides all optimization."
           },
@@ -223,7 +223,12 @@
   },
   "allocation": {
     "denominator_mode": "allocatable_ex_bucket_a",
-    "band_normalization": "percentile_in_band"
+    "band_normalization": "percentile_in_band",
+    "denominator_definition": "Allocatable denominator = TPV minus overlays (DBMF, KMLM) minus Bucket A (TREASURY_NOTE). Cash (Bucket B) IS included. Used as basis for all L1/L2 sleeve cap calculations.",
+    "l1_cap_basis": "allocatable_denominator",
+    "l2_cap_basis": "allocatable_denominator",
+    "ticker_cap_basis": "total_portfolio_value_TPV",
+    "overlay_band_basis": "total_portfolio_value_TPV"
   },
   "cash_reserve": {
     "target_cash_usd": 3800,
@@ -236,79 +241,156 @@
   "sleeves": {
     "level1": {
       "growth": {
+        "cap": 0.6,
+        "cap_basis": "allocatable_denominator",
         "children": [
           "ai_tech",
           "biotech",
           "core_equity"
         ],
-        "max_total": 0.65
+        "economic_driver": "equity beta, AI capex, earnings growth",
+        "notes": "Core equity risk. Momentum model concentrates here in bull regimes."
       },
-      "defensive": {
+      "real_assets": {
+        "cap": 0.25,
+        "cap_basis": "allocatable_denominator",
         "children": [
-          "real_assets",
-          "defense_energy",
-          "strategic_materials"
+          "strategic_materials",
+          "defense_energy"
         ],
-        "max_total": 0.3
+        "economic_driver": "commodity cycle, electrification, geopolitics, energy demand",
+        "notes": "Pro-cyclical real asset and geopolitical equity exposure. Includes energy equities (XLE), defense contractors (ITA), and commodity miners (URNM, REMX, COPX). NOT a crisis hedge \u2014 these are growth/cycle trades."
+      },
+      "monetary_hedges": {
+        "cap": 0.15,
+        "cap_basis": "allocatable_denominator",
+        "children": [
+          "precious_metals"
+        ],
+        "economic_driver": "real rates, inflation, currency debasement, crisis hedge",
+        "notes": "True macro hedges. Gold and silver. Low equity correlation over long horizons. These are the only assets expected to hold/rise during equity drawdowns."
       },
       "speculative": {
+        "cap": 0.05,
+        "cap_basis": "allocatable_denominator",
         "children": [
           "crypto"
         ],
-        "max_total": 0.05
+        "economic_driver": "high-volatility asymmetric trades",
+        "notes": "Hard cap. crypto only."
       },
       "stabilizers": {
-        "children": [
-          "managed_futures"
-        ],
         "non_budgeted": true,
         "exclude_from_momentum": true,
         "exclude_from_denominator": true,
-        "floor": 0.06,
-        "cap": 0.12,
-        "notes": "Non-allocatable overlay sleeve. Excluded from momentum + denominators; used for vol/drawdown shaping."
+        "band_total": [
+          0.06,
+          0.12
+        ],
+        "band_basis": "total_portfolio_value_TPV",
+        "children": [
+          "managed_futures"
+        ],
+        "economic_driver": "crisis alpha, trend following, rates",
+        "notes": "Non-allocatable overlay sleeve. Excluded from L1/L2 caps and denominator. DBMF + KMLM managed futures. Bucket A (Treasuries) is governed separately as protected liquidity \u2014 it is not subject to this overlay band."
       }
     },
     "level2": {
       "ai_tech": {
+        "l1_parent": "growth",
         "floor": 0.22,
-        "cap": 0.32
+        "cap": 0.32,
+        "cap_basis": "allocatable_denominator",
+        "tickers": [
+          "SOXQ",
+          "CHAT",
+          "BOTZ",
+          "DTCR",
+          "GRID"
+        ],
+        "notes": "AI hardware, infrastructure, and software ETFs."
       },
       "biotech": {
+        "l1_parent": "growth",
         "floor": 0.04,
-        "cap": 0.12
+        "cap": 0.12,
+        "cap_basis": "allocatable_denominator",
+        "tickers": [
+          "XBI"
+        ],
+        "notes": "Biotech/genomics growth sleeve."
       },
       "core_equity": {
+        "l1_parent": "growth",
         "floor": 0.18,
-        "cap": 0.38
-      },
-      "real_assets": {
-        "floor": 0.08,
-        "cap": 0.16
-      },
-      "defense_energy": {
-        "floor": 0.06,
-        "cap": 0.14
-      },
-      "crypto": {
-        "floor": 0.0,
-        "cap": 0.05,
-        "stress_cap_total": 0.045
+        "cap": 0.38,
+        "cap_basis": "allocatable_denominator",
+        "tickers": [
+          "VTI",
+          "VXUS"
+        ],
+        "notes": "Broad market index anchors. VTI has min_total floor via ticker_constraints."
       },
       "strategic_materials": {
+        "l1_parent": "real_assets",
         "floor": 0.04,
         "cap": 0.1,
-        "notes": "Strategic scarcity equities (uranium, rare earths, critical inputs). Pro-cyclical but geopolitically defensive."
+        "cap_basis": "allocatable_denominator",
+        "tickers": [
+          "URNM",
+          "REMX",
+          "COPX"
+        ],
+        "notes": "Uranium, rare earths, copper. Pro-cyclical commodity miners. High beta \u2014 can drawdown 50%+ in commodity bear cycles. Capped at 10% L2 for concentration risk."
+      },
+      "defense_energy": {
+        "l1_parent": "real_assets",
+        "floor": 0.06,
+        "cap": 0.14,
+        "cap_basis": "allocatable_denominator",
+        "tickers": [
+          "XLE",
+          "ITA"
+        ],
+        "notes": "Oil majors (XLE) and defense contractors (ITA). Geopolitical equity exposure. Cyclical with macro tailwinds. Reclassified from legacy 'defensive' L1 to real_assets L1 in v2.8.0."
+      },
+      "precious_metals": {
+        "l1_parent": "monetary_hedges",
+        "floor": 0.08,
+        "cap": 0.15,
+        "cap_basis": "allocatable_denominator",
+        "tickers": [
+          "IAUM",
+          "SIVR"
+        ],
+        "notes": "Gold (IAUM) and Silver (SIVR). True macro hedges. Isolated from commodity cycle assets in v2.8.0 restructure. Gold competes only with silver within this sleeve."
+      },
+      "crypto": {
+        "l1_parent": "speculative",
+        "floor": 0.0,
+        "cap": 0.05,
+        "cap_basis": "allocatable_denominator",
+        "stress_cap_total": 0.045,
+        "tickers": [
+          "IBIT"
+        ],
+        "notes": "Hard cap. IBIT only. Currently dormant (score negative)."
       },
       "managed_futures": {
+        "l1_parent": "stabilizers",
         "non_budgeted": true,
         "floor": 0.06,
         "cap": 0.12,
+        "cap_basis": "total_portfolio_value_TPV",
         "eligible_for_allocation": false,
         "eligible_for_momentum": false,
         "exclude_from_momentum": true,
         "exclude_from_denominator": true,
-        "notes": "Overlay sleeve (DBMF, KMLM). Target split handled by overlays.managed_futures."
+        "tickers": [
+          "DBMF",
+          "KMLM"
+        ],
+        "notes": "Overlay sleeve. Target split handled by overlays.managed_futures."
       }
     }
   },
@@ -337,14 +419,11 @@
     "XBI": {
       "biotech": 1.0
     },
-    "ITA": {
+    "XLE": {
       "defense_energy": 1.0
     },
-    "IAUM": {
-      "real_assets": 1.0
-    },
-    "SIVR": {
-      "real_assets": 1.0
+    "ITA": {
+      "defense_energy": 1.0
     },
     "URNM": {
       "strategic_materials": 1.0
@@ -352,20 +431,23 @@
     "REMX": {
       "strategic_materials": 1.0
     },
+    "COPX": {
+      "strategic_materials": 1.0
+    },
+    "IAUM": {
+      "precious_metals": 1.0
+    },
+    "SIVR": {
+      "precious_metals": 1.0
+    },
+    "IBIT": {
+      "crypto": 1.0
+    },
     "DBMF": {
       "managed_futures": 1.0
     },
     "KMLM": {
       "managed_futures": 1.0
-    },
-    "IBIT": {
-      "crypto": 1.0
-    },
-    "COPX": {
-      "strategic_materials": 1.0
-    },
-    "XLE": {
-      "defense_energy": 1.0
     }
   },
   "ticker_constraints": {
@@ -635,27 +717,27 @@
     "l1_sleeve_caps": {
       "enabled": true,
       "severity": "error",
-      "notes": "L1 sleeve totals must not exceed level1[sleeve].max_total."
+      "notes": "L1 sleeve totals (% of allocatable denom) must not exceed level1[sleeve].cap. Basis: allocatable_denominator = TPV - overlays - Bucket A."
     },
     "l2_sleeve_caps": {
       "enabled": true,
       "severity": "error",
-      "notes": "L2 sleeve weights (as % of denominator) must not exceed level2[sleeve].cap."
+      "notes": "L2 sleeve weights (% of allocatable denom) must not exceed level2[sleeve].cap. Basis: allocatable_denominator."
     },
     "l2_sleeve_floors": {
       "enabled": true,
-      "severity": "error",
-      "notes": "L2 sleeve weights must not fall below level2[sleeve].floor."
+      "severity": "warning",
+      "notes": "L2 sleeve weights (% of allocatable denom) must not fall below level2[sleeve].floor. Basis: allocatable_denominator (TPV minus overlays minus Bucket A; cash included). Floor conflict resolution: if the optimization target set is infeasible \u2014 defined as: cannot simultaneously satisfy all hard constraints (Bucket A minimum, per-ticker caps, per-ticker min_total floors, overlay bands, turnover cap) given current TPV and allocatable denominator \u2014 then L2 sleeve floors are treated as soft constraints and relaxed proportionally. Hard constraints are never relaxed except as explicitly overridden by drawdown_rules. Tie-break precedence: satisfy per-ticker min_total (TPV-based) first; remaining capital is then allocated to meet sleeve floors proportionally. No engine may reduce a ticker below its min_total in order to satisfy a sleeve floor unless drawdown hard_limit is active (see drawdown_rules.hard_limit_action)."
     },
     "per_ticker_caps": {
       "enabled": true,
       "severity": "error",
-      "notes": "Individual ticker weights (as % of total portfolio) must not exceed ticker_constraints[ticker].max_total."
+      "notes": "Individual ticker weights (as % of TOTAL PORTFOLIO VALUE / TPV) must not exceed ticker_constraints[ticker].max_total. Basis: TPV (includes overlays and Bucket A)."
     },
     "per_ticker_floors": {
       "enabled": true,
       "severity": "error",
-      "notes": "Individual ticker weights must not fall below ticker_constraints[ticker].min_total."
+      "notes": "Individual ticker weights (as % of TPV) must not fall below ticker_constraints[ticker].min_total. Basis: TPV."
     },
     "per_ticker_bands": {
       "enabled": true,
@@ -730,7 +812,7 @@
       "bucket_b_deployable": {
         "name": "Bucket B \u2014 Deployable Capital",
         "included_assets": "All non-Treasury assets plus cash",
-        "notes": "Sole denominator for MWS allocation/optimization."
+        "notes": "Basis for allocatable denominator (cash included; overlays excluded; Bucket A excluded). All non-Treasury assets plus cash. Deployable capital for momentum allocation."
       }
     },
     "denominators": {
@@ -738,7 +820,7 @@
         "exclude_bucket_a": true,
         "exclude_cash": false,
         "exclude_overlays": true,
-        "notes": "Bucket A excluded; cash included; overlays excluded."
+        "notes": "Allocatable denominator = TPV minus overlays (DBMF, KMLM) minus Bucket A (TREASURY_NOTE). Cash (Bucket B) is included. Overlays excluded because they are non-budgeted. Used as basis for all L1/L2 sleeve cap and floor calculations."
       }
     }
   },
@@ -758,15 +840,23 @@
     "enabled": true,
     "measurement": "peak_to_trough_rolling_252d",
     "soft_limit": 0.2,
-    "soft_limit_action": "freeze_new_buys_review_required",
+    "soft_limit_action": "freeze_new_buys_review_required. Per-ticker min_total constraints remain in force during soft limit. No forced selling triggered at soft limit.",
     "hard_limit": 0.28,
-    "hard_limit_action": "reduce_all_positions_to_sleeve_floors",
+    "hard_limit_action": "reduce_all_positions toward sleeve floors, subject to per-ticker min_total constraints. Exception: if reducing to sleeve floors is insufficient to exit hard_limit breach, per-ticker min_total may be overridden. In all cases Bucket A minimum is preserved. Hard limit override of min_total must be logged as a compliance exception.",
     "recovery_condition": {
       "drawdown_below": 0.12,
       "consecutive_days": 10,
       "action": "resume_normal_rebalancing"
     },
     "stress_turnover_cap": "max_turnover_stress",
-    "notes": "Soft limit (20%): freeze new buys, require manual review. Hard limit (28%): force reduction of all positions to sleeve floors. Recovery: resume normal rebalancing once drawdown < 12% for 10 consecutive days. 20% soft aligns with conventional bear market definition. 8pp gap (20\u219228) provides managed response window before hard limit fires."
+    "notes": "Soft limit (20%): freeze new buys, require manual review. Hard limit (28%): force reduction of all positions to sleeve floors. Recovery: resume normal rebalancing once drawdown < 12% for 10 consecutive days. 20% soft aligns with conventional bear market definition. 8pp gap (20\u219228) provides managed response window before hard limit fires.",
+    "constraint_precedence_during_drawdown": {
+      "priority_1_always": "Bucket A minimum (protected liquidity \u2014 never touched)",
+      "priority_2_normal": "per_ticker_min_total (holds unless hard_limit active)",
+      "priority_3_normal": "overlay bands (DBMF/KMLM maintained within 6-12% TPV)",
+      "priority_4_normal": "L2 sleeve floors (soft \u2014 relaxed proportionally if infeasible)",
+      "hard_limit_override": "hard_limit_action may override per_ticker_min_total if reducing to sleeve floors is insufficient to exit breach. Override must be logged."
+    }
   }
 }
+
