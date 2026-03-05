@@ -1,8 +1,26 @@
 #!/bin/bash
 set -e
 
+echo "Syncing Google Apps Script (browser -> local)..."
+if [ -f "daily-emailer/.clasp.json" ]; then
+  (cd daily-emailer && clasp pull)
+else
+  echo "WARNING: daily-emailer/.clasp.json not found; skipping clasp pull."
+fi
+
 echo "Adding files..."
-git add mws_holdings.csv mws_policy.json mws_ticker_history.csv mws_recent_performance.csv .gitignore
+git add \
+  mws_holdings.csv \
+  mws_policy.json \
+  mws_ticker_history.csv \
+  mws_recent_performance.csv \
+  .gitignore \
+  daily-emailer/appsscript.json \
+  daily-emailer/ContractValidator.js \
+  daily-emailer/DailyEmailRunner.js \
+  daily-emailer/VnextContract.js \
+  commit_and_run.sh \
+  mws_titanium_runner.py
 
 # If git add produced no staged changes, skip commit/push but still run python
 if git diff --cached --quiet; then
