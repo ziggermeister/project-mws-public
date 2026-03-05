@@ -20,7 +20,9 @@ git add \
   daily-emailer/DailyEmailRunner.js \
   daily-emailer/VnextContract.js \
   commit_and_run.sh \
-  mws_titanium_runner.py
+  mws_titanium_runner.py \
+  mws_macro.md \
+  mws_tracker.json
 
 # If git add produced no staged changes, skip commit/push but still run python
 if git diff --cached --quiet; then
