@@ -14,9 +14,8 @@ COPX,279.82534,strategic_materials
 ITA,188.54988,defense_energy
 XLE,849.67720,defense_energy
 XBI,315.03533,biotech
-IBIT,86.00000,crypto
-DBMF,1143.00000,managed_futures
+IBIT,167.00000,crypto
+DBMF,1144.00000,managed_futures
 KMLM,1281.00000,managed_futures
 TREASURY_NOTE,1.00000,bucket_a
-CASH,3183.93,bucket_b
-
+CASH,1.95,bucket_b
