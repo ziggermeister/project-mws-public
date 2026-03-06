@@ -677,9 +677,6 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
   if (baseIndex === -1) baseIndex = 0;
   if (!data.length) throw new Error("Perf log has no rows after upsert.");
 
-  const basePV = parseFloat(data[baseIndex][1]);
-  if (!isFinite(basePV) || basePV <= 0) throw new Error("Perf log base portfolio value invalid.");
-
   const baseB = benches.map((_, i) => parseFloat(data[baseIndex][2 + i]));
   if (baseB.some(x => !isFinite(x) || x <= 0)) throw new Error("Perf log base benchmark price invalid.");
 
@@ -687,29 +684,51 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
   const pctStartCol = portPctCol + 1;
   const diffStartCol = pctStartCol + benches.length;
 
-  const out = data.map((r, ri) => {
-    const row = normalizeRowWidth_(r, header.length);
+  const out = [];
+  let prevPV = NaN;
+  let prevCumPort = NaN;
+
+  for (let ri = 0; ri < data.length; ri++) {
+    const row = normalizeRowWidth_(data[ri], header.length);
+
+    if (ri < baseIndex) {
+      row[portPctCol] = "N/A";
+      for (let i = 0; i < benches.length; i++) row[pctStartCol + i] = "N/A";
+      for (let i = 0; i < benches.length; i++) row[diffStartCol + i] = "N/A";
+      out.push(normalizeRowWidth_(row, header.length));
+      continue;
+    }
 
     const pv = parseFloat(row[1]);
-    const pPort = (isFinite(pv) && pv > 0) ? ((pv / basePV) - 1) : NaN;
 
-    row[portPctCol] = (ri < baseIndex) ? "N/A" : (isFinite(pPort) ? pPort.toFixed(4) : "N/A");
+    // PortfolioPct: append-only chained TWR from prior row
+    let pPort = NaN;
+    if (ri === baseIndex) {
+      pPort = 0.0;
+    } else if (isFinite(pv) && isFinite(prevPV) && prevPV > 0 && isFinite(prevCumPort)) {
+      const dailyPortRet = (pv / prevPV) - 1;
+      pPort = (1 + prevCumPort) * (1 + dailyPortRet) - 1;
+    }
 
+    row[portPctCol] = isFinite(pPort) ? pPort.toFixed(4) : "N/A";
+
+    // Benchmarks remain base-relative from chartStart
     for (let i = 0; i < benches.length; i++) {
       const px = parseFloat(row[2 + i]);
       const pB = (isFinite(px) && px > 0) ? ((px / baseB[i]) - 1) : NaN;
-      row[pctStartCol + i] = (ri < baseIndex) ? "N/A" : (isFinite(pB) ? pB.toFixed(4) : "N/A");
+      row[pctStartCol + i] = isFinite(pB) ? pB.toFixed(4) : "N/A";
     }
 
     for (let i = 0; i < benches.length; i++) {
-      if (ri < baseIndex) { row[diffStartCol + i] = "N/A"; continue; }
       const pB = parseFloat(row[pctStartCol + i]);
       if (!isFinite(pPort) || !isFinite(pB)) row[diffStartCol + i] = "N/A";
       else row[diffStartCol + i] = (pPort - pB).toFixed(4);
     }
 
-    return normalizeRowWidth_(row, header.length);
-  });
+    prevPV = pv;
+    prevCumPort = pPort;
+    out.push(normalizeRowWidth_(row, header.length));
+  }
 
   file.setContent([header].concat(out).map(r => normalizeRowWidth_(r, header.length).join(",")).join("\n"));
 }
