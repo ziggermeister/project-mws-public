@@ -2,7 +2,7 @@ import json
 import os
 import warnings
 import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, Tuple, Dict, List, Set, Any
 import re
 
@@ -70,35 +70,6 @@ def update_event_labels_by_date(perf_csv_path: str, date_to_label: dict) -> None
     df.loc[mask, "EventLabel"] = df.loc[mask, "Date"].map(safe_map)
 
     df.to_csv(perf_csv_path, index=False)
-
-
-def apply_recent_event_labels(perf_csv_path: str, recent_dates: list[str], label_fn) -> None:
-    """
-    recent_dates: list of YYYY-MM-DD dates to consider.
-    label_fn: function(date_str) -> str | None
-    Updates only EventLabel by Date key.
-    """
-    date_to_label = {}
-
-    for date_str in recent_dates:
-        raw = label_fn(date_str)
-        if not raw:
-            continue
-        label = sanitize_event_label(raw)
-        if label.upper().startswith("SKIP"):
-            continue
-        date_to_label[date_str] = label
-
-    if date_to_label:
-        update_event_labels_by_date(perf_csv_path, date_to_label)
-
-
-def recent_calendar_dates(as_of_date: str, days_back: int = 5) -> list[str]:
-    d0 = datetime.strptime(as_of_date, "%Y-%m-%d").date()
-    return [
-        (d0 - timedelta(days=i)).strftime("%Y-%m-%d")
-        for i in range(days_back, -1, -1)
-    ]
     
 def _fatal(msg: str, code: int = 1) -> None:
     print(msg)
@@ -452,27 +423,39 @@ def _backfill_event_labels(
     port_col: str,
     bench_cols: list,
     date_col: str = "Date",
-    move_threshold: float = 0.0175,
-    lookback_days: int = 5,
+    move_threshold: float = 0.0175,     # 1.75%
+    lookback_days: int = 7              # <= last week only
 ) -> None:
     """
-    Backfill EventLabel only for a recent rolling window and update labels by Date.
-    Idempotent: never overwrites existing non-empty EventLabel values.
+    Backfill EventLabel ONLY for the last `lookback_days` days.
+
+    Uses Anthropic web_search to:
+      - Decide SKIP if event_mag < move_threshold
+      - Otherwise identify real driver and output:
+           CAUSE: ...
+           IMPACT: <MWS|VTI|QQQ> +/-X.XX%
+    Stores label as: "CAUSE | IMPACT"
+
+    Idempotent: never overwrites existing EventLabel values.
     """
+    import os
     import json as _json
     import urllib.request as _urllib
     import urllib.error as _urlerr
     import time as _time
+    import pandas as pd
+    import numpy as np
 
     if not os.path.exists(csv_path):
         return
 
-    df = pd.read_csv(csv_path, dtype=str).fillna("")
+    df = pd.read_csv(csv_path)
     df.columns = [c.strip() for c in df.columns]
 
     if "EventLabel" not in df.columns:
         df["EventLabel"] = ""
 
+    # Resolve cols (case-insensitive)
     dc = next((c for c in df.columns if c.lower() == date_col.lower()), None)
     pc = next((c for c in df.columns if c.lower() == port_col.lower()), None)
     if not dc or not pc:
@@ -481,12 +464,54 @@ def _backfill_event_labels(
     df[dc] = pd.to_datetime(df[dc], errors="coerce")
     df = df.dropna(subset=[dc]).sort_values(dc).reset_index(drop=True)
 
-    bench_cols = [b for b in bench_cols if b in df.columns]
-    numeric_cols = [pc] + bench_cols
-    for c in numeric_cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
+    # numeric
+    for c in [pc] + bench_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    bench_cols = [b for b in bench_cols if b in df.columns]
+
+    # ── Collect dates needing labels (backward scan; stop at first labeled row) ──
+    candidates = []  # (row_index, date, moves)
+
+    today  = pd.Timestamp.today().normalize()
+    cutoff = today - pd.Timedelta(days=int(lookback_days))
+
+    df = df.sort_values(dc).reset_index(drop=True)
+
+    for i in range(len(df) - 1, 0, -1):
+        row_date = df.loc[i, dc]
+
+        if row_date > today:
+            continue
+        if row_date < cutoff:
+            break
+
+        existing = str(df.loc[i, "EventLabel"]).strip()
+        if existing and existing.lower() not in ("nan", ""):
+            break
+
+        moves = {}
+        for c in [pc] + bench_cols:
+            prev = pd.to_numeric(df.loc[i - 1, c], errors="coerce")
+            cur  = pd.to_numeric(df.loc[i,     c], errors="coerce")
+            if pd.notna(prev) and pd.notna(cur):
+                moves[c] = cur - prev
+
+        if not moves:
+            continue
+        if max(abs(v) for v in moves.values()) < move_threshold:
+            continue
+
+        candidates.append((i, row_date, moves))
+
+    candidates.reverse()
+
+    if not candidates:
+        print(f"[EVENTS] No backfill needed (last {lookback_days} days; stop at first labeled row).")
+        return
+        
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         print("[EVENTS] ANTHROPIC_API_KEY not set — skipping event label backfill")
         return
@@ -503,117 +528,150 @@ def _backfill_event_labels(
             data=body,
             headers={
                 "Content-Type": "application/json; charset=utf-8",
-                "x-api-key": api_key,
+                "x-api-key": api_key.strip(),
                 "anthropic-version": "2023-06-01",
             },
-            method="POST",
+            method="POST"
         )
         with _urllib.urlopen(req, timeout=45) as resp:
             return _json.loads(resp.read())
 
-    def _daily_moves_for_row(i: int) -> dict:
-        if i <= 0:
-            return {}
-        moves = {}
-        for c in numeric_cols:
-            prev = pd.to_numeric(df.loc[i - 1, c], errors="coerce")
-            cur = pd.to_numeric(df.loc[i, c], errors="coerce")
-            if pd.notna(prev) and pd.notna(cur) and (1.0 + prev) > 0:
-                moves[c] = ((1.0 + cur) / (1.0 + prev)) - 1.0
-        return moves
+    def _dominant_series_and_mag(moves: dict) -> tuple[str, float]:
+        """
+        Returns (series_name, magnitude_percent) where magnitude_percent is +/- X.XX
+        based on largest absolute move among MWS/VTI/QQQ.
+        """
+        mws = moves.get(pc, None)
+        vti = moves.get("Pct_VTI", moves.get("pct_vti", None))
+        qqq = moves.get("Pct_QQQ", moves.get("pct_qqq", None))
 
-    def _format_moves_for_prompt(moves: dict) -> tuple[float, float, float]:
+        # map to names
+        items = []
+        if mws is not None: items.append(("MWS", float(mws)))
+        if vti is not None: items.append(("VTI", float(vti)))
+        if qqq is not None: items.append(("QQQ", float(qqq)))
+
+        if not items:
+            return ("MWS", 0.0)
+
+        name, mv = max(items, key=lambda x: abs(x[1]))
+        return name, mv * 100.0
+
+    def _format_moves_for_prompt(moves: dict) -> tuple[float, float, float, float]:
+        """
+        Returns (mws%, vti%, qqq%, event_mag%) as percent units (e.g. +2.13)
+        """
         mws = float(moves.get(pc, 0.0)) * 100.0
+        # try common column names for benchmarks
         vti = float(moves.get("Pct_VTI", moves.get("pct_vti", 0.0))) * 100.0
         qqq = float(moves.get("Pct_QQQ", moves.get("pct_qqq", 0.0))) * 100.0
-        return mws, vti, qqq
+        event_mag = max(abs(mws), abs(vti), abs(qqq))
+        return mws, vti, qqq, event_mag
 
-    def _fetch_label_from_anthropic(date_str: str, moves: dict) -> str:
-        mws, vti, qqq = _format_moves_for_prompt(moves)
+    def _get_label_for_date(date_str: str, moves: dict) -> str:
+        """
+        Option B:
+          - If event_mag < threshold -> SKIP
+          - Else web_search for real driver and return "CAUSE | IMPACT"
+        """
+        mws, vti, qqq, event_mag = _format_moves_for_prompt(moves)
 
         user_prompt = f"""You are annotating a US market chart.
 
-DATE: {date_str}
+        DATE: {date_str}
 
-MOVES:
-MWS {mws:+.2f}%
-VTI {vti:+.2f}%
-QQQ {qqq:+.2f}%
+        MOVES:
+        MWS {mws:+.2f}%
+        VTI {vti:+.2f}%
+        QQQ {qqq:+.2f}%
 
-If max absolute move is below {move_threshold*100:.2f}%, return exactly:
-SKIP
+        If max absolute move is below {move_threshold*100:.2f}%, return exactly:
+        SKIP
 
-Otherwise use web_search to identify the most credible driver for {date_str}.
-Prefer Reuters Bloomberg WSJ FT CNBC MarketWatch Barrons Fed BLS BEA.
-Do not invent facts.
+        Otherwise use web_search to find the most credible driver for {date_str}.
+        Prefer Reuters Bloomberg WSJ FT CNBC MarketWatch Barrons Fed BLS BEA.
+        Do not invent facts.
 
-Return exactly one single line in this format:
-<driver <= 7 words> | <series> <+/-X.XX%>
+        Return exactly one single line:
+        <driver <= 7 words> | <series> <+/-X.XX%>
 
-Rules:
-- no commas
-- no quotes
-- no bullets
-- no line breaks
-- use pipe separator
-- maximum 80 characters
-- if unknown return:
-Unknown | <series> <+/-X.XX%>
-"""
+        Rules:
+        - no commas
+        - no quotes
+        - no bullets
+        - no line breaks
+        - use pipe separator
+        - max 50 characters
+        - if unknown return:
+        Unknown | <series> <+/-X.XX%>
+        """
 
         messages = [{"role": "user", "content": user_prompt}]
-        for _ in range(8):
+        for _ in range(8):  # tool loop
             data = _api_round_trip(messages)
             content = data.get("content") or []
             stop = data.get("stop_reason", "")
             tool_uses = [b for b in content if b.get("type") == "tool_use"]
 
             if not tool_uses or stop == "end_turn":
+                # parse text response
                 text = ""
                 for block in reversed(content):
                     if block.get("type") == "text":
                         text = (block.get("text") or "").strip()
                         break
-                label = sanitize_event_label(text)
-                if label.upper().startswith("SKIP"):
-                    label = ""
-                return label
+                if not text:
+                    return ""
 
+                # Hard SKIP
+                if text.startswith("SKIP:"):
+                    return ""
+
+                cause = ""
+                impact = ""
+                for line in text.splitlines():
+                    line = line.strip()
+                    if line.startswith("CAUSE:"):
+                        cause = line.replace("CAUSE:", "").strip()
+                    elif line.startswith("IMPACT:"):
+                        impact = line.replace("IMPACT:", "").strip()
+
+                # enforce IMPACT magnitude consistency (use our computed dominant)
+                dom_name, dom_pct = _dominant_series_and_mag(moves)
+                dom_str = f"{dom_name} {dom_pct:+.2f}%"
+
+                if not cause:
+                    return ""
+                if not impact:
+                    impact = dom_str
+                else:
+                    # If model gave wrong magnitude, overwrite to the computed one
+                    if f"{dom_name} " in impact:
+                        # still ensure numeric correctness; simplest: overwrite always
+                        impact = dom_str
+                    else:
+                        impact = dom_str
+
+                return f"{cause} | {impact}"
+
+            # continue tool loop
             messages.append({"role": "assistant", "content": content})
-            messages.append({
-                "role": "user",
-                "content": [
-                    {"type": "tool_result", "tool_use_id": tu["id"], "content": ""}
-                    for tu in tool_uses
-                ],
-            })
+            messages.append({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": tu["id"], "content": ""}
+                for tu in tool_uses
+            ]})
         return ""
 
-    recent_dates = recent_calendar_dates(datetime.today().strftime("%Y-%m-%d"), days_back=lookback_days)
-    recent_set = set(recent_dates)
-
-    def _label_fn(date_str: str) -> str:
-        row = df[df[dc].dt.strftime("%Y-%m-%d") == date_str]
-        if row.empty:
-            return ""
-        i = int(row.index[0])
-        if i <= 0:
-            return ""
-
-        existing = str(df.loc[i, "EventLabel"]).strip()
-        if existing and existing.lower() != "nan":
-            return existing
-
-        moves = _daily_moves_for_row(i)
-        if not moves:
-            return ""
-        if max(abs(v) for v in moves.values()) < move_threshold:
-            return "SKIP"
-
+    # Run candidates
+    per_date_labels = {}
+    for idx, (row_i, row_date, moves) in enumerate(candidates):
+        date_str = row_date.strftime("%Y-%m-%d")
         for attempt in range(4):
             try:
-                print(f"[EVENTS] Fetching label for {date_str}...")
-                return _fetch_label_from_anthropic(date_str, moves)
+                lbl = _get_label_for_date(date_str, moves)
+                if lbl:
+                    per_date_labels[date_str] = lbl
+                break
             except _urlerr.HTTPError as e:
                 body = ""
                 try:
@@ -626,14 +684,29 @@ Unknown | <series> <+/-X.XX%>
                     _time.sleep(wait)
                 else:
                     print(f"[EVENTS] API error {e.code} for {date_str}: {body[:200]}")
-                    return ""
+                    break
             except Exception as e:
                 print(f"[EVENTS] Failed for {date_str}: {e}")
-                return ""
-        return ""
+                break
 
-    apply_recent_event_labels(csv_path, recent_dates, _label_fn)
-    print(f"[EVENTS] Reviewed recent dates window: {', '.join(recent_dates)}")
+        if idx < len(candidates) - 1:
+            _time.sleep(4)  # modest pacing
+
+    # Write back
+    changed = False
+    for row_i, row_date, _moves in candidates:
+        date_str = row_date.strftime("%Y-%m-%d")
+        lbl = per_date_labels.get(date_str, "")
+        if lbl:
+            df.loc[row_i, "EventLabel"] = lbl.replace("\n", " | ")
+            changed = True
+            print(f"[EVENTS] {date_str} → {lbl!r}")
+
+    if changed:
+        df[dc] = df[dc].dt.strftime("%Y-%m-%d")
+        df.to_csv(csv_path, index=False)
+        print(f"[EVENTS] Wrote {len(per_date_labels)} labels to {csv_path}")
+        
 
 def _read_chart_events(
     df: pd.DataFrame,
@@ -676,14 +749,9 @@ def _read_chart_events(
     for c in numeric_cols:
         df2[c] = pd.to_numeric(df2[c], errors="coerce")
 
-    # daily moves on FULL timeline from cumulative return series
+    # daily diffs on FULL timeline
     for c in numeric_cols:
-        prev = df2[c].shift(1)
-        df2[f"_d_{c}"] = np.where(
-            prev.notna() & df2[c].notna() & ((1.0 + prev) > 0),
-            ((1.0 + df2[c]) / (1.0 + prev)) - 1.0,
-            np.nan
-        )
+        df2[f"_d_{c}"] = df2[c].diff()
 
     # score by max abs daily move
     df2["_max_move"] = df2[[f"_d_{c}" for c in numeric_cols]].abs().max(axis=1)
@@ -802,7 +870,7 @@ def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
             port_col="PortfolioPct",
             bench_cols=["Pct_VTI", "Pct_QQQ"],
             move_threshold=0.0175,
-            lookback_days=5,
+            lookback_days=7,
         )
         # Reload so the freshly-written EventLabels are available for plotting
         df_log = pd.read_csv(PERF_LOG_CSV)
@@ -1174,4 +1242,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
