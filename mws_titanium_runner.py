@@ -12,6 +12,23 @@ import matplotlib.pyplot as plt
 
 warnings.filterwarnings("ignore")
 
+# Display names for benchmark tickers used in chart labels.
+# Add entries here when adding new benchmarks to active_benchmarks in policy.
+BENCH_DISPLAY_NAMES: Dict[str, str] = {
+    "SPY":  "S&P 500",
+    "VTI":  "Total Market",
+    "QQQ":  "Nasdaq-100",
+    "ONEQ": "Nasdaq Composite",
+    "IWM":  "Russell 2000",
+    "DIA":  "Dow Jones",
+    "EFA":  "Intl Developed",
+    "EEM":  "Emerging Markets",
+}
+
+def _bench_display(ticker: str) -> str:
+    """Human-readable display name for a benchmark ticker."""
+    return BENCH_DISPLAY_NAMES.get(ticker.upper(), ticker.upper())
+
 POLICY_FILENAME  = "mws_policy.json"
 TRACKER_FILENAME = "mws_tracker.json"
 HOLDINGS_CSV     = "mws_holdings.csv"
@@ -522,23 +539,26 @@ def _backfill_event_labels(
                 moves[c] = ((1.0 + cur) / (1.0 + prev)) - 1.0
         return moves
 
-    def _format_moves_for_prompt(moves: dict) -> tuple[float, float, float]:
-        mws = float(moves.get(pc, 0.0)) * 100.0
-        vti = float(moves.get("Pct_VTI", moves.get("pct_vti", 0.0))) * 100.0
-        qqq = float(moves.get("Pct_QQQ", moves.get("pct_qqq", 0.0))) * 100.0
-        return mws, vti, qqq
+    def _format_moves_for_prompt(moves: dict) -> List[tuple]:
+        """Returns list of (display_name, pct_value) for MWS + all bench cols."""
+        result = [("MWS", float(moves.get(pc, 0.0)) * 100.0)]
+        for c in bench_cols:
+            val = float(moves.get(c, 0.0)) * 100.0
+            ticker = c.replace("Pct_", "").replace("pct_", "")
+            result.append((_bench_display(ticker), val))
+        return result
 
     def _fetch_label_from_anthropic(date_str: str, moves: dict) -> str:
-        mws, vti, qqq = _format_moves_for_prompt(moves)
+        move_lines = _format_moves_for_prompt(moves)
+        moves_text = "\n".join(f"{name} {val:+.2f}%" for name, val in move_lines)
+        bench_names = ", ".join(name for name, _ in move_lines[1:])
 
         user_prompt = f"""You are annotating a US market chart.
 
 DATE: {date_str}
 
 MOVES:
-MWS {mws:+.2f}%
-VTI {vti:+.2f}%
-QQQ {qqq:+.2f}%
+{moves_text}
 
 If max absolute move is below {move_threshold*100:.2f}%, return exactly:
 SKIP
@@ -763,14 +783,16 @@ def _read_chart_events(
 def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
     """
     Prints portfolio alpha and generates a 2-panel chart:
-      Panel 1: Titanium (MWS) vs VTI vs QQQ — with fill-between, drawdown shading,
+      Panel 1: Titanium (MWS) vs benchmarks — with fill-between, drawdown shading,
                gap arrows, and stats box.
-      Panel 2: Rolling 30-day alpha + cumulative alpha with fill-between.
+      Panel 2: Cumulative alpha vs benchmarks with fill-between.
     """
     palpha = compute_portfolio_alpha_from_log(policy)
     if palpha:
-        order = ["VTI", "QQQ"] + sorted(k for k in palpha if k not in ["VTI", "QQQ"])
-        parts = [f"{k} {palpha[k]}" for k in order if k in palpha]
+        bl = (policy.get("governance", {}).get("reporting_baselines", {}) or {})
+        bench_order = [str(x).strip().upper() for x in (bl.get("active_benchmarks") or [])]
+        order = bench_order + sorted(k for k in palpha if k not in bench_order)
+        parts = [f"{_bench_display(k)} {palpha[k]}" for k in order if k in palpha]
         if parts:
             print("\n📈 PORTFOLIO ALPHA (since chart baseline): " + " | ".join(parts))
 
@@ -793,17 +815,19 @@ def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
         df_log[date_c] = pd.to_datetime(df_log[date_c], errors="coerce")
         df_log = df_log.dropna(subset=[date_c]).sort_values(date_c).drop_duplicates(subset=[date_c], keep="last")
 
+        # Derive benchmark tickers and display names from policy
+        bl = (policy.get("governance", {}).get("reporting_baselines", {}) or {})
+        active_benches = [str(x).strip().upper() for x in (bl.get("active_benchmarks") or []) if x]
+        b0 = active_benches[0] if len(active_benches) > 0 else "SPY"
+        b1 = active_benches[1] if len(active_benches) > 1 else "QQQ"
+        disp_b0 = _bench_display(b0)   # e.g. "S&P 500"
+        disp_b1 = _bench_display(b1)   # e.g. "Nasdaq-100"
+
         # Backfill EventLabel in CSV for any significant-move dates missing a headline
-        #_backfill_event_labels(
-        #    PERF_LOG_CSV,
-        #    port_col="PortfolioPct",
-        #    bench_cols=["Pct_VTI", "Pct_QQQ"],
-        #)
-        
         _backfill_event_labels(
             PERF_LOG_CSV,
             port_col="PortfolioPct",
-            bench_cols=["Pct_VTI", "Pct_QQQ"],
+            bench_cols=[f"Pct_{b0}", f"Pct_{b1}"],
             move_threshold=0.0175,
             lookback_days=5,
         )
@@ -813,7 +837,6 @@ def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
         df_log[date_c] = pd.to_datetime(df_log[date_c], errors="coerce")
         df_log = df_log.dropna(subset=[date_c]).sort_values(date_c).drop_duplicates(subset=[date_c], keep="last")
 
-        bl = (policy.get("governance", {}).get("reporting_baselines", {}) or {})
         chart_start_str = str(bl.get("chart_start_date") or "2026-01-05").strip()
         chart_start = pd.to_datetime(chart_start_str, errors="coerce")
 
@@ -841,15 +864,17 @@ def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
             print("⚠️ Charting skipped: Perf log has no plottable rows.")
             return
 
-        pct_vti = _find_col(df_plot, ["Pct_VTI", "pct_vti"])
-        pct_qqq = _find_col(df_plot, ["Pct_QQQ", "pct_qqq"])
-        if not pct_qqq:
-            print("⚠️ Benchmark series Pct_QQQ not found; skipping QQQ line.")
+        pct_b0 = _find_col(df_plot, [f"Pct_{b0}", f"pct_{b0.lower()}"])
+        pct_b1 = _find_col(df_plot, [f"Pct_{b1}", f"pct_{b1.lower()}"])
+        if not pct_b0:
+            print(f"⚠️ Benchmark series Pct_{b0} not found; skipping {disp_b0} line.")
+        if not pct_b1:
+            print(f"⚠️ Benchmark series Pct_{b1} not found; skipping {disp_b1} line.")
 
         to_num = lambda col: pd.to_numeric(df_plot[col], errors="coerce")
         port_series = to_num(port_col)
-        alpha_vti   = (port_series - to_num(pct_vti)) if pct_vti else None
-        alpha_qqq   = (port_series - to_num(pct_qqq)) if pct_qqq else None
+        alpha_b0 = (port_series - to_num(pct_b0)) if pct_b0 else None
+        alpha_b1 = (port_series - to_num(pct_b1)) if pct_b1 else None
 
         # ── Drawdown policy thresholds from policy ──────────────────────────────
         dr = policy.get("drawdown_rules", {}) or {}
@@ -958,32 +983,30 @@ def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
 
         # ── Panel 1: fill under each line to the true minimum ──────────────────
         _all_vals = pd.concat([port_series] +
-                              ([to_num(pct_vti)] if pct_vti else []) +
-                              ([to_num(pct_qqq)] if pct_qqq else []),
+                              ([to_num(pct_b0)] if pct_b0 else []) +
+                              ([to_num(pct_b1)] if pct_b1 else []),
                               axis=0).dropna()
         _floor = float(_all_vals.min())   # exact lowest point across all series
-        if pct_qqq:
-            qqq_s = to_num(pct_qqq)
-            ax1.fill_between(dates, qqq_s, _floor,
+        if pct_b1:
+            b1_s = to_num(pct_b1)
+            ax1.fill_between(dates, b1_s, _floor,
                              alpha=0.13, color="#2ca02c",
                              interpolate=True, label="_nolegend_")
-        if pct_vti:
-            vti_s = to_num(pct_vti)
-            ax1.fill_between(dates, vti_s, _floor,
+        if pct_b0:
+            b0_s = to_num(pct_b0)
+            ax1.fill_between(dates, b0_s, _floor,
                              alpha=0.13, color="orange",
                              interpolate=True, label="_nolegend_")
         ax1.fill_between(dates, port_series, _floor,
                          alpha=0.18, color="#1f77b4",
                          interpolate=True, label="_nolegend_")
 
-
-
         # ── Panel 1: main lines ──────────────────────────────────────────────────
-        if pct_vti:
-            ax1.plot(dates, to_num(pct_vti), label="VTI (Total Market)", linewidth=1.8,
+        if pct_b0:
+            ax1.plot(dates, to_num(pct_b0), label=f"{b0} ({disp_b0})", linewidth=1.8,
                      color="orange", alpha=0.85, zorder=3)
-        if pct_qqq:
-            ax1.plot(dates, to_num(pct_qqq), label="QQQ (Nasdaq)", linewidth=1.8,
+        if pct_b1:
+            ax1.plot(dates, to_num(pct_b1), label=f"{b1} ({disp_b1})", linewidth=1.8,
                      color="#2ca02c", alpha=0.85, zorder=3)
         ax1.plot(dates, port_series, label="Titanium (MWS)", linewidth=1.8,
                  color="#1f77b4", zorder=4)
@@ -1016,18 +1039,18 @@ def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
 
         # ── Panel 1: right-side end labels ──────────────────────────────────────
         series1 = [("Titanium MWS:", dates, port_series)]
-        if pct_vti: series1.append(("Total Market:", dates, to_num(pct_vti)))
-        if pct_qqq: series1.append(("Nasdaq:", dates, to_num(pct_qqq)))
+        if pct_b0: series1.append((f"{disp_b0}:", dates, to_num(pct_b0)))
+        if pct_b1: series1.append((f"{disp_b1}:", dates, to_num(pct_b1)))
         _apply_labels(ax1, series1)
         _mark_extremes(ax1, dates.reset_index(drop=True), port_series.reset_index(drop=True), "#1f77b4")
-        if pct_vti: _mark_extremes(ax1, dates.reset_index(drop=True), to_num(pct_vti).reset_index(drop=True), "orange", max_va="bottom", min_va="top")
-        if pct_qqq: _mark_extremes(ax1, dates.reset_index(drop=True), to_num(pct_qqq).reset_index(drop=True), "#2ca02c", max_va="bottom", min_va="bottom")
+        if pct_b0: _mark_extremes(ax1, dates.reset_index(drop=True), to_num(pct_b0).reset_index(drop=True), "orange", max_va="bottom", min_va="top")
+        if pct_b1: _mark_extremes(ax1, dates.reset_index(drop=True), to_num(pct_b1).reset_index(drop=True), "#2ca02c", max_va="bottom", min_va="bottom")
 
         # ── Panel 1: horizontal reference lines at last-day value ────────────────
         line_styles = [
-            (port_series,          "#1f77b4", 0.8),
-            (to_num(pct_vti) if pct_vti else None, "orange",   0.8),
-            (to_num(pct_qqq) if pct_qqq else None, "#2ca02c",  0.8),
+            (port_series,                              "#1f77b4", 0.8),
+            (to_num(pct_b0) if pct_b0 else None,      "orange",  0.8),
+            (to_num(pct_b1) if pct_b1 else None,      "#2ca02c", 0.8),
         ]
         x_start = dates.iloc[0]
         for ys, color, lw in line_styles:
@@ -1055,31 +1078,28 @@ def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
         # ── Panel 2: cumulative alpha with fill-between ──────────────────────────
         ax2.axhline(0, color="#888", linewidth=1.0, zorder=1)
 
-        if alpha_vti is not None:
-            ax2.plot(dates, alpha_vti, linewidth=2.0, color="orange",
-                     label="vs Total Market", zorder=3)
-            ax2.fill_between(dates, alpha_vti, 0,
-                             where=(alpha_vti >= 0), alpha=0.18, color="orange",
+        if alpha_b0 is not None:
+            ax2.plot(dates, alpha_b0, linewidth=2.0, color="orange",
+                     label=f"vs {disp_b0}", zorder=3)
+            ax2.fill_between(dates, alpha_b0, 0,
+                             where=(alpha_b0 >= 0), alpha=0.18, color="orange",
                              interpolate=True, label="_nolegend_")
-            ax2.fill_between(dates, alpha_vti, 0,
-                             where=(alpha_vti < 0),  alpha=0.18, color="red",
+            ax2.fill_between(dates, alpha_b0, 0,
+                             where=(alpha_b0 < 0),  alpha=0.18, color="red",
                              interpolate=True, label="_nolegend_")
-        if alpha_qqq is not None:
-            ax2.plot(dates, alpha_qqq, linewidth=2.0, color="#2ca02c",
-                     label="vs Nasdaq", zorder=3)
-            ax2.fill_between(dates, alpha_qqq, 0,
-                             where=(alpha_qqq >= 0), alpha=0.18, color="#2ca02c",
+        if alpha_b1 is not None:
+            ax2.plot(dates, alpha_b1, linewidth=2.0, color="#2ca02c",
+                     label=f"vs {disp_b1}", zorder=3)
+            ax2.fill_between(dates, alpha_b1, 0,
+                             where=(alpha_b1 >= 0), alpha=0.18, color="#2ca02c",
                              interpolate=True, label="_nolegend_")
-            ax2.fill_between(dates, alpha_qqq, 0,
-                             where=(alpha_qqq < 0),  alpha=0.18, color="red",
+            ax2.fill_between(dates, alpha_b1, 0,
+                             where=(alpha_b1 < 0),  alpha=0.18, color="red",
                              interpolate=True, label="_nolegend_")
 
-
-        ax2.set_title(f"Cumulative Alpha vs. Benchmarks (since {chart_start.strftime('%b %d, %Y') if pd.notna(chart_start) else chart_start_str})"
-                      f"  ·  VTI = Total Mkt (incl. small/mid cap) ≠ S&P 500",
+        ax2.set_title(f"Cumulative Alpha vs. Benchmarks (since {chart_start.strftime('%b %d, %Y') if pd.notna(chart_start) else chart_start_str})",
                       fontsize=11, fontweight="bold", pad=8)
         ax2.grid(True, alpha=0.45, color="#999999")
-
 
         _handles2, _labels2 = ax2.get_legend_handles_labels()
         _leg2 = [(h, l) for h, l in zip(_handles2, _labels2) if not l.startswith("_")]
@@ -1091,11 +1111,11 @@ def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
         ax2.yaxis.set_major_formatter(lambda x, pos: f"{x*100:.0f}%")
 
         series2 = []
-        if alpha_vti is not None: series2.append(("vs Total Market:", dates, alpha_vti))
-        if alpha_qqq is not None: series2.append(("vs Nasdaq:", dates, alpha_qqq))
-        _apply_labels(ax2, series2)   # already uses _label_last with val coloring
-        if alpha_vti is not None: _mark_extremes(ax2, dates.reset_index(drop=True), pd.Series(alpha_vti).reset_index(drop=True), "orange", max_va="top", min_va="top")
-        if alpha_qqq is not None: _mark_extremes(ax2, dates.reset_index(drop=True), pd.Series(alpha_qqq).reset_index(drop=True), "#2ca02c", max_va="bottom", min_va="bottom")
+        if alpha_b0 is not None: series2.append((f"vs {disp_b0}:", dates, alpha_b0))
+        if alpha_b1 is not None: series2.append((f"vs {disp_b1}:", dates, alpha_b1))
+        _apply_labels(ax2, series2)
+        if alpha_b0 is not None: _mark_extremes(ax2, dates.reset_index(drop=True), pd.Series(alpha_b0).reset_index(drop=True), "orange", max_va="top", min_va="top")
+        if alpha_b1 is not None: _mark_extremes(ax2, dates.reset_index(drop=True), pd.Series(alpha_b1).reset_index(drop=True), "#2ca02c", max_va="bottom", min_va="bottom")
 
         # ── x-axis: start flush, extend right slightly to show last dot fully ─────
         date_padding = pd.Timedelta(days=max(2, int(
@@ -1119,7 +1139,7 @@ def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
         chart_events = _read_chart_events(
             df_plot, date_c,
             port_col=port_col,
-            bench_cols=[c for c in [pct_vti, pct_qqq] if c]
+            bench_cols=[c for c in [pct_b0, pct_b1] if c]
         )
 
         _total_days = (dates.iloc[-1] - dates.iloc[0]).days or 1
