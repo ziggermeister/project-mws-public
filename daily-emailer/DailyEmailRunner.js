@@ -652,14 +652,26 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
     });
   }
 
+  // Preserve CashFlow values entered manually (negative = withdrawal, positive = contribution)
+  // GAS never auto-populates CashFlow; only preserves values already in the CSV.
+  const cfCol = header.indexOf("CashFlow");
+  const savedCFs = {};
+  if (cfCol >= 0) {
+    data.forEach(r => {
+      const cf = parseFloat(r[cfCol]);
+      if (isFinite(cf) && cf !== 0) savedCFs[String(r[0])] = cf;
+    });
+  }
+
   // Upsert today's row
   data = data.filter(r => String(r[0]) !== dateStr);
 
   const newRow = new Array(header.length).fill("");
   newRow[0] = dateStr;
   newRow[1] = Number(portfolioVal).toFixed(2);
+  if (cfCol >= 0) newRow[cfCol] = "0";            // default CashFlow = 0 for new rows
   for (let i = 0; i < benches.length; i++) {
-    newRow[2 + i] = Number(benchPrices[i]).toFixed(2);
+    newRow[3 + i] = Number(benchPrices[i]).toFixed(2);  // offset +1 for CashFlow column
   }
 
   data.push(newRow);
@@ -673,9 +685,18 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
     });
   }
 
+  // Restore CashFlow values after sort — GAS never auto-writes these
+  if (cfCol >= 0) {
+    data.forEach(r => {
+      const cf = savedCFs[String(r[0])];
+      if (cf !== undefined) r[cfCol] = String(cf);
+    });
+  }
+
   if (!data.length) throw new Error("Perf log has no rows after upsert.");
 
-  const portPctCol = 2 + benches.length;
+  // Column offsets: CashFlow is at index 2, so benchmark prices start at index 3
+  const portPctCol = 3 + benches.length;   // was 2 + benches.length before CashFlow column
   const pctStartCol = portPctCol + 1;
   const diffStartCol = pctStartCol + benches.length;
 
@@ -686,7 +707,7 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
   }
   if (baseIndex === -1) baseIndex = 0;
 
-  const baseB = benches.map((_, i) => parseFloat(data[baseIndex][2 + i]));
+  const baseB = benches.map((_, i) => parseFloat(data[baseIndex][3 + i]));  // +1 for CashFlow
   if (baseB.some(x => !isFinite(x) || x <= 0)) {
     throw new Error("Perf log base benchmark price invalid.");
   }
@@ -728,7 +749,7 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
     // preserve PortfolioPct/Diff as stored, but refresh benchmark columns if blank
     if (ri < recalcStart) {
       for (let i = 0; i < benches.length; i++) {
-        const px = parseFloat(row[2 + i]);
+        const px = parseFloat(row[3 + i]);   // +1 offset for CashFlow column
         const pB = (isFinite(px) && px > 0) ? ((px / baseB[i]) - 1) : NaN;
         row[pctStartCol + i] = isFinite(pB) ? pB.toFixed(4) : "N/A";
       }
@@ -747,14 +768,26 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
     if (ri === baseIndex) {
       pPort = 0.0;
     } else if (isFinite(pv) && isFinite(prevPV) && prevPV > 0 && isFinite(prevCumPort)) {
-      const dailyPortRet = (pv / prevPV) - 1;
-      pPort = (1 + prevCumPort) * (1 + dailyPortRet) - 1;
+      // TWR: adjust denominator for any cash flow on this day.
+      // CashFlow convention: negative = withdrawal (reduces denominator → higher return),
+      //                      positive = contribution (increases denominator → lower return).
+      // This correctly strips the effect of cash flows from the return calculation,
+      // matching Chase's time-weighted return methodology.
+      const cf = (cfCol >= 0) ? (parseFloat(row[cfCol]) || 0) : 0;
+      const adjustedPrevPV = prevPV + cf;   // e.g. prevPV + (-45000) for a $45k withdrawal
+      if (adjustedPrevPV > 0) {
+        const dailyPortRet = (pv / adjustedPrevPV) - 1;
+        pPort = (1 + prevCumPort) * (1 + dailyPortRet) - 1;
+      } else {
+        // Safety: if adjustment would make denominator ≤ 0, skip the daily return
+        pPort = prevCumPort;
+      }
     }
 
     row[portPctCol] = isFinite(pPort) ? pPort.toFixed(4) : "N/A";
 
     for (let i = 0; i < benches.length; i++) {
-      const px = parseFloat(row[2 + i]);
+      const px = parseFloat(row[3 + i]);   // +1 offset for CashFlow column
       const pB = (isFinite(px) && px > 0) ? ((px / baseB[i]) - 1) : NaN;
       row[pctStartCol + i] = isFinite(pB) ? pB.toFixed(4) : "N/A";
     }
@@ -777,7 +810,7 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
 }
 
 function buildPerfLogHeader_(benches) {
-  const h = ["Date", "PortfolioValue"];
+  const h = ["Date", "PortfolioValue", "CashFlow"];  // CashFlow: negative = withdrawal, positive = contribution
   benches.forEach(b => h.push(`Price_${b}`));
   h.push("PortfolioPct");
   benches.forEach(b => h.push(`Pct_${b}`));

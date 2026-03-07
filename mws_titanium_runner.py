@@ -994,7 +994,7 @@ def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
                     alpha=0.7, zorder=2)
 
 
-        ax1.set_title(f"Titanium Performance ({title_suffix})", fontsize=11, fontweight="bold", pad=10)
+        ax1.set_title(f"Titanium Performance ({title_suffix})  ·  TWR net of cash flows", fontsize=11, fontweight="bold", pad=10)
         ax1.grid(True, alpha=0.45, color="#999999")
         # Build legend from only the three named lines (benchmarks + Titanium)
         _handles, _labels = ax1.get_legend_handles_labels()
@@ -1075,7 +1075,8 @@ def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
                              interpolate=True, label="_nolegend_")
 
 
-        ax2.set_title(f"Cumulative Alpha vs. Benchmarks (since {chart_start.strftime('%b %d, %Y') if pd.notna(chart_start) else chart_start_str})",
+        ax2.set_title(f"Cumulative Alpha vs. Benchmarks (since {chart_start.strftime('%b %d, %Y') if pd.notna(chart_start) else chart_start_str})"
+                      f"  ·  VTI = Total Mkt (incl. small/mid cap) ≠ S&P 500",
                       fontsize=11, fontweight="bold", pad=8)
         ax2.grid(True, alpha=0.45, color="#999999")
 
@@ -1177,4 +1178,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
