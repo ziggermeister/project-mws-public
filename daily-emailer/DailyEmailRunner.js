@@ -37,7 +37,7 @@ const CONFIG = {
   REVIEW_DAYS: 30,
 
   // Defaults (CONFIG_PVT.json does NOT need to define these)
-  BASELINES: ["VTI", "QQQ"],
+  BASELINES: ["SPY", "QQQ"],
   MIN_CORR_RETURNS: 6,
   CORR_ALERT_THRESHOLD: 0.85
 };

@@ -9,7 +9,7 @@
   "governance": {
     "reporting_baselines": {
       "active_benchmarks": [
-        "VTI",
+        "SPY",
         "QQQ"
       ],
       "corr_anchor_ticker": "VTI",
