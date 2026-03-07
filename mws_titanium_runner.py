@@ -593,7 +593,7 @@ Unknown | <series> <+/-X.XX%>
     as_of_date_str = df[dc].max().strftime("%Y-%m-%d")
     recent_dates = recent_calendar_dates(as_of_date_str, days_back=lookback_days)
 
-    recent_set = set(recent_dates)
+    # recent_set = set(recent_dates)
 
     def _label_fn(date_str: str) -> str:
         row = df[df[dc].dt.strftime("%Y-%m-%d") == date_str]
