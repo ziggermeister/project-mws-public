@@ -4,6 +4,7 @@ import warnings
 import subprocess
 from datetime import datetime
 from typing import Optional, Tuple, Dict, List, Set, Any
+import re
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,54 @@ CHART_FILENAME   = "mws_equity_curve.png"
 # ==============================================================================
 # 1) Robust loading
 # ==============================================================================
+
+
+def sanitize_event_label(label: str) -> str:
+    s = str(label or "").strip()
+
+    # Normalize punctuation
+    s = s.replace("“", "").replace("”", "")
+    s = s.replace("‘", "").replace("’", "")
+    s = s.replace("–", "-").replace("—", "-")
+    s = s.replace("\u00A0", " ")
+
+    # CSV-safe cleanup
+    s = s.replace(",", " - ")
+    s = s.replace(";", " - ")
+    s = s.replace('"', "")
+    s = s.replace("'", "")
+    s = re.sub(r"[\r\n]+", " | ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+
+    # Compact and safe
+    if len(s) > 120:
+        s = s[:117].rstrip() + "..."
+
+    return s
+    
+def update_event_labels_by_date(perf_csv_path: str, date_to_label: dict) -> None:
+    """
+    Update only EventLabel by Date key.
+    Leaves all numeric columns untouched.
+    """
+    df = pd.read_csv(perf_csv_path, dtype=str).fillna("")
+
+    if "Date" not in df.columns:
+        raise ValueError("CSV missing Date column")
+    if "EventLabel" not in df.columns:
+        raise ValueError("CSV missing EventLabel column")
+
+    safe_map = {
+        str(k).strip(): sanitize_event_label(v)
+        for k, v in date_to_label.items()
+        if str(v).strip()
+    }
+
+    mask = df["Date"].isin(safe_map.keys())
+    df.loc[mask, "EventLabel"] = df.loc[mask, "Date"].map(safe_map)
+
+    df.to_csv(perf_csv_path, index=False)
+    
 def _fatal(msg: str, code: int = 1) -> None:
     print(msg)
     raise SystemExit(code)
@@ -527,37 +576,35 @@ def _backfill_event_labels(
         """
         mws, vti, qqq, event_mag = _format_moves_for_prompt(moves)
 
-        user_prompt = f"""You are annotating a US market chart. Use web_search to identify the REAL driver only if this date is label-worthy.
+        user_prompt = f"""You are annotating a US market chart.
 
-DATE: {date_str}
-MOVES (day-over-day, not cumulative):
-- MWS: {mws:+.2f}%
-- VTI: {vti:+.2f}%
-- QQQ: {qqq:+.2f}%
+        DATE: {date_str}
 
-Label-worthiness rule:
-Compute event_mag = max(|MWS|, |VTI|, |QQQ|).
-If event_mag < {move_threshold*100:.2f}%, return ONLY:
-SKIP: event_mag below threshold
+        MOVES:
+        MWS {mws:+.2f}%
+        VTI {vti:+.2f}%
+        QQQ {qqq:+.2f}%
 
-If event_mag >= {move_threshold*100:.2f}%:
-1) Use web_search to find what happened on {date_str} that plausibly drove these moves.
-2) Prefer sources like Reuters, WSJ, Bloomberg, FT, CNBC, MarketWatch, Barron’s, major banks, and official releases (Fed, BLS, BEA).
-3) Prefer the most widely cited driver across credible sources.
-4) Do NOT invent facts. If you cannot find a credible driver, use:
-CAUSE: Unknown (insufficient sources)
+        If max absolute move is below {move_threshold*100:.2f}%, return exactly:
+        SKIP
 
-Return ONLY one of the following:
+        Otherwise use web_search to find the most credible driver for {date_str}.
+        Prefer Reuters Bloomberg WSJ FT CNBC MarketWatch Barrons Fed BLS BEA.
+        Do not invent facts.
 
-A) If skipped:
-SKIP: event_mag below threshold
+        Return exactly one single line:
+        <driver <= 7 words> | <series> <+/-X.XX%>
 
-B) If labeled (2 lines total):
-CAUSE: <named driver, <=7 words>
-IMPACT: <dominant series> <+/-X.XX%>
-
-Where IMPACT uses the largest absolute move among the three series and X.XX% MUST match it exactly.
-"""
+        Rules:
+        - no commas
+        - no quotes
+        - no bullets
+        - no line breaks
+        - use pipe separator
+        - max 50 characters
+        - if unknown return:
+        Unknown | <series> <+/-X.XX%>
+        """
 
         messages = [{"role": "user", "content": user_prompt}]
         for _ in range(8):  # tool loop

@@ -643,7 +643,6 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
   }
 
   // Preserve EventLabel values written by Python before deduping/sorting
-  // (normalizeRowWidth_ pads short rows with "", which would wipe them otherwise)
   const elCol = header.indexOf("EventLabel");
   const savedLabels = {};
   if (elCol >= 0) {
@@ -653,18 +652,20 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
     });
   }
 
-  // DEDUPE BY DATE
+  // Upsert today's row
   data = data.filter(r => String(r[0]) !== dateStr);
 
   const newRow = new Array(header.length).fill("");
   newRow[0] = dateStr;
   newRow[1] = Number(portfolioVal).toFixed(2);
-  for (let i = 0; i < benches.length; i++) newRow[2 + i] = Number(benchPrices[i]).toFixed(2);
+  for (let i = 0; i < benches.length; i++) {
+    newRow[2 + i] = Number(benchPrices[i]).toFixed(2);
+  }
 
   data.push(newRow);
   data.sort((a, b) => String(a[0]).localeCompare(String(b[0])));
 
-  // Restore EventLabels after sort — GAS never writes these, only carries them through
+  // Restore EventLabels after sort — GAS never writes these
   if (elCol >= 0) {
     data.forEach(r => {
       const lbl = savedLabels[String(r[0])];
@@ -672,37 +673,77 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
     });
   }
 
-  let baseIndex = -1;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(chartStart)) baseIndex = data.findIndex(r => String(r[0]) === chartStart);
-  if (baseIndex === -1) baseIndex = 0;
   if (!data.length) throw new Error("Perf log has no rows after upsert.");
-
-  const baseB = benches.map((_, i) => parseFloat(data[baseIndex][2 + i]));
-  if (baseB.some(x => !isFinite(x) || x <= 0)) throw new Error("Perf log base benchmark price invalid.");
 
   const portPctCol = 2 + benches.length;
   const pctStartCol = portPctCol + 1;
   const diffStartCol = pctStartCol + benches.length;
 
-  const out = [];
+  // Benchmark baseline still comes from chart_start_date
+  let baseIndex = -1;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(chartStart)) {
+    baseIndex = data.findIndex(r => String(r[0]) === chartStart);
+  }
+  if (baseIndex === -1) baseIndex = 0;
+
+  const baseB = benches.map((_, i) => parseFloat(data[baseIndex][2 + i]));
+  if (baseB.some(x => !isFinite(x) || x <= 0)) {
+    throw new Error("Perf log base benchmark price invalid.");
+  }
+
+  // Rolling recompute window: today + prior 5 calendar days
+  const MS_PER_DAY = 24 * 60 * 60 * 1000;
+  const todayDt = new Date(dateStr + "T00:00:00");
+  const winStartDt = new Date(todayDt.getTime() - 5 * MS_PER_DAY);
+  const winStartStr = Utilities.formatDate(winStartDt, "UTC", "yyyy-MM-dd");
+
+  let recalcStart = data.findIndex(r => String(r[0]) >= winStartStr);
+  if (recalcStart === -1) recalcStart = data.length - 1;
+  if (recalcStart < baseIndex) recalcStart = baseIndex;
+
+  // Anchor from the row immediately before recalcStart
   let prevPV = NaN;
   let prevCumPort = NaN;
+
+  if (recalcStart === baseIndex) {
+    prevCumPort = 0.0; // first row in audited series will be reset below
+  } else if (recalcStart > 0) {
+    prevPV = parseFloat(data[recalcStart - 1][1]);
+    prevCumPort = parseFloat(data[recalcStart - 1][portPctCol]);
+  }
 
   for (let ri = 0; ri < data.length; ri++) {
     const row = normalizeRowWidth_(data[ri], header.length);
 
+    // Rows before baseIndex are outside the audited chart window
     if (ri < baseIndex) {
       row[portPctCol] = "N/A";
       for (let i = 0; i < benches.length; i++) row[pctStartCol + i] = "N/A";
       for (let i = 0; i < benches.length; i++) row[diffStartCol + i] = "N/A";
-      out.push(normalizeRowWidth_(row, header.length));
+      data[ri] = row;
+      continue;
+    }
+
+    // Rows inside audited window but before rolling recompute window:
+    // preserve PortfolioPct/Diff as stored, but refresh benchmark columns if blank
+    if (ri < recalcStart) {
+      for (let i = 0; i < benches.length; i++) {
+        const px = parseFloat(row[2 + i]);
+        const pB = (isFinite(px) && px > 0) ? ((px / baseB[i]) - 1) : NaN;
+        row[pctStartCol + i] = isFinite(pB) ? pB.toFixed(4) : "N/A";
+      }
+      const pPort = parseFloat(row[portPctCol]);
+      for (let i = 0; i < benches.length; i++) {
+        const pB = parseFloat(row[pctStartCol + i]);
+        row[diffStartCol + i] = (isFinite(pPort) && isFinite(pB)) ? (pPort - pB).toFixed(4) : "N/A";
+      }
+      data[ri] = row;
       continue;
     }
 
     const pv = parseFloat(row[1]);
-
-    // PortfolioPct: append-only chained TWR from prior row
     let pPort = NaN;
+
     if (ri === baseIndex) {
       pPort = 0.0;
     } else if (isFinite(pv) && isFinite(prevPV) && prevPV > 0 && isFinite(prevCumPort)) {
@@ -712,7 +753,6 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
 
     row[portPctCol] = isFinite(pPort) ? pPort.toFixed(4) : "N/A";
 
-    // Benchmarks remain base-relative from chartStart
     for (let i = 0; i < benches.length; i++) {
       const px = parseFloat(row[2 + i]);
       const pB = (isFinite(px) && px > 0) ? ((px / baseB[i]) - 1) : NaN;
@@ -721,16 +761,19 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
 
     for (let i = 0; i < benches.length; i++) {
       const pB = parseFloat(row[pctStartCol + i]);
-      if (!isFinite(pPort) || !isFinite(pB)) row[diffStartCol + i] = "N/A";
-      else row[diffStartCol + i] = (pPort - pB).toFixed(4);
+      row[diffStartCol + i] = (isFinite(pPort) && isFinite(pB)) ? (pPort - pB).toFixed(4) : "N/A";
     }
 
     prevPV = pv;
     prevCumPort = pPort;
-    out.push(normalizeRowWidth_(row, header.length));
+    data[ri] = row;
   }
 
-  file.setContent([header].concat(out).map(r => normalizeRowWidth_(r, header.length).join(",")).join("\n"));
+  file.setContent(
+    [header].concat(data)
+      .map(r => normalizeRowWidth_(r, header.length).join(","))
+      .join("\n")
+  );
 }
 
 function buildPerfLogHeader_(benches) {
