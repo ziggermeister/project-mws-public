@@ -836,6 +836,15 @@
     "alpha_cost_model_bps_per_dollar_traded": 8,
     "benchmark": "VTI"
   },
+  "scheduled_cash_flows": [
+    {
+      "label": "Annual SEPP withdrawal",
+      "amount": -45000,
+      "recurrence": "annual",
+      "month": 1,
+      "day": 5
+    }
+  ],
   "drawdown_rules": {
     "enabled": true,
     "measurement": "peak_to_trough_rolling_252d",
@@ -848,6 +857,15 @@
       "consecutive_days": 10,
       "action": "resume_normal_rebalancing"
     },
+    "scheduled_cash_flows": [
+      {
+        "label": "Annual SEPP withdrawal",
+        "amount": -45000,
+        "recurrence": "annual",
+        "month": 1,
+        "day": 5
+      }
+    ],
     "stress_turnover_cap": "max_turnover_stress",
     "notes": "Soft limit (20%): freeze new buys, require manual review. Hard limit (28%): force reduction of all positions to sleeve floors. Recovery: resume normal rebalancing once drawdown < 12% for 10 consecutive days. 20% soft aligns with conventional bear market definition. 8pp gap (20\u219228) provides managed response window before hard limit fires.",
     "constraint_precedence_during_drawdown": {

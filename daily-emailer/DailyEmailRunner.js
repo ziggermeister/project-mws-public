@@ -624,6 +624,43 @@ function formatCellValue_(res, kind) {
  * PERFORMANCE LOG (Drive CSV) - schema-stable, non-truncating
  * ============================================================
  */
+/**
+ * Returns the total scheduled cash flow for a given date from policy.scheduled_cash_flows.
+ * Negative = withdrawal (e.g. SEPP), positive = contribution.
+ * Supports recurrence: "annual" (same month/day every year) or "once" (exact date match).
+ */
+function getScheduledCashFlow_(dateStr, policy) {
+  const flows = policy?.scheduled_cash_flows;
+  if (!Array.isArray(flows) || !flows.length) return 0;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return 0;
+
+  const year  = parseInt(dateStr.substring(0, 4), 10);
+  const month = parseInt(dateStr.substring(5, 7), 10);
+  const day   = parseInt(dateStr.substring(8, 10), 10);
+
+  let total = 0;
+  for (const flow of flows) {
+    const amount = parseFloat(flow.amount);
+    if (!isFinite(amount) || amount === 0) continue;
+
+    const rec = String(flow.recurrence || "once").toLowerCase();
+    if (rec === "annual") {
+      if (parseInt(flow.month, 10) === month && parseInt(flow.day, 10) === day) {
+        total += amount;
+        console.log(`[CASHFLOW] Scheduled flow on ${dateStr}: ${flow.label || "unnamed"} ${amount}`);
+      }
+    } else {
+      // "once" — exact date match
+      const exactDate = String(flow.date || "").trim();
+      if (exactDate === dateStr) {
+        total += amount;
+        console.log(`[CASHFLOW] Scheduled flow on ${dateStr}: ${flow.label || "unnamed"} ${amount}`);
+      }
+    }
+  }
+  return total;
+}
+
 function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, benchPrices, policy) {
   const C = getC_();
   const file = DriveApp.getFileById(C.LOG_FILE_ID);
@@ -669,7 +706,12 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
   const newRow = new Array(header.length).fill("");
   newRow[0] = dateStr;
   newRow[1] = Number(portfolioVal).toFixed(2);
-  if (cfCol >= 0) newRow[cfCol] = "0";            // default CashFlow = 0 for new rows
+  // Auto-populate CashFlow from policy.scheduled_cash_flows (e.g. annual SEPP withdrawal).
+  // Any manually-entered value already in the CSV is preserved via savedCFs above.
+  const scheduledCF = savedCFs[dateStr] !== undefined
+    ? savedCFs[dateStr]                          // manual override takes precedence
+    : getScheduledCashFlow_(dateStr, policy);    // otherwise use policy schedule
+  if (cfCol >= 0) newRow[cfCol] = String(scheduledCF || "0");
   for (let i = 0; i < benches.length; i++) {
     newRow[3 + i] = Number(benchPrices[i]).toFixed(2);  // offset +1 for CashFlow column
   }
