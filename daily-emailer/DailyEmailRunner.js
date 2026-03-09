@@ -899,28 +899,51 @@ function generateDashboardCharts2Panel_(policy) {
   return { perf, alpha };
 }
 
-function buildPerfPanelChart_(dr, benches, portPctIdx, pctIdx, chartStartDate) {
-  const dt = Charts.newDataTable()
-    .addColumn(Charts.ColumnType.STRING, "Date")
-    .addColumn(Charts.ColumnType.NUMBER, "Titanium")
-    .addColumn(Charts.ColumnType.STRING, "T_ann");
+// Display names for benchmark tickers — mirrors BENCH_DISPLAY_NAMES in mws_titanium_runner.py
+const BENCH_DISPLAY_NAMES_ = {
+  "SPY":  "S&P 500",
+  "VTI":  "Total Market",
+  "QQQ":  "Nasdaq-100",
+  "ONEQ": "Nasdaq Composite",
+  "IWM":  "Russell 2000",
+  "DIA":  "Dow Jones",
+  "EFA":  "Intl Developed",
+  "EEM":  "Emerging Markets",
+};
+function benchDisplay_(ticker) {
+  return BENCH_DISPLAY_NAMES_[String(ticker).trim().toUpperCase()] || String(ticker).trim().toUpperCase();
+}
 
+// Color palette — matches mws_titanium_runner.py exactly
+const CHART_COLORS_ = {
+  titanium: "#1f77b4",   // blue
+  b0:       "#e69500",   // orange (slightly richer than CSS 'orange' for readability)
+  b1:       "#2ca02c",   // green
+  bg:       "#f8f9fa",   // panel background
+};
+
+function buildPerfPanelChart_(dr, benches, portPctIdx, pctIdx, chartStartDate) {
+  // Column order: benchmarks first (bottom fills), Titanium last (top fill).
+  // This matches Python's layering: b1 fill → b0 fill → Titanium fill → lines on top.
+  // We add annotation columns for last-point value labels.
+  const dt = Charts.newDataTable().addColumn(Charts.ColumnType.STRING, "Date");
+
+  // Benchmark series (drawn underneath Titanium)
   benches.forEach(t => {
-    dt.addColumn(Charts.ColumnType.NUMBER, t);
-    dt.addColumn(Charts.ColumnType.STRING, t + "_ann");
+    dt.addColumn(Charts.ColumnType.NUMBER, `${t} (${benchDisplay_(t)})`);
+    dt.addColumn(Charts.ColumnType.STRING,  `${t}_ann`);
   });
+
+  // Titanium series on top
+  dt.addColumn(Charts.ColumnType.NUMBER, "Titanium (MWS)");
+  dt.addColumn(Charts.ColumnType.STRING,  "T_ann");
 
   dr.forEach((r, i) => {
     const isLast = (i === dr.length - 1);
     const dateShort = String(r[0]).substring(5); // MM-DD
+    const row = [dateShort];
 
-    const pPort = parseFloat(String(r[portPctIdx]).replace("%", ""));
-    const row = [
-      dateShort,
-      isFinite(pPort) ? pPort : null,
-      (isLast && isFinite(pPort)) ? (pPort * 100).toFixed(2) + "%" : null
-    ];
-
+    // Benchmark columns
     benches.forEach((_, j) => {
       const val = parseFloat(String(r[pctIdx[j]]).replace("%", ""));
       row.push(
@@ -929,35 +952,71 @@ function buildPerfPanelChart_(dr, benches, portPctIdx, pctIdx, chartStartDate) {
       );
     });
 
+    // Titanium column
+    const pPort = parseFloat(String(r[portPctIdx]).replace("%", ""));
+    row.push(
+      isFinite(pPort) ? pPort : null,
+      (isLast && isFinite(pPort)) ? (pPort * 100).toFixed(2) + "%" : null
+    );
+
     dt.addRow(row);
   });
 
+  // Build column index list: Date + (value, annotation) pairs for each series
+  const totalSeries = benches.length + 1; // benchmarks + Titanium
   const cols = [0];
-  const n = benches.length;
-  for (let k = 0; k <= n; k++) cols.push(k * 2 + 1, { sourceColumn: k * 2 + 2, role: "annotation" });
+  for (let k = 0; k < totalSeries; k++) {
+    cols.push(k * 2 + 1, { sourceColumn: k * 2 + 2, role: "annotation" });
+  }
 
-  return Charts.newLineChart()
+  // Colors: b0 (orange), b1 (green if present), then Titanium (blue) — matches column order
+  const seriesColors = [];
+  if (benches.length > 0) seriesColors.push(CHART_COLORS_.b0);
+  if (benches.length > 1) seriesColors.push(CHART_COLORS_.b1);
+  seriesColors.push(CHART_COLORS_.titanium);
+
+  return Charts.newAreaChart()
     .setDataTable(dt)
     .setDataViewDefinition(Charts.newDataViewDefinition().setColumns(cols))
-    .setTitle(`Cumulative Performance (Since ${chartStartDate || "Start"})`)
+    .setTitle(`Titanium Performance (Since ${chartStartDate || "Start"})  ·  TWR net of cash flows`)
     .setDimensions(1000, 420)
-    .setOption("vAxis", { format: "percent" })
+    .setOption("backgroundColor",  { fill: CHART_COLORS_.bg })
+    .setOption("chartArea",         { backgroundColor: CHART_COLORS_.bg, left: 64, right: 130, top: 44, bottom: 36 })
+    .setOption("colors",            seriesColors)
+    .setOption("areaOpacity",       0.15)          // matches Python's alpha=0.13–0.18 fill
+    .setOption("lineWidth",         2)             // matches Python's linewidth=1.8
+    .setOption("isStacked",         false)
+    .setOption("legend",            { position: "top", textStyle: { fontSize: 11, color: "#222222" } })
+    .setOption("vAxis",             {
+      format: "percent",
+      gridlines: { color: "#cccccc", count: 6 },
+      textStyle: { fontSize: 9, color: "#444" }
+    })
+    .setOption("hAxis",             {
+      textStyle: { fontSize: 8, color: "#333" },
+      gridlines: { color: "#dddddd" }
+    })
+    .setOption("annotations",       { textStyle: { fontSize: 10, bold: true, color: "#222" } })
     .build()
     .getAs("image/png");
 }
 
 function buildAlphaPanelChart_(dr, benches, diffIdx, chartStartDate) {
+  // Alpha panel: fills from each alpha line to the 0 baseline.
+  // Orange = vs b0 (S&P 500), Green = vs b1 (Nasdaq-100) — matches Python.
+  // Python uses orange fill above 0, red fill below 0 per series; GAS Charts API
+  // doesn't support conditional fill colors, so we use a single fill per series
+  // which still clearly shows alpha above/below zero.
   const dt = Charts.newDataTable().addColumn(Charts.ColumnType.STRING, "Date");
 
   benches.forEach(t => {
-    dt.addColumn(Charts.ColumnType.NUMBER, ` vs ${t}`);
-    dt.addColumn(Charts.ColumnType.STRING, ` vs ${t}_ann`);
+    dt.addColumn(Charts.ColumnType.NUMBER, `vs ${benchDisplay_(t)}`);
+    dt.addColumn(Charts.ColumnType.STRING,  `vs ${t}_ann`);
   });
 
   dr.forEach((r, i) => {
     const isLast = (i === dr.length - 1);
-    const dateShort = String(r[0]).substring(5); // MM-DD
-
+    const dateShort = String(r[0]).substring(5);
     const row = [dateShort];
     benches.forEach((t, j) => {
       const v = parseFloat(String(r[diffIdx[j]]).replace("%", ""));
@@ -966,19 +1025,42 @@ function buildAlphaPanelChart_(dr, benches, diffIdx, chartStartDate) {
         (isLast && isFinite(v)) ? (v * 100).toFixed(2) + "%" : null
       );
     });
-
     dt.addRow(row);
   });
 
   const cols = [0];
-  for (let k = 0; k < benches.length; k++) cols.push(k * 2 + 1, { sourceColumn: k * 2 + 2, role: "annotation" });
+  for (let k = 0; k < benches.length; k++) {
+    cols.push(k * 2 + 1, { sourceColumn: k * 2 + 2, role: "annotation" });
+  }
 
-  return Charts.newLineChart()
+  const seriesColors = [];
+  if (benches.length > 0) seriesColors.push(CHART_COLORS_.b0);
+  if (benches.length > 1) seriesColors.push(CHART_COLORS_.b1);
+
+  return Charts.newAreaChart()
     .setDataTable(dt)
     .setDataViewDefinition(Charts.newDataViewDefinition().setColumns(cols))
-    .setTitle(`Cumulative MWS (alpha) (Since ${chartStartDate || "Start"})`)
+    .setTitle(`Cumulative Alpha vs. Benchmarks (Since ${chartStartDate || "Start"})`)
     .setDimensions(1000, 320)
-    .setOption("vAxis", { format: "percent" })
+    .setOption("backgroundColor",  { fill: CHART_COLORS_.bg })
+    .setOption("chartArea",         { backgroundColor: CHART_COLORS_.bg, left: 64, right: 130, top: 44, bottom: 36 })
+    .setOption("colors",            seriesColors)
+    .setOption("areaOpacity",       0.15)
+    .setOption("lineWidth",         2)
+    .setOption("isStacked",         false)
+    .setOption("legend",            { position: "top", textStyle: { fontSize: 11, color: "#222222" } })
+    .setOption("vAxis",             {
+      format: "percent",
+      gridlines: { color: "#cccccc", count: 5 },
+      baseline: 0,
+      baselineColor: "#888888",
+      textStyle: { fontSize: 9, color: "#444" }
+    })
+    .setOption("hAxis",             {
+      textStyle: { fontSize: 8, color: "#333" },
+      gridlines: { color: "#dddddd" }
+    })
+    .setOption("annotations",       { textStyle: { fontSize: 10, bold: true, color: "#222" } })
     .build()
     .getAs("image/png");
 }
