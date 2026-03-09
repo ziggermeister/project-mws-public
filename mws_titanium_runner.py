@@ -1,5 +1,8 @@
 import json
 import os
+import platform
+import tempfile
+import traceback
 import warnings
 import subprocess
 from datetime import datetime, timedelta
@@ -9,6 +12,7 @@ import re
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 
 warnings.filterwarnings("ignore")
 
@@ -86,7 +90,19 @@ def update_event_labels_by_date(perf_csv_path: str, date_to_label: dict) -> None
     mask = df["Date"].isin(safe_map.keys())
     df.loc[mask, "EventLabel"] = df.loc[mask, "Date"].map(safe_map)
 
-    df.to_csv(perf_csv_path, index=False)
+    # Atomic write: write to temp file then rename to prevent corruption on crash
+    dir_ = os.path.dirname(os.path.abspath(perf_csv_path))
+    with tempfile.NamedTemporaryFile("w", dir=dir_, suffix=".tmp", delete=False, newline="") as tmp:
+        tmp_path = tmp.name
+    try:
+        df.to_csv(tmp_path, index=False)
+        os.replace(tmp_path, perf_csv_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def apply_recent_event_labels(perf_csv_path: str, recent_dates: list[str], label_fn) -> None:
@@ -128,10 +144,19 @@ def load_system_files() -> Tuple[dict, dict, pd.DataFrame, pd.DataFrame]:
         _fatal(f"[FATAL] System halted. Missing files: {missing}")
 
     print("[LOG] Phase 0: Loading System Files...")
-    with open(POLICY_FILENAME, "r") as f:
-        policy = json.load(f)
-    with open(TRACKER_FILENAME, "r") as f:
-        state = json.load(f)
+    def _load_json(path: str) -> dict:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read()
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError as e:
+            _fatal(f"[FATAL] {path} is not valid JSON: {e}")
+        if not isinstance(obj, dict):
+            _fatal(f"[FATAL] {path} must be a JSON object (dict), got {type(obj).__name__}")
+        return obj
+
+    policy = _load_json(POLICY_FILENAME)
+    state  = _load_json(TRACKER_FILENAME)
 
     try:
         hist = pd.read_csv(HISTORY_CSV)
@@ -176,10 +201,16 @@ def get_held_tickers(hold: pd.DataFrame) -> Set[str]:
     held: Set[str] = set()
     if hold is None or hold.empty:
         return held
+    cols = {c.strip().lower(): c for c in hold.columns}
+    ticker_col = cols.get("ticker")
+    shares_col = cols.get("shares")
+    if not ticker_col or not shares_col:
+        print(f"[WARN] Holdings CSV missing Ticker/Shares columns. Got: {list(hold.columns)}")
+        return held
     for _, row in hold.iterrows():
         try:
-            ticker = str(row.iloc[0]).strip().upper()
-            qty = float(row.iloc[1])
+            ticker = str(row[ticker_col]).strip().upper()
+            qty = float(row[shares_col])
             if qty > 0:
                 held.add(ticker)
         except Exception:
@@ -198,10 +229,25 @@ def get_policy_required_tickers(policy: dict) -> Set[str]:
         req.add(str(t).strip().upper())
     return {x for x in req if x}
 
-def get_ticker_proxy(policy: dict, ticker: str, default: str = "VTI") -> str:
+def get_ticker_proxy(policy: dict, ticker: str, default: Optional[str] = None) -> str:
+    """
+    Returns the benchmark_proxy for a ticker from ticker_constraints.lifecycle.
+    Falls back to policy.governance.reporting_baselines.corr_anchor_ticker,
+    then to the first active_benchmark, then to "VTI" as last resort.
+    Never silently hardcodes a ticker that isn't in the policy.
+    """
     tc = policy.get("ticker_constraints", {}) or {}
     proxy = ((tc.get(ticker, {}) or {}).get("lifecycle", {}) or {}).get("benchmark_proxy")
-    return str(proxy).strip().upper() if proxy else default
+    if proxy:
+        return str(proxy).strip().upper()
+    if default is not None:
+        return str(default).strip().upper()
+    # Derive from policy rather than hardcoding
+    bl = (policy.get("governance", {}).get("reporting_baselines", {}) or {})
+    anchor = bl.get("corr_anchor_ticker") or (bl.get("active_benchmarks") or [None])[0]
+    if anchor:
+        return str(anchor).strip().upper()
+    return "VTI"  # true last resort; will warn in caller if unexpected
 
 def get_ticker_stage(policy: dict, ticker: str) -> str:
     """Tickers absent from ticker_constraints default to REFERENCE."""
@@ -293,15 +339,21 @@ def calculate_portfolio_value(policy: dict, hold: pd.DataFrame, hist: pd.DataFra
 
     total_val = 0.0
     if hold is not None and not hold.empty:
-        for _, row in hold.iterrows():
-            ticker = str(row.iloc[0]).strip().upper()
-            try:
-                qty = float(row.iloc[1])
-            except Exception:
-                qty = 0.0
-            fixed_px = _resolve_fixed_price(ticker)
-            px = fixed_px if fixed_px is not None else float(latest_prices.get(ticker, 0.0) or 0.0)
-            total_val += qty * px
+        h_cols = {c.strip().lower(): c for c in hold.columns}
+        h_ticker_col = h_cols.get("ticker")
+        h_shares_col = h_cols.get("shares")
+        if not h_ticker_col or not h_shares_col:
+            print(f"[WARN] Holdings CSV missing Ticker/Shares columns; portfolio value will be 0. Got: {list(hold.columns)}")
+        else:
+            for _, row in hold.iterrows():
+                ticker = str(row[h_ticker_col]).strip().upper()
+                try:
+                    qty = float(row[h_shares_col])
+                except Exception:
+                    qty = 0.0
+                fixed_px = _resolve_fixed_price(ticker)
+                px = fixed_px if fixed_px is not None else float(latest_prices.get(ticker, 0.0) or 0.0)
+                total_val += qty * px
 
     print(f"\n🚀 TITANIUM COMMAND CENTER | AS-OF: {asof} | policy={policy_version}")
     print(f"🌍 REGIME: 🟢 BULL | PORTFOLIO: ${total_val:,.2f}")
@@ -345,7 +397,18 @@ def generate_rankings(policy: dict, hist: pd.DataFrame, candidates: List[str], h
 
     held_set = get_held_tickers(hold)
     six_months_ago = hist["Date"].max() - pd.Timedelta(days=180)
-    alpha_start = pd.to_datetime("2024-01-01")  # fixed baseline; no per-ticker override in policy
+
+    # Alpha start date from policy; fall back with a warning rather than silently hardcoding
+    _bl = (policy.get("governance", {}).get("reporting_baselines", {}) or {})
+    _alpha_start_str = str(_bl.get("alpha_start_date") or _bl.get("chart_start_date") or "").strip()
+    if _alpha_start_str:
+        alpha_start = pd.to_datetime(_alpha_start_str, errors="coerce")
+        if pd.isna(alpha_start):
+            print(f"[WARN] alpha_start_date '{_alpha_start_str}' in policy is not a valid date; falling back to 2024-01-01")
+            alpha_start = pd.Timestamp("2024-01-01")
+    else:
+        print("[WARN] No alpha_start_date or chart_start_date in policy.governance.reporting_baselines; defaulting to 2024-01-01")
+        alpha_start = pd.Timestamp("2024-01-01")
 
     rows = []
     for t in candidates:
@@ -358,7 +421,7 @@ def generate_rankings(policy: dict, hist: pd.DataFrame, candidates: List[str], h
         past = float(past_slice.iloc[0]["AdjClose"]) if not past_slice.empty else float(t_data.iloc[0]["AdjClose"])
         score = (curr / past) - 1 if past > 0 else np.nan
 
-        proxy = get_ticker_proxy(policy, t, default="VTI")
+        proxy = get_ticker_proxy(policy, t)  # derives default from policy.corr_anchor_ticker
         alpha = compute_alpha_vs_proxy(hist, t, proxy, alpha_start)
 
         rows.append({
@@ -476,7 +539,7 @@ def _backfill_event_labels(
     Backfill EventLabel only for a recent rolling window and update labels by Date.
     Idempotent: never overwrites existing non-empty EventLabel values.
     """
-    import json as _json
+    # json is already imported at module level
     import urllib.request as _urllib
     import urllib.error as _urlerr
     import time as _time
@@ -509,7 +572,7 @@ def _backfill_event_labels(
         return
 
     def _api_round_trip(messages):
-        body = _json.dumps({
+        body = json.dumps({
             "model": "claude-haiku-4-5-20251001",
             "max_tokens": 512,
             "tools": [{"type": "web_search_20250305", "name": "web_search"}],
@@ -526,7 +589,7 @@ def _backfill_event_labels(
             method="POST",
         )
         with _urllib.urlopen(req, timeout=45) as resp:
-            return _json.loads(resp.read())
+            return json.loads(resp.read())
 
     def _daily_moves_for_row(i: int) -> dict:
         if i <= 0:
@@ -675,8 +738,6 @@ def _read_chart_events(
     - Event coloring is based on dominant *daily* move sign.
     - Chart label includes the *daily* move magnitudes (MWS + benchmarks) on the first line.
     """
-    import pandas as pd
-
     # Resolve columns
     if port_col is None:
         port_col = next((c for c in df.columns if "portfoliopct" in c.lower()), None)
@@ -818,16 +879,20 @@ def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
         # Derive benchmark tickers and display names from policy
         bl = (policy.get("governance", {}).get("reporting_baselines", {}) or {})
         active_benches = [str(x).strip().upper() for x in (bl.get("active_benchmarks") or []) if x]
-        b0 = active_benches[0] if len(active_benches) > 0 else "SPY"
-        b1 = active_benches[1] if len(active_benches) > 1 else "QQQ"
-        disp_b0 = _bench_display(b0)   # e.g. "S&P 500"
-        disp_b1 = _bench_display(b1)   # e.g. "Nasdaq-100"
+        if not active_benches:
+            print("⚠️ Charting skipped: no active_benchmarks configured in policy.")
+            return
+        b0 = active_benches[0]
+        b1 = active_benches[1] if len(active_benches) > 1 else None
+        disp_b0 = _bench_display(b0)
+        disp_b1 = _bench_display(b1) if b1 else None
 
         # Backfill EventLabel in CSV for any significant-move dates missing a headline
+        _backfill_bench_cols = [f"Pct_{b0}"] + ([f"Pct_{b1}"] if b1 else [])
         _backfill_event_labels(
             PERF_LOG_CSV,
             port_col="PortfolioPct",
-            bench_cols=[f"Pct_{b0}", f"Pct_{b1}"],
+            bench_cols=_backfill_bench_cols,
             move_threshold=0.0175,
             lookback_days=5,
         )
@@ -837,8 +902,11 @@ def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
         df_log[date_c] = pd.to_datetime(df_log[date_c], errors="coerce")
         df_log = df_log.dropna(subset=[date_c]).sort_values(date_c).drop_duplicates(subset=[date_c], keep="last")
 
-        chart_start_str = str(bl.get("chart_start_date") or "2026-01-05").strip()
-        chart_start = pd.to_datetime(chart_start_str, errors="coerce")
+        chart_start_str = str(bl.get("chart_start_date") or "").strip()
+        if not chart_start_str:
+            print("[WARN] policy.governance.reporting_baselines.chart_start_date not set; "
+                  "charting will use earliest available data.")
+        chart_start = pd.to_datetime(chart_start_str, errors="coerce") if chart_start_str else pd.NaT
 
         port_col = _find_col(df_log, ["PortfolioPct", "portfoliopct"])
         if not port_col:
@@ -1020,7 +1088,6 @@ def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
         ax1.set_title(f"Titanium Performance ({title_suffix})  ·  TWR net of cash flows", fontsize=11, fontweight="bold", pad=10)
         ax1.grid(True, alpha=0.45, color="#999999")
         # Build legend from only the three named lines (benchmarks + Titanium)
-        _handles, _labels = ax1.get_legend_handles_labels()
         # Legend: 3 lines only, top-left above the stats box
         _handles, _labels = ax1.get_legend_handles_labels()
         _legend_items = [(h, l) for h, l in zip(_handles, _labels) if not l.startswith("_")]
@@ -1123,7 +1190,6 @@ def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
         ax1.set_xlim(dates.iloc[0], dates.iloc[-1] + date_padding)
 
         # ── Weekly vertical reference lines (every Monday) ─────────────────────
-        import matplotlib.dates as mdates
         ax2.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=mdates.MO))
         ax2.xaxis.set_major_formatter(mdates.DateFormatter("%b %-d"))
         ax2.tick_params(axis="x", which="major", labelsize=8, color="#888",
@@ -1176,10 +1242,13 @@ def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
         plt.subplots_adjust(bottom=0.28, hspace=0.2)  # extra room for event labels
         plt.savefig(CHART_FILENAME, dpi=150, bbox_inches="tight")
         print(f"\n✅ Chart generated: {CHART_FILENAME}")
-        subprocess.run(["open", CHART_FILENAME], check=False)
+        # Auto-open the chart only on macOS; skip silently on Linux/Windows
+        if platform.system() == "Darwin":
+            subprocess.run(["open", CHART_FILENAME], check=False)
 
     except Exception as e:
         print(f"⚠️ Charting Error: {e}")
+        traceback.print_exc()
 
 
 # ==============================================================================
@@ -1198,5 +1267,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 

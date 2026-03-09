@@ -56,7 +56,12 @@ function loadConfig_() {
   const fileId = PropertiesService.getScriptProperties().getProperty("MWS_PRIVATE_CONFIG_FILE_ID");
   if (!fileId) throw new Error("Missing Script Property: MWS_PRIVATE_CONFIG_FILE_ID");
   const file = DriveApp.getFileById(fileId);
-  return JSON.parse(file.getBlob().getDataAsString());
+  const raw = file.getBlob().getDataAsString();
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`CONFIG_PVT.json is not valid JSON: ${e.message}`);
+  }
 }
 
 let CACHED_CFG = null;
@@ -288,7 +293,7 @@ function updateHistDatabase_(today, requiredTickers, policyRequiredSet, tz, star
     return da.localeCompare(db) || ta.localeCompare(tb);
   });
 
-  csvFile.setContent([header].concat(finalRows).map(r => normalizeRowWidth_(r, col.width).join(",")).join("\n"));
+  csvFile.setContent([header].concat(finalRows).map(r => normalizeRowWidth_(r, col.width).map(csvQuote_).join(",")).join("\n"));
 
   return { purgedTickers, unfinishedTickers: Array.from(unfinishedTickers) };
 }
@@ -297,7 +302,7 @@ function ingestBackfillChunk_(sheet, ticker, chunkStart, chunkEnd, requiredStart
   const C = getC_();
   sheet.clearContents();
   sheet.getRange("A1").setFormula(
-    `=GOOGLEFINANCE("${ticker}","price",DATEVALUE("${chunkStart}"),DATEVALUE("${chunkEnd}"))`
+    `=GOOGLEFINANCE("${sanitizeTicker_(ticker)}","price",DATEVALUE("${chunkStart}"),DATEVALUE("${chunkEnd}"))`
   );
 
   SpreadsheetApp.flush();
@@ -358,13 +363,21 @@ function processSnapshot_(policy, tz, alerts) {
     priceByKey[`${d}|${t}`] = px;
   });
 
-  // Portfolio total from holdings
-  const holdings = Utilities.parseCsv(DriveApp.getFileById(C.HOLDINGS_FILE_ID).getBlob().getDataAsString()).slice(1);
+  // Portfolio total from holdings — look up columns by header name, not positional index
+  const holdingsRaw = DriveApp.getFileById(C.HOLDINGS_FILE_ID).getBlob().getDataAsString().replace(/^\ufeff/g, "").trim();
+  const holdingsParsed = holdingsRaw ? Utilities.parseCsv(holdingsRaw) : [];
+  if (holdingsParsed.length < 2) throw new Error("Holdings CSV empty or malformed.");
+  const hdrH = holdingsParsed[0].map(v => String(v || "").trim().toLowerCase());
+  const hTickerIdx = hdrH.indexOf("ticker");
+  const hSharesIdx = hdrH.indexOf("shares");
+  if (hTickerIdx === -1 || hSharesIdx === -1)
+    throw new Error(`Holdings CSV missing required columns. Got: ${holdingsParsed[0].join(", ")}`);
+  const holdings = holdingsParsed.slice(1);
   let totalVal = 0;
 
   holdings.forEach(r => {
-    const t = String(r[0] || "").trim().toUpperCase();
-    const qty = parseFloat(r[1]) || 0;
+    const t = String(r[hTickerIdx] || "").trim().toUpperCase();
+    const qty = parseFloat(r[hSharesIdx]) || 0;
     const fixedEntry = policy?.governance?.fixed_asset_prices?.[t];
     let px;
     if (fixedEntry === undefined) {
@@ -524,8 +537,11 @@ function sendDailyEmail_(snapshot, charts, runDateStr, alerts) {
   const subject = (alerts.length ? "⚠️ " : "✅ ") + `MWS Report: ${runDateStr}`;
   const headColor = alerts.length ? "#d32f2f" : "#2e7d32";
 
-  const bVTI = (C.BASELINES && C.BASELINES[0]) ? C.BASELINES[0] : "VTI";
-  const bQQQ = (C.BASELINES && C.BASELINES[1]) ? C.BASELINES[1] : "QQQ";
+  // Use actual configured baselines — never hardcode ticker symbols here
+  const b0 = (C.BASELINES && C.BASELINES[0]) ? String(C.BASELINES[0]).trim().toUpperCase() : null;
+  const b1 = (C.BASELINES && C.BASELINES[1]) ? String(C.BASELINES[1]).trim().toUpperCase() : null;
+  const b0Label = b0 ? `${benchDisplay_(b0)} (${b0})` : "Benchmark 1";
+  const b1Label = b1 ? `${benchDisplay_(b1)} (${b1})` : "Benchmark 2";
 
   const minPolicyStart = getMinPolicyStart_(snapshot.ghosts) || snapshot.asOfDate;
   const rangeLabel = `(${fmtMDY_(minPolicyStart)}→${fmtMDY_(snapshot.asOfDate)})`;
@@ -551,8 +567,8 @@ function sendDailyEmail_(snapshot, charts, runDateStr, alerts) {
       <thead>
         <tr style="background:#f4f4f4; color:#666; text-align:left;">
           <th style="padding:10px; border:1px solid #eee; width:26%;">Ticker / Status</th>
-          <th style="padding:10px; border:1px solid #eee; width:37%; text-align:center;" colspan="2">vs S&amp;P (${escapeHtml_(bVTI)})</th>
-          <th style="padding:10px; border:1px solid #eee; width:37%; text-align:center;" colspan="2">vs Nasdaq (${escapeHtml_(bQQQ)})</th>
+          <th style="padding:10px; border:1px solid #eee; width:37%; text-align:center;" colspan="2">vs ${escapeHtml_(b0Label)}</th>
+          <th style="padding:10px; border:1px solid #eee; width:37%; text-align:center;" colspan="2">vs ${escapeHtml_(b1Label)}</th>
         </tr>
         <tr style="background:#f8f8f8; color:#666; text-align:left;">
           <th style="padding:8px 10px; border:1px solid #eee; font-weight:600;">${escapeHtml_(rangeLabel)}</th>
@@ -565,8 +581,8 @@ function sendDailyEmail_(snapshot, charts, runDateStr, alerts) {
       <tbody>`;
 
     snapshot.ghosts.forEach(g => {
-      const rVTI = g.baselines[bVTI];
-      const rQQQ = g.baselines[bQQQ];
+      const r0 = b0 ? g.baselines[b0] : null;
+      const r1 = b1 ? g.baselines[b1] : null;
 
       html += `<tr>
         <td style="padding:10px; border:1px solid #eee; vertical-align:top;">
@@ -574,11 +590,11 @@ function sendDailyEmail_(snapshot, charts, runDateStr, alerts) {
           <span style="font-size:11px; color:#666;">${escapeHtml_(g.status)}</span>
         </td>
 
-        <td style="padding:10px; border:1px solid #eee; vertical-align:top; white-space:nowrap;">${formatCellValue_(rVTI, "alpha")}</td>
-        <td style="padding:10px; border:1px solid #eee; vertical-align:top; white-space:nowrap;">${formatCellValue_(rVTI, "corr")}</td>
+        <td style="padding:10px; border:1px solid #eee; vertical-align:top; white-space:nowrap;">${formatCellValue_(r0, "alpha")}</td>
+        <td style="padding:10px; border:1px solid #eee; vertical-align:top; white-space:nowrap;">${formatCellValue_(r0, "corr")}</td>
 
-        <td style="padding:10px; border:1px solid #eee; vertical-align:top; white-space:nowrap;">${formatCellValue_(rQQQ, "alpha")}</td>
-        <td style="padding:10px; border:1px solid #eee; vertical-align:top; white-space:nowrap;">${formatCellValue_(rQQQ, "corr")}</td>
+        <td style="padding:10px; border:1px solid #eee; vertical-align:top; white-space:nowrap;">${formatCellValue_(r1, "alpha")}</td>
+        <td style="padding:10px; border:1px solid #eee; vertical-align:top; white-space:nowrap;">${formatCellValue_(r1, "corr")}</td>
       </tr>`;
     });
 
@@ -700,6 +716,17 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
     });
   }
 
+  // Derive all column offsets from the actual header — never hardcode.
+  // Must be done before the upsert block which writes bench prices by offset.
+  const priceStartCol = header.indexOf(`Price_${benches[0]}`);
+  if (priceStartCol === -1) throw new Error(`Perf log header missing Price_${benches[0]} column.`);
+  const portPctCol   = header.indexOf("PortfolioPct");
+  if (portPctCol === -1) throw new Error("Perf log header missing PortfolioPct column.");
+  const pctStartCol  = header.indexOf(`Pct_${benches[0]}`);
+  if (pctStartCol === -1) throw new Error(`Perf log header missing Pct_${benches[0]} column.`);
+  const diffStartCol = header.indexOf(`Diff_${benches[0]}`);
+  if (diffStartCol === -1) throw new Error(`Perf log header missing Diff_${benches[0]} column.`);
+
   // Upsert today's row
   data = data.filter(r => String(r[0]) !== dateStr);
 
@@ -713,7 +740,7 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
     : getScheduledCashFlow_(dateStr, policy);    // otherwise use policy schedule
   if (cfCol >= 0) newRow[cfCol] = String(scheduledCF || "0");
   for (let i = 0; i < benches.length; i++) {
-    newRow[3 + i] = Number(benchPrices[i]).toFixed(2);  // offset +1 for CashFlow column
+    newRow[priceStartCol + i] = Number(benchPrices[i]).toFixed(2);
   }
 
   data.push(newRow);
@@ -737,11 +764,6 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
 
   if (!data.length) throw new Error("Perf log has no rows after upsert.");
 
-  // Column offsets: CashFlow is at index 2, so benchmark prices start at index 3
-  const portPctCol = 3 + benches.length;   // was 2 + benches.length before CashFlow column
-  const pctStartCol = portPctCol + 1;
-  const diffStartCol = pctStartCol + benches.length;
-
   // Benchmark baseline still comes from chart_start_date
   let baseIndex = -1;
   if (/^\d{4}-\d{2}-\d{2}$/.test(chartStart)) {
@@ -749,16 +771,15 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
   }
   if (baseIndex === -1) baseIndex = 0;
 
-  const baseB = benches.map((_, i) => parseFloat(data[baseIndex][3 + i]));  // +1 for CashFlow
+  const baseB = benches.map((_, i) => parseFloat(data[baseIndex][priceStartCol + i]));
   if (baseB.some(x => !isFinite(x) || x <= 0)) {
     throw new Error("Perf log base benchmark price invalid.");
   }
 
   // Rolling recompute window: today + prior 5 calendar days
-  const MS_PER_DAY = 24 * 60 * 60 * 1000;
-  const todayDt = new Date(dateStr + "T00:00:00");
-  const winStartDt = new Date(todayDt.getTime() - 5 * MS_PER_DAY);
-  const winStartStr = Utilities.formatDate(winStartDt, "UTC", "yyyy-MM-dd");
+  // Use addDaysYMD_ (which respects script timezone) rather than raw Date arithmetic + UTC format,
+  // which could shift by one day around midnight in non-UTC timezones.
+  const winStartStr = addDaysYMD_(dateStr, -5, Session.getScriptTimeZone());
 
   let recalcStart = data.findIndex(r => String(r[0]) >= winStartStr);
   if (recalcStart === -1) recalcStart = data.length - 1;
@@ -791,7 +812,7 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
     // preserve PortfolioPct/Diff as stored, but refresh benchmark columns if blank
     if (ri < recalcStart) {
       for (let i = 0; i < benches.length; i++) {
-        const px = parseFloat(row[3 + i]);   // +1 offset for CashFlow column
+        const px = parseFloat(row[priceStartCol + i]);
         const pB = (isFinite(px) && px > 0) ? ((px / baseB[i]) - 1) : NaN;
         row[pctStartCol + i] = isFinite(pB) ? pB.toFixed(4) : "N/A";
       }
@@ -829,7 +850,7 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
     row[portPctCol] = isFinite(pPort) ? pPort.toFixed(4) : "N/A";
 
     for (let i = 0; i < benches.length; i++) {
-      const px = parseFloat(row[3 + i]);   // +1 offset for CashFlow column
+      const px = parseFloat(row[priceStartCol + i]);
       const pB = (isFinite(px) && px > 0) ? ((px / baseB[i]) - 1) : NaN;
       row[pctStartCol + i] = isFinite(pB) ? pB.toFixed(4) : "N/A";
     }
@@ -846,7 +867,7 @@ function upsertAndRecomputePerformanceLog_(dateStr, portfolioVal, benches, bench
 
   file.setContent(
     [header].concat(data)
-      .map(r => normalizeRowWidth_(r, header.length).join(","))
+      .map(r => normalizeRowWidth_(r, header.length).map(csvQuote_).join(","))
       .join("\n")
   );
 }
@@ -899,6 +920,27 @@ function generateDashboardCharts2Panel_(policy) {
   return { perf, alpha };
 }
 
+// ── Date formatting helpers for chart x-axis ─────────────────────────────────
+const MONTH_ABBR_ = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+/**
+ * Formats a YYYY-MM-DD string as "Jan 05", "Jan 12", etc.
+ */
+function fmtChartDate_(ymd) {
+  const m = parseInt(ymd.substring(5, 7), 10) - 1;
+  const d = parseInt(ymd.substring(8, 10), 10);
+  return `${MONTH_ABBR_[m]} ${String(d).padStart(2, "0")}`;
+}
+
+/**
+ * Returns true if a YYYY-MM-DD date is a Monday.
+ * Used to space x-axis labels one week apart.
+ */
+function isMonday_(ymd) {
+  const [y, m, d] = ymd.split("-").map(Number);
+  return new Date(y, m - 1, d).getDay() === 1;
+}
+
 // Display names for benchmark tickers — mirrors BENCH_DISPLAY_NAMES in mws_titanium_runner.py
 const BENCH_DISPLAY_NAMES_ = {
   "SPY":  "S&P 500",
@@ -917,15 +959,14 @@ function benchDisplay_(ticker) {
 // Color palette — matches mws_titanium_runner.py exactly
 const CHART_COLORS_ = {
   titanium: "#1f77b4",   // blue
-  b0:       "#e69500",   // orange (slightly richer than CSS 'orange' for readability)
+  b0:       "#e69500",   // orange
   b1:       "#2ca02c",   // green
   bg:       "#f8f9fa",   // panel background
 };
 
 function buildPerfPanelChart_(dr, benches, portPctIdx, pctIdx, chartStartDate) {
   // Column order: benchmarks first (bottom fills), Titanium last (top fill).
-  // This matches Python's layering: b1 fill → b0 fill → Titanium fill → lines on top.
-  // We add annotation columns for last-point value labels.
+  // Matches Python's layering: b1 fill → b0 fill → Titanium fill → lines on top.
   const dt = Charts.newDataTable().addColumn(Charts.ColumnType.STRING, "Date");
 
   // Benchmark series (drawn underneath Titanium)
@@ -940,10 +981,13 @@ function buildPerfPanelChart_(dr, benches, portPctIdx, pctIdx, chartStartDate) {
 
   dr.forEach((r, i) => {
     const isLast = (i === dr.length - 1);
-    const dateShort = String(r[0]).substring(5); // MM-DD
-    const row = [dateShort];
+    const rawDate = String(r[0]).trim();  // YYYY-MM-DD
+    // Show label only on Mondays (weekly cadence) or the last point; blank otherwise
+    const dateLabel = (isMonday_(rawDate) || isLast) ? fmtChartDate_(rawDate) : "";
 
-    // Benchmark columns
+    const row = [dateLabel];
+
+    // Benchmark columns first
     benches.forEach((_, j) => {
       const val = parseFloat(String(r[pctIdx[j]]).replace("%", ""));
       row.push(
@@ -952,7 +996,7 @@ function buildPerfPanelChart_(dr, benches, portPctIdx, pctIdx, chartStartDate) {
       );
     });
 
-    // Titanium column
+    // Titanium last
     const pPort = parseFloat(String(r[portPctIdx]).replace("%", ""));
     row.push(
       isFinite(pPort) ? pPort : null,
@@ -963,13 +1007,13 @@ function buildPerfPanelChart_(dr, benches, portPctIdx, pctIdx, chartStartDate) {
   });
 
   // Build column index list: Date + (value, annotation) pairs for each series
-  const totalSeries = benches.length + 1; // benchmarks + Titanium
+  const totalSeries = benches.length + 1;
   const cols = [0];
   for (let k = 0; k < totalSeries; k++) {
     cols.push(k * 2 + 1, { sourceColumn: k * 2 + 2, role: "annotation" });
   }
 
-  // Colors: b0 (orange), b1 (green if present), then Titanium (blue) — matches column order
+  // Colors: b0 (orange), b1 (green if present), Titanium (blue) — matches column order
   const seriesColors = [];
   if (benches.length > 0) seriesColors.push(CHART_COLORS_.b0);
   if (benches.length > 1) seriesColors.push(CHART_COLORS_.b1);
@@ -983,8 +1027,8 @@ function buildPerfPanelChart_(dr, benches, portPctIdx, pctIdx, chartStartDate) {
     .setOption("backgroundColor",  { fill: CHART_COLORS_.bg })
     .setOption("chartArea",         { backgroundColor: CHART_COLORS_.bg, left: 64, right: 130, top: 44, bottom: 36 })
     .setOption("colors",            seriesColors)
-    .setOption("areaOpacity",       0.15)          // matches Python's alpha=0.13–0.18 fill
-    .setOption("lineWidth",         2)             // matches Python's linewidth=1.8
+    .setOption("areaOpacity",       0.15)
+    .setOption("lineWidth",         2)
     .setOption("isStacked",         false)
     .setOption("legend",            { position: "top", textStyle: { fontSize: 11, color: "#222222" } })
     .setOption("vAxis",             {
@@ -993,7 +1037,10 @@ function buildPerfPanelChart_(dr, benches, portPctIdx, pctIdx, chartStartDate) {
       textStyle: { fontSize: 9, color: "#444" }
     })
     .setOption("hAxis",             {
-      textStyle: { fontSize: 8, color: "#333" },
+      showTextEvery: 1,   // force every tick to render; blanks stay blank, only Mondays show
+      slantedText: true,
+      slantedTextAngle: 45,
+      textStyle: { fontSize: 9, color: "#333" },
       gridlines: { color: "#dddddd" }
     })
     .setOption("annotations",       { textStyle: { fontSize: 10, bold: true, color: "#222" } })
@@ -1002,11 +1049,6 @@ function buildPerfPanelChart_(dr, benches, portPctIdx, pctIdx, chartStartDate) {
 }
 
 function buildAlphaPanelChart_(dr, benches, diffIdx, chartStartDate) {
-  // Alpha panel: fills from each alpha line to the 0 baseline.
-  // Orange = vs b0 (S&P 500), Green = vs b1 (Nasdaq-100) — matches Python.
-  // Python uses orange fill above 0, red fill below 0 per series; GAS Charts API
-  // doesn't support conditional fill colors, so we use a single fill per series
-  // which still clearly shows alpha above/below zero.
   const dt = Charts.newDataTable().addColumn(Charts.ColumnType.STRING, "Date");
 
   benches.forEach(t => {
@@ -1016,8 +1058,10 @@ function buildAlphaPanelChart_(dr, benches, diffIdx, chartStartDate) {
 
   dr.forEach((r, i) => {
     const isLast = (i === dr.length - 1);
-    const dateShort = String(r[0]).substring(5);
-    const row = [dateShort];
+    const rawDate = String(r[0]).trim();  // YYYY-MM-DD
+    const dateLabel = (isMonday_(rawDate) || isLast) ? fmtChartDate_(rawDate) : "";
+
+    const row = [dateLabel];
     benches.forEach((t, j) => {
       const v = parseFloat(String(r[diffIdx[j]]).replace("%", ""));
       row.push(
@@ -1025,6 +1069,7 @@ function buildAlphaPanelChart_(dr, benches, diffIdx, chartStartDate) {
         (isLast && isFinite(v)) ? (v * 100).toFixed(2) + "%" : null
       );
     });
+
     dt.addRow(row);
   });
 
@@ -1057,7 +1102,10 @@ function buildAlphaPanelChart_(dr, benches, diffIdx, chartStartDate) {
       textStyle: { fontSize: 9, color: "#444" }
     })
     .setOption("hAxis",             {
-      textStyle: { fontSize: 8, color: "#333" },
+      showTextEvery: 1,   // force every tick to render; blanks stay blank, only Mondays show
+      slantedText: true,
+      slantedTextAngle: 45,
+      textStyle: { fontSize: 9, color: "#333" },
       gridlines: { color: "#dddddd" }
     })
     .setOption("annotations",       { textStyle: { fontSize: 10, bold: true, color: "#222" } })
@@ -1078,7 +1126,7 @@ function getBatchPricesScratch_(tickers) {
 
   tickers.forEach((t, i) => {
     sh.getRange(i + 1, 1).setValue(t);
-    sh.getRange(i + 1, 2).setFormula(`=IFERROR(GOOGLEFINANCE("${t}"), 0)`);
+    sh.getRange(i + 1, 2).setFormula(`=IFERROR(GOOGLEFINANCE("${sanitizeTicker_(t)}"), 0)`);
   });
 
   SpreadsheetApp.flush();
@@ -1191,6 +1239,33 @@ function pearson_(x, y) {
   const num = (n * sumXY) - (sumX * sumY);
   const den = Math.sqrt(((n * sumX2) - (sumX * sumX)) * ((n * sumY2) - (sumY * sumY)));
   return den === 0 ? NaN : (num / den);
+}
+
+/**
+ * Quotes a CSV field value if it contains a comma, double-quote, or newline.
+ * Prevents EventLabel values like "FOMC, Rate Hike" from corrupting CSV structure on re-read.
+ */
+/**
+ * Validates a ticker string before embedding it in a GOOGLEFINANCE formula.
+ * Rejects anything that isn't alphanumeric + hyphens/periods (standard ticker chars).
+ * Prevents formula injection if a malformed ticker somehow enters the system.
+ */
+function sanitizeTicker_(t) {
+  const s = String(t || "").trim().toUpperCase();
+  // Allow: letters, digits, dot, hyphen, colon (for exchange-prefixed tickers like INDEXCBOE:VIX, CURRENCY:USDEUR)
+  // Reject: spaces, quotes, backticks, $, =, +, parens, and anything else that could be formula injection
+  if (!/^[A-Z0-9.\-:]{1,30}$/.test(s)) {
+    throw new Error(`Ticker "${s}" failed safety validation for GOOGLEFINANCE formula injection.`);
+  }
+  return s;
+}
+
+function csvQuote_(val) {
+  const s = String(val === null || val === undefined ? "" : val);
+  if (s.includes(",") || s.includes('"') || s.includes("\n") || s.includes("\r")) {
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  return s;
 }
 
 function escapeHtml_(s) {
