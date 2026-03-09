@@ -6,8 +6,8 @@ CHAT,877.96020,ai_tech
 BOTZ,421.32757,ai_tech
 DTCR,1776.00000,ai_tech
 GRID,137.00000,ai_tech
-IAUM,1057.24099,precious_metals
-SIVR,601.64679,precious_metals
+IAUM,1047.24099,precious_metals
+SIVR,574.64679,precious_metals
 URNM,249.19625,strategic_materials
 REMX,276.99372,strategic_materials
 COPX,279.82534,strategic_materials
@@ -18,4 +18,4 @@ IBIT,167.00000,crypto
 DBMF,1144.00000,managed_futures
 KMLM,1281.00000,managed_futures
 TREASURY_NOTE,1.00000,bucket_a
-CASH,1.95,bucket_b
+CASH,2724.43,bucket_b
