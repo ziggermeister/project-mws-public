@@ -1,20 +1,33 @@
 import json
+import logging
 import os
 import platform
-import tempfile
-import traceback
-import warnings
+import re
 import subprocess
+import tempfile
+import time
+import traceback
+import urllib.error
+import urllib.request
+import warnings
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, Dict, List, Set, Any
-import re
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
-warnings.filterwarnings("ignore")
+# Suppress only known-harmless warnings; do not suppress all warnings globally.
+warnings.filterwarnings("ignore", category=FutureWarning, module="pandas")
+warnings.filterwarnings("ignore", message=".*non-GUI backend.*")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("mws")
 
 # Display names for benchmark tickers used in chart labels.
 # Add entries here when adding new benchmarks to active_benchmarks in policy.
@@ -134,7 +147,7 @@ def recent_calendar_dates(as_of_date: str, days_back: int = 5) -> list[str]:
     ]
     
 def _fatal(msg: str, code: int = 1) -> None:
-    print(msg)
+    logger.critical(msg)
     raise SystemExit(code)
 
 def load_system_files() -> Tuple[dict, dict, pd.DataFrame, pd.DataFrame]:
@@ -143,7 +156,7 @@ def load_system_files() -> Tuple[dict, dict, pd.DataFrame, pd.DataFrame]:
     if missing:
         _fatal(f"[FATAL] System halted. Missing files: {missing}")
 
-    print("[LOG] Phase 0: Loading System Files...")
+    logger.info("Phase 0: Loading System Files...")
     def _load_json(path: str) -> dict:
         with open(path, "r", encoding="utf-8") as f:
             raw = f.read()
@@ -198,24 +211,18 @@ def load_system_files() -> Tuple[dict, dict, pd.DataFrame, pd.DataFrame]:
 # 2) Policy helpers
 # ==============================================================================
 def get_held_tickers(hold: pd.DataFrame) -> Set[str]:
-    held: Set[str] = set()
     if hold is None or hold.empty:
-        return held
+        return set()
     cols = {c.strip().lower(): c for c in hold.columns}
     ticker_col = cols.get("ticker")
     shares_col = cols.get("shares")
     if not ticker_col or not shares_col:
-        print(f"[WARN] Holdings CSV missing Ticker/Shares columns. Got: {list(hold.columns)}")
-        return held
-    for _, row in hold.iterrows():
-        try:
-            ticker = str(row[ticker_col]).strip().upper()
-            qty = float(row[shares_col])
-            if qty > 0:
-                held.add(ticker)
-        except Exception:
-            continue
-    return held
+        logger.warning("Holdings CSV missing Ticker/Shares columns. Got: %s", list(hold.columns))
+        return set()
+    # Vectorized: no iterrows()
+    shares_numeric = pd.to_numeric(hold[shares_col], errors="coerce")
+    positive_mask  = shares_numeric.fillna(0) > 0
+    return set(hold.loc[positive_mask, ticker_col].astype(str).str.strip().str.upper())
 
 def get_policy_required_tickers(policy: dict) -> Set[str]:
     """Benchmarks + all tickers in ticker_constraints. Used for audit/warn."""
@@ -271,14 +278,14 @@ def get_ticker_sleeve(policy: dict, ticker: str) -> str:
 # 3) Audit + valuation
 # ==============================================================================
 def run_titanium_audit(policy: dict, state: dict, hist: pd.DataFrame, hold: pd.DataFrame):
-    print("[LOG] Phase 1: Starting Titanium Hard-Stop Audit...")
+    logger.info("Phase 1: Starting Titanium Hard-Stop Audit...")
 
     policy_required = get_policy_required_tickers(policy)
     tc = policy.get("ticker_constraints", {}) or {}
     have_hist = set(hist["Ticker"].unique())
 
     max_date = hist["Date"].max()
-    print(f"[AUDIT] Health: UniverseMax={max_date.date()}")
+    logger.info("AUDIT: UniverseMax=%s", max_date.date())
 
     held_set = get_held_tickers(hold)
 
@@ -294,10 +301,10 @@ def run_titanium_audit(policy: dict, state: dict, hist: pd.DataFrame, hold: pd.D
 
     missing_from_hist = sorted(policy_required - have_hist)
     if missing_from_hist:
-        print(f"[AUDIT][WARN] Policy tickers missing from history: {', '.join(missing_from_hist)}")
+        logger.warning("AUDIT: Policy tickers missing from history: %s", ", ".join(missing_from_hist))
 
-    print(f"[AUDIT] Ranking Universe: {len(final_candidates)} tickers (Active + Held)")
-    print("✅ Audit Passed.")
+    logger.info("AUDIT: Ranking Universe: %d tickers (Active + Held)", len(final_candidates))
+    logger.info("Audit Passed.")
     return final_candidates, [], missing_from_hist
 
 
@@ -343,17 +350,18 @@ def calculate_portfolio_value(policy: dict, hold: pd.DataFrame, hist: pd.DataFra
         h_ticker_col = h_cols.get("ticker")
         h_shares_col = h_cols.get("shares")
         if not h_ticker_col or not h_shares_col:
-            print(f"[WARN] Holdings CSV missing Ticker/Shares columns; portfolio value will be 0. Got: {list(hold.columns)}")
+            logger.warning("Holdings CSV missing Ticker/Shares columns; portfolio value will be 0. Got: %s", list(hold.columns))
         else:
-            for _, row in hold.iterrows():
-                ticker = str(row[h_ticker_col]).strip().upper()
-                try:
-                    qty = float(row[h_shares_col])
-                except Exception:
-                    qty = 0.0
-                fixed_px = _resolve_fixed_price(ticker)
-                px = fixed_px if fixed_px is not None else float(latest_prices.get(ticker, 0.0) or 0.0)
-                total_val += qty * px
+            # Vectorized: no iterrows()
+            tickers = hold[h_ticker_col].astype(str).str.strip().str.upper()
+            qtys    = pd.to_numeric(hold[h_shares_col], errors="coerce").fillna(0.0)
+            def _get_price(t: str) -> float:
+                fp = _resolve_fixed_price(t)
+                if fp is not None:
+                    return fp
+                return float(latest_prices.get(t, 0.0) or 0.0)
+            prices    = tickers.map(_get_price)
+            total_val = float((qtys * prices).sum())
 
     print(f"\n🚀 TITANIUM COMMAND CENTER | AS-OF: {asof} | policy={policy_version}")
     print(f"🌍 REGIME: 🟢 BULL | PORTFOLIO: ${total_val:,.2f}")
@@ -361,7 +369,67 @@ def calculate_portfolio_value(policy: dict, hold: pd.DataFrame, hist: pd.DataFra
 
 
 # ==============================================================================
-# 4) Momentum rankings
+# 4) Momentum signal helpers (policy-compliant 3-signal blend)
+# ==============================================================================
+
+def _compute_tr12m(prices: pd.Series) -> Optional[float]:
+    """12-month total return from a price Series (policy weight: 45%)."""
+    p = pd.to_numeric(prices, errors="coerce").dropna()
+    if len(p) < 2:
+        return None
+    return float(p.iloc[-1] / p.iloc[0] - 1)
+
+
+def _compute_slope_6m(prices: pd.Series) -> Optional[float]:
+    """Annualized OLS slope of log-price over a 6-month window (policy weight: 35%)."""
+    p = pd.to_numeric(prices, errors="coerce").dropna()
+    if len(p) < 10:
+        return None
+    log_p = np.log(p.values.astype(float))
+    x     = np.arange(len(log_p), dtype=float)
+    slope = float(np.polyfit(x, log_p, 1)[0])  # slope per trading day
+    return slope * 252  # annualized
+
+
+def _compute_residual_3m(t_prices: pd.Series, anchor_prices: pd.Series) -> Optional[float]:
+    """3-month total-return residual of ticker minus VTI anchor (policy weight: 20%)."""
+    t = pd.to_numeric(t_prices,      errors="coerce").dropna()
+    v = pd.to_numeric(anchor_prices, errors="coerce").dropna()
+    common = t.index.intersection(v.index)
+    if len(common) < 5:
+        return None
+    t_c, v_c = t.reindex(common), v.reindex(common)
+    tr_t = float(t_c.iloc[-1] / t_c.iloc[0] - 1)
+    tr_v = float(v_c.iloc[-1] / v_c.iloc[0] - 1)
+    return tr_t - tr_v
+
+
+def _blend_score(
+    tr12: Optional[float],
+    slope6: Optional[float],
+    res3: Optional[float],
+    weights: dict,
+) -> Optional[float]:
+    """Weighted blend with graceful partial-component fallback when data is missing."""
+    if not weights:
+        return None
+    components = [
+        (tr12,   weights.get("tr_12m",      0.45)),
+        (slope6, weights.get("slope_6m",     0.35)),
+        (res3,   weights.get("residual_3m",  0.20)),
+    ]
+    total_w, total_s = 0.0, 0.0
+    for val, w in components:
+        if val is not None and np.isfinite(val):
+            total_s += val * w
+            total_w += w
+    if total_w <= 0:
+        return None
+    return total_s / total_w  # renormalized to available components
+
+
+# ==============================================================================
+# 4b) Legacy helpers (used by charting / alpha calculation)
 # ==============================================================================
 def _aligned_total_return(prices: pd.Series) -> Optional[float]:
     prices = pd.to_numeric(prices, errors="coerce").dropna()
@@ -391,59 +459,101 @@ def compute_alpha_vs_proxy(hist: pd.DataFrame, ticker: str, proxy: str, start_da
     return tr_t - tr_p
 
 def generate_rankings(policy: dict, hist: pd.DataFrame, candidates: List[str], hold: pd.DataFrame) -> pd.DataFrame:
-    print("[LOG] Phase 3: Generating Rankings...")
+    logger.info("Phase 3: Generating Rankings...")
     if not candidates or hist.empty:
-        return pd.DataFrame(columns=["Ticker", "Score", "Alpha", "AlphaVs", "Sleeve", "Status"])
+        return pd.DataFrame(columns=["Ticker", "Score", "Pct", "Alpha", "AlphaVs", "Sleeve", "Status"])
 
     held_set = get_held_tickers(hold)
-    six_months_ago = hist["Date"].max() - pd.Timedelta(days=180)
 
-    # Alpha start date from policy; fall back with a warning rather than silently hardcoding
+    # ── Momentum blend weights from policy (fall back to spec defaults) ──────
+    _mo = (policy.get("momentum_engine", {}) or {})
+    _wt = (_mo.get("signal_weights", {}) or {})
+    weights = {
+        "tr_12m":      float(_wt.get("tr_12m",      0.45)),
+        "slope_6m":    float(_wt.get("slope_6m",    0.35)),
+        "residual_3m": float(_wt.get("residual_3m", 0.20)),
+    }
+
+    # ── Alpha start date from policy; warn rather than silently hardcode ─────
     _bl = (policy.get("governance", {}).get("reporting_baselines", {}) or {})
     _alpha_start_str = str(_bl.get("alpha_start_date") or _bl.get("chart_start_date") or "").strip()
     if _alpha_start_str:
         alpha_start = pd.to_datetime(_alpha_start_str, errors="coerce")
         if pd.isna(alpha_start):
-            print(f"[WARN] alpha_start_date '{_alpha_start_str}' in policy is not a valid date; falling back to 2024-01-01")
+            logger.warning(
+                "alpha_start_date '%s' in policy is not a valid date; falling back to 2024-01-01",
+                _alpha_start_str,
+            )
             alpha_start = pd.Timestamp("2024-01-01")
     else:
-        print("[WARN] No alpha_start_date or chart_start_date in policy.governance.reporting_baselines; defaulting to 2024-01-01")
+        logger.warning(
+            "No alpha_start_date or chart_start_date in policy.governance.reporting_baselines; "
+            "defaulting to 2024-01-01"
+        )
         alpha_start = pd.Timestamp("2024-01-01")
 
-    rows = []
+    # ── Anchor price series for residual_3m component ────────────────────────
+    anchor_ticker = str(policy.get("corr_anchor_ticker", "VTI")).upper()
+    anchor_data = hist[hist["Ticker"] == anchor_ticker].sort_values("Date")
+    anchor_prices: pd.Series = (
+        anchor_data.set_index("Date")["AdjClose"] if not anchor_data.empty else pd.Series(dtype=float)
+    )
+
+    # ── Compute raw blend score per candidate ────────────────────────────────
+    rows: List[dict] = []
     for t in candidates:
         t_data = hist[hist["Ticker"] == t].sort_values("Date")
         if t_data.empty:
             continue
+        prices = t_data.set_index("Date")["AdjClose"]
 
-        curr = float(t_data.iloc[-1]["AdjClose"])
-        past_slice = t_data[t_data["Date"] >= six_months_ago]
-        past = float(past_slice.iloc[0]["AdjClose"]) if not past_slice.empty else float(t_data.iloc[0]["AdjClose"])
-        score = (curr / past) - 1 if past > 0 else np.nan
+        tr12   = _compute_tr12m(prices)
+        slope6 = _compute_slope_6m(prices)
+        res3   = _compute_residual_3m(prices, anchor_prices)
+        blend  = _blend_score(tr12, slope6, res3, weights)
 
-        proxy = get_ticker_proxy(policy, t)  # derives default from policy.corr_anchor_ticker
+        proxy = get_ticker_proxy(policy, t)
         alpha = compute_alpha_vs_proxy(hist, t, proxy, alpha_start)
 
         rows.append({
-            "Ticker":  t,
-            "Score":   float(score) if np.isfinite(score) else np.nan,
-            "Alpha":   "N/A" if alpha is None else f"{alpha:+.1%}",
-            "AlphaVs": proxy,
-            "Sleeve":  get_ticker_sleeve(policy, t),
-            "Status":  f"{get_ticker_stage(policy, t)}/{'HELD' if t in held_set else 'WATCH'}",
+            "Ticker":   t,
+            "RawScore": blend,
+            "Alpha":    "N/A" if alpha is None else f"{alpha:+.1%}",
+            "AlphaVs":  proxy,
+            "Sleeve":   get_ticker_sleeve(policy, t),
+            "Status":   f"{get_ticker_stage(policy, t)}/{'HELD' if t in held_set else 'WATCH'}",
         })
 
-    df = pd.DataFrame(rows).sort_values("Score", ascending=False)
+    if not rows:
+        return pd.DataFrame(columns=["Ticker", "Score", "Pct", "Alpha", "AlphaVs", "Sleeve", "Status"])
 
-    print("\n🏆 MOMENTUM RANKINGS")
-    print(f"{'Ticker':<6} {'Score':>7} {'Alpha':>8} {'Vs':>5} {'Sleeve':<32} {'Status'}")
+    df = pd.DataFrame(rows)
+
+    # ── Percentile-rank within the inducted universe ──────────────────────────
+    # Higher raw score → higher percentile rank (better momentum).
+    df["Pct"]   = df["RawScore"].rank(pct=True, na_option="keep")
+    df["Score"] = df["Pct"]   # exported Score is the 0–1 percentile rank
+
+    df = df.sort_values("Score", ascending=False).reset_index(drop=True)
+
+    # ── Display table ────────────────────────────────────────────────────────
+    w_line = f"{weights['tr_12m']:.0%} TR12m · {weights['slope_6m']:.0%} Slope6m · {weights['residual_3m']:.0%} Res3m"
+    logger.info("─" * 74)
+    logger.info("🏆  MOMENTUM RANKINGS  (blend: %s)", w_line)
+    logger.info("─" * 74)
+    logger.info("%-6s %6s %8s %8s %5s %-32s %s",
+                "Ticker", "Pct", "Raw", "Alpha", "Vs", "Sleeve", "Status")
     for _, r in df.iterrows():
         sleeve_disp = (r["Sleeve"] or "UNMAPPED")
         if len(sleeve_disp) > 32:
             sleeve_disp = sleeve_disp[:29] + "..."
-        print(f"  {r['Ticker']:<6} {r['Score']:>7.4f} {r['Alpha']:>8} {r['AlphaVs']:>5} {sleeve_disp:<32} {r['Status']}")
+        pct_str = f"{r['Pct']:.1%}" if pd.notna(r["Pct"]) else "  N/A"
+        raw_str = f"{r['RawScore']:.4f}" if pd.notna(r["RawScore"]) else "   N/A"
+        logger.info("  %-6s %6s %8s %8s %5s %-32s %s",
+                    r["Ticker"], pct_str, raw_str, r["Alpha"], r["AlphaVs"],
+                    sleeve_disp, r["Status"])
 
-    return df
+    return df[["Ticker", "Score", "Pct", "Alpha", "AlphaVs", "Sleeve", "Status"]]
 
 
 # ==============================================================================
@@ -539,11 +649,6 @@ def _backfill_event_labels(
     Backfill EventLabel only for a recent rolling window and update labels by Date.
     Idempotent: never overwrites existing non-empty EventLabel values.
     """
-    # json is already imported at module level
-    import urllib.request as _urllib
-    import urllib.error as _urlerr
-    import time as _time
-
     if not os.path.exists(csv_path):
         return
 
@@ -568,7 +673,7 @@ def _backfill_event_labels(
 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
-        print("[EVENTS] ANTHROPIC_API_KEY not set — skipping event label backfill")
+        logger.warning("ANTHROPIC_API_KEY not set — skipping event label backfill")
         return
 
     def _api_round_trip(messages):
@@ -578,7 +683,7 @@ def _backfill_event_labels(
             "tools": [{"type": "web_search_20250305", "name": "web_search"}],
             "messages": messages,
         }, ensure_ascii=True).encode("utf-8")
-        req = _urllib.Request(
+        req = urllib.request.Request(
             "https://api.anthropic.com/v1/messages",
             data=body,
             headers={
@@ -588,7 +693,7 @@ def _backfill_event_labels(
             },
             method="POST",
         )
-        with _urllib.urlopen(req, timeout=45) as resp:
+        with urllib.request.urlopen(req, timeout=45) as resp:
             return json.loads(resp.read())
 
     def _daily_moves_for_row(i: int) -> dict:
@@ -698,9 +803,9 @@ Unknown | <series> <+/-X.XX%>
 
         for attempt in range(4):
             try:
-                print(f"[EVENTS] Fetching label for {date_str}...")
+                logger.info("Fetching event label for %s ...", date_str)
                 return _fetch_label_from_anthropic(date_str, moves)
-            except _urlerr.HTTPError as e:
+            except urllib.error.HTTPError as e:
                 body = ""
                 try:
                     body = e.read().decode("utf-8", errors="replace")
@@ -708,18 +813,18 @@ Unknown | <series> <+/-X.XX%>
                     pass
                 if e.code == 429 and attempt < 3:
                     wait = 20 * (attempt + 1)
-                    print(f"[EVENTS] Rate limited for {date_str}, retrying in {wait}s...")
-                    _time.sleep(wait)
+                    logger.warning("Rate limited for %s; retrying in %ds ...", date_str, wait)
+                    time.sleep(wait)
                 else:
-                    print(f"[EVENTS] API error {e.code} for {date_str}: {body[:200]}")
+                    logger.error("API error %d for %s: %s", e.code, date_str, body[:200])
                     return ""
             except Exception as e:
-                print(f"[EVENTS] Failed for {date_str}: {e}")
+                logger.error("Event label fetch failed for %s: %s", date_str, e)
                 return ""
         return ""
 
     apply_recent_event_labels(csv_path, recent_dates, _label_fn)
-    print(f"[EVENTS] Reviewed recent dates window: {', '.join(recent_dates)}")
+    logger.info("Reviewed event label window: %s", ", ".join(recent_dates))
 
 def _read_chart_events(
     df: pd.DataFrame,
@@ -1252,10 +1357,88 @@ def rotate_and_chart(df_scores: pd.DataFrame, policy: dict) -> None:
 
 
 # ==============================================================================
-# 6) Main
+# 6) Drawdown enforcement gate
+# ==============================================================================
+
+def check_drawdown_state(policy: dict, perf_log: str = PERF_LOG_CSV) -> dict:
+    """
+    Read the performance log and return the current drawdown enforcement state.
+
+    Returns a dict with keys:
+        state     : "normal" | "soft_limit" | "hard_limit"
+        drawdown  : float  — current peak-to-trough as a negative fraction (e.g. -0.23)
+        soft_limit: float  — policy soft-limit threshold (e.g. 0.20)
+        hard_limit: float  — policy hard-limit threshold (e.g. 0.28)
+        recovery  : float  — recovery threshold (e.g. 0.12)
+    """
+    risk  = policy.get("risk_controls", {}) or {}
+    soft  = float(risk.get("soft_limit",           0.20))
+    hard  = float(risk.get("hard_limit",           0.28))
+    recov = float(risk.get("recovery_threshold",   0.12))
+
+    default: dict = {
+        "state": "normal", "drawdown": 0.0,
+        "soft_limit": soft, "hard_limit": hard, "recovery": recov,
+    }
+
+    if not os.path.exists(perf_log):
+        return default
+
+    try:
+        df = pd.read_csv(perf_log, dtype=str)
+        df.columns = [c.strip() for c in df.columns]
+        twr_col = next((c for c in df.columns if "twr" in c.lower()), None)
+        if twr_col is None:
+            return default
+
+        series = pd.to_numeric(df[twr_col], errors="coerce").dropna()
+        if series.empty:
+            return default
+
+        # Build wealth index from cumulative daily returns, then measure max drawdown
+        wealth = (1 + series).cumprod()
+        dd = _compute_max_drawdown(wealth)   # returns negative float
+        if dd is None:
+            return default
+
+        abs_dd = abs(dd)
+        if abs_dd >= hard:
+            state = "hard_limit"
+        elif abs_dd >= soft:
+            state = "soft_limit"
+        else:
+            state = "normal"
+
+        return {"state": state, "drawdown": dd,
+                "soft_limit": soft, "hard_limit": hard, "recovery": recov}
+
+    except Exception as exc:
+        logger.warning("check_drawdown_state: could not parse perf log (%s); assuming normal", exc)
+        return default
+
+
+# ==============================================================================
+# 7) Main
 # ==============================================================================
 def main() -> None:
     policy, state, hist, hold = load_system_files()
+
+    # ── Drawdown gate — enforced before any ranking or rebalance logic ────────
+    dd = check_drawdown_state(policy)
+    if dd["state"] == "hard_limit":
+        logger.error(
+            "HARD LIMIT ACTIVE — drawdown %.1f%% ≥ hard limit %.1f%%. "
+            "Reducing all sleeves to policy floors. New buys and rebalances SUSPENDED.",
+            abs(dd["drawdown"]) * 100, dd["hard_limit"] * 100,
+        )
+    elif dd["state"] == "soft_limit":
+        logger.warning(
+            "SOFT LIMIT ACTIVE — drawdown %.1f%% ≥ soft limit %.1f%%. "
+            "New buys SUSPENDED; calendar and signal-drift triggers FROZEN.",
+            abs(dd["drawdown"]) * 100, dd["soft_limit"] * 100,
+        )
+    else:
+        logger.info("Drawdown status: normal (current %.1f%%)", abs(dd["drawdown"]) * 100)
 
     candidates, _, _ = run_titanium_audit(policy, state, hist, hold)
     _ = calculate_portfolio_value(policy, hold, hist)
@@ -1263,7 +1446,7 @@ def main() -> None:
     df_scores = generate_rankings(policy, hist, candidates, hold)
     rotate_and_chart(df_scores, policy)
 
-    print("\n✅ Run Complete.")
+    logger.info("Run complete.")
 
 if __name__ == "__main__":
     main()

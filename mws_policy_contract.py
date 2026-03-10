@@ -3,6 +3,33 @@ import hashlib
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple, Any
 
+# ==============================================================================
+# ⚠️  SCHEMA MISMATCH — ACTION REQUIRED BEFORE USE
+# ==============================================================================
+# This validator was written for a "vNext" policy schema that differs from the
+# live mws_policy.json in two critical ways:
+#
+#   Key                  | This validator expects    | Live policy uses
+#   ---------------------+---------------------------+------------------------
+#   Asset universe       | policy["assets"]["tickers"]| policy["ticker_constraints"]
+#   L2 sleeve taxonomy   | policy["taxonomy"]["sleeves"]["l2"] | policy["sleeves"]["level2"]
+#
+# Until these two helper functions are updated, build_policy_contract() will
+# raise ValueError on the live policy file:
+#   - parse_vnext_assets() reads policy["assets"]["tickers"] → KeyError
+#   - parse_l2_to_l1()    reads policy["taxonomy"]["sleeves"]["l2"] → empty result
+#
+# TO FIX (in priority order):
+#   1. Update parse_vnext_assets() to read policy["ticker_constraints"] and
+#      map each entry's lifecycle.stage / sleeve_assignments to AssetMeta.
+#   2. Update parse_l2_to_l1() to read policy["sleeves"]["level2"] and derive
+#      the l2 → l1 mapping from each sleeve's "l1_parent" field.
+#   3. Update all downstream callers that reference the old schema path.
+#
+# Until fixed, import this module for type definitions only; do NOT call
+# build_policy_contract() in production.
+# ==============================================================================
+
 # -------------------------
 # Types / data model
 # -------------------------

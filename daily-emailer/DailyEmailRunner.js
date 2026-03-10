@@ -9,8 +9,8 @@
  * Your private config file is looked up via Script Properties key:
  *   MWS_PRIVATE_CONFIG_FILE_ID
  *
- * You provided:
- *   MWS_PRIVATE_CONFIG_FILE_ID = "1V4ovKySo59hevMcXuvu5dGu66xPAvP8R"
+ * Run initPrivateConfigFileId() once in the Apps Script editor to register
+ * your CONFIG_PVT.json Drive file ID. Never commit the real ID to source control.
  * ============================================================
  */
 
@@ -47,9 +47,15 @@ const CONFIG = {
  * Run this once manually in Apps Script to store the file ID you provided.
  */
 function initPrivateConfigFileId() {
-  const PRIVATE_ID = "1V4ovKySo59hevMcXuvu5dGu66xPAvP8R";
+  // SECURITY: never commit your real Drive file ID to version control.
+  // Paste your CONFIG_PVT.json file ID from Google Drive here, run this
+  // function once in the Apps Script editor, then delete the value again.
+  const PRIVATE_ID = "YOUR_DRIVE_FILE_ID_HERE";
+  if (PRIVATE_ID === "YOUR_DRIVE_FILE_ID_HERE") {
+    throw new Error("initPrivateConfigFileId: replace PRIVATE_ID with your real Drive file ID before running.");
+  }
   PropertiesService.getScriptProperties().setProperty("MWS_PRIVATE_CONFIG_FILE_ID", PRIVATE_ID);
-  console.log(`[INIT] Set MWS_PRIVATE_CONFIG_FILE_ID=${PRIVATE_ID}`);
+  console.log(`[INIT] Set MWS_PRIVATE_CONFIG_FILE_ID (length=${PRIVATE_ID.length})`);
 }
 
 function loadConfig_() {
@@ -64,13 +70,12 @@ function loadConfig_() {
   }
 }
 
-let CACHED_CFG = null;
-
+// NOTE: GAS creates a fresh V8 isolate for every execution, so a module-level
+// variable is reset on each run. Do not add a module-level cache here; just
+// call loadConfig_() directly and merge with CONFIG on every invocation.
 function getC_() {
-  if (CACHED_CFG) return CACHED_CFG;
-  const cfg = loadConfig_(); // your private JSON
-  CACHED_CFG = Object.assign({}, CONFIG, cfg);
-  return CACHED_CFG;
+  const cfg = loadConfig_();
+  return Object.assign({}, CONFIG, cfg);
 }
 
 /**
@@ -163,14 +168,15 @@ function getPolicyRequiredTickers_(policy) {
   (baselines.active_benchmarks || []).forEach(t => set.add(String(t).trim().toUpperCase()));
   if (baselines.corr_anchor_ticker) set.add(String(baselines.corr_anchor_ticker).trim().toUpperCase());
 
+  // Add every ticker that appears in ticker_constraints regardless of lifecycle stage
+  // so that inducted, watchlist, and phasing-out tickers are all tracked in HIST.
+  // Mirrors Python's get_policy_required_tickers() in mws_titanium_runner.py.
   const tc = policy?.ticker_constraints || {};
   Object.keys(tc).forEach(t => {
     const T = String(t).trim().toUpperCase();
+    set.add(T);
     const lc = tc[t]?.lifecycle;
-    if (lc?.stage === "activated") {
-      set.add(T);
-      if (lc.benchmark_proxy) set.add(String(lc.benchmark_proxy).trim().toUpperCase());
-    }
+    if (lc?.benchmark_proxy) set.add(String(lc.benchmark_proxy).trim().toUpperCase());
   });
 
   [...set].forEach(x => { if (!x) set.delete(x); });
