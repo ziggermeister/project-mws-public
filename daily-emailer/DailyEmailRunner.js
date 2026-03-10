@@ -174,6 +174,8 @@ function getPolicyRequiredTickers_(policy) {
   const tc = policy?.ticker_constraints || {};
   Object.keys(tc).forEach(t => {
     const T = String(t).trim().toUpperCase();
+    // Skip synthetic/non-market entries (e.g. CASH, TREASURY_NOTE) — not GOOGLEFINANCE symbols
+    try { sanitizeTicker_(T); } catch (_) { return; }
     set.add(T);
     const lc = tc[t]?.lifecycle;
     if (lc?.benchmark_proxy) set.add(String(lc.benchmark_proxy).trim().toUpperCase());
