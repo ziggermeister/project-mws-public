@@ -171,10 +171,15 @@ function getPolicyRequiredTickers_(policy) {
   // Add every ticker that appears in ticker_constraints regardless of lifecycle stage
   // so that inducted, watchlist, and phasing-out tickers are all tracked in HIST.
   // Mirrors Python's get_policy_required_tickers() in mws_titanium_runner.py.
+  // Fixed-price synthetic assets (e.g. CASH, TREASURY_NOTE) — never real market tickers
+  const fixedPrices = policy?.governance?.fixed_asset_prices || {};
+  const syntheticTickers = new Set(Object.keys(fixedPrices).map(t => String(t).trim().toUpperCase()));
+
   const tc = policy?.ticker_constraints || {};
   Object.keys(tc).forEach(t => {
     const T = String(t).trim().toUpperCase();
-    // Skip synthetic/non-market entries (e.g. CASH, TREASURY_NOTE) — not GOOGLEFINANCE symbols
+    // Skip fixed-price synthetic assets and non-GOOGLEFINANCE symbols
+    if (syntheticTickers.has(T)) { return; }
     try { sanitizeTicker_(T); } catch (_) { return; }
     set.add(T);
     const lc = tc[t]?.lifecycle;
