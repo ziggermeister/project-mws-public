@@ -225,15 +225,22 @@ def get_held_tickers(hold: pd.DataFrame) -> Set[str]:
     return set(hold.loc[positive_mask, ticker_col].astype(str).str.strip().str.upper())
 
 def get_policy_required_tickers(policy: dict) -> Set[str]:
-    """Benchmarks + all tickers in ticker_constraints. Used for audit/warn."""
+    """Benchmarks + all tickers in ticker_constraints. Used for audit/warn.
+    Excludes fixed-price synthetic assets (CASH, TREASURY_NOTE, etc.) — they
+    are not real market tickers and should never be fetched from price feeds."""
     req: Set[str] = set()
     bl = (policy.get("governance", {}).get("reporting_baselines", {}) or {})
     for t in (bl.get("active_benchmarks") or []):
         req.add(str(t).strip().upper())
     if bl.get("corr_anchor_ticker"):
         req.add(str(bl["corr_anchor_ticker"]).strip().upper())
+    # Fixed-price synthetic assets — authoritative exclusion list
+    fixed_prices = (policy.get("governance", {}).get("fixed_asset_prices", {}) or {})
+    synthetic = {str(t).strip().upper() for t in fixed_prices}
     for t in (policy.get("ticker_constraints", {}) or {}):
-        req.add(str(t).strip().upper())
+        T = str(t).strip().upper()
+        if T not in synthetic:
+            req.add(T)
     return {x for x in req if x}
 
 def get_ticker_proxy(policy: dict, ticker: str, default: Optional[str] = None) -> str:
