@@ -265,6 +265,12 @@ function updateHistDatabase_(today, requiredTickers, policyRequiredSet, tz, star
     const tentativeStart = addDaysYMD_(chunkEnd, -(Number(C.CHUNK_DAYS) - 1), tz);
     const chunkStart = (tentativeStart < requiredStart) ? requiredStart : tentativeStart;
 
+    // Skip synthetic/fixed-price tickers that aren't valid GOOGLEFINANCE symbols (e.g. TREASURY_NOTE, CASH)
+    try { sanitizeTicker_(t); } catch (e) {
+      console.log(`[BACKFILL] Skipping synthetic ticker ${t} (not a GOOGLEFINANCE symbol)`);
+      continue;
+    }
+
     console.log(`[BACKFILL] ${t} request ${chunkStart}..${chunkEnd} (minHave=${minHave || "NONE"} requiredStart=${requiredStart})`);
 
     const ingested = ingestBackfillChunk_(sh, t, chunkStart, chunkEnd, requiredStart, today, tz, map, col);
@@ -1132,7 +1138,10 @@ function getBatchPricesScratch_(tickers) {
 
   tickers.forEach((t, i) => {
     sh.getRange(i + 1, 1).setValue(t);
-    sh.getRange(i + 1, 2).setFormula(`=IFERROR(GOOGLEFINANCE("${sanitizeTicker_(t)}"), 0)`);
+    let formula;
+    try { formula = `=IFERROR(GOOGLEFINANCE("${sanitizeTicker_(t)}"), 0)`; }
+    catch (_) { formula = `=0`; }  // synthetic ticker (e.g. TREASURY_NOTE) — no live price
+    sh.getRange(i + 1, 2).setFormula(formula);
   });
 
   SpreadsheetApp.flush();
