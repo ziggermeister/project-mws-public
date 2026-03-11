@@ -35,6 +35,31 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Probe available models
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python - << 'PROBE'
+          import anthropic, os
+          client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+          try:
+              models = client.models.list()
+              print("Available models:")
+              for m in models.data:
+                  print(f"  {m.id}")
+          except Exception as e:
+              print(f"Models list endpoint error: {e}")
+              for mid in ["claude-haiku-4-5-20251001","claude-sonnet-4-5-20251001","claude-3-5-haiku-20241022","claude-3-5-sonnet-20241022"]:
+                  try:
+                      client.messages.create(model=mid, max_tokens=5, messages=[{"role":"user","content":"hi"}])
+                      print(f"  WORKS: {mid}")
+                  except anthropic.NotFoundError:
+                      print(f"  NOT FOUND: {mid}")
+                  except Exception as ex:
+                      print(f"  ERROR {mid}: {ex}")
+          PROBE
+        continue-on-error: true
+
       - name: Run MWS portfolio analysis
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
