@@ -33,6 +33,8 @@ from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+import markdown as md
+
 import anthropic
 import pandas as pd
 
@@ -284,6 +286,29 @@ def write_market_context(response_text: str) -> None:
 
 # ── Step 5: Send email ────────────────────────────────────────────────────────
 
+_EMAIL_CSS = """
+<style>
+  body  { font-family: Arial, sans-serif; font-size: 13px; color: #222; max-width: 960px; margin: 0 auto; }
+  h1    { font-size: 20px; color: #111; border-bottom: 2px solid #ddd; padding-bottom: 4px; }
+  h2    { font-size: 16px; color: #222; margin-top: 20px; border-bottom: 1px solid #eee; }
+  h3    { font-size: 14px; color: #333; margin-top: 14px; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0 16px; }
+  th    { background: #f0f4f8; border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
+  td    { border: 1px solid #ddd; padding: 5px 10px; }
+  tr:nth-child(even) td { background: #fafafa; }
+  hr    { border: none; border-top: 1px solid #ddd; margin: 16px 0; }
+  code  { background: #f5f5f5; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+  strong { color: #111; }
+  blockquote { border-left: 3px solid #ccc; margin: 8px 0; padding: 4px 12px; color: #555; }
+</style>
+"""
+
+def _to_html(text: str) -> str:
+    """Convert markdown to styled HTML suitable for email."""
+    body_html = md.markdown(text, extensions=["tables", "nl2br", "fenced_code"])
+    return f"<html><head>{_EMAIL_CSS}</head><body>{body_html}</body></html>"
+
+
 def send_email(response_text: str) -> None:
     password  = os.environ.get("GMAIL_APP_PASSWORD")
     from_addr = os.environ.get("GMAIL_FROM", "bhatnagar.vivek@gmail.com")
@@ -297,11 +322,17 @@ def send_email(response_text: str) -> None:
 
     subject = f"MWS Run — {TODAY} — {TRIGGER_REASON}"
 
+    # Outer container: mixed (allows body + attachment)
     msg = MIMEMultipart("mixed")
     msg["Subject"] = subject
     msg["From"]    = from_addr
     msg["To"]      = to_addr
-    msg.attach(MIMEText(recommendation, "plain"))
+
+    # Inner alternative: plain text + HTML (email client picks best)
+    body = MIMEMultipart("alternative")
+    body.attach(MIMEText(recommendation, "plain", "utf-8"))
+    body.attach(MIMEText(_to_html(recommendation), "html", "utf-8"))
+    msg.attach(body)
 
     # Attach equity curve chart if available
     chart_path = mws_analytics.CHART_FILENAME

@@ -3,3 +3,4 @@ pandas>=2.0
 matplotlib>=3.7
 requests>=2.31
 anthropic>=0.45
+markdown>=3.5
