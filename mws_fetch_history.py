@@ -18,9 +18,9 @@ After running, commit the updated CSV:
 """
 
 import sys
+import time
 from pathlib import Path
 import pandas as pd
-import numpy as np
 
 try:
     import yfinance as yf
@@ -28,7 +28,6 @@ except ImportError:
     sys.exit("yfinance not installed. Run: pip install yfinance")
 
 # ── Tickers ──────────────────────────────────────────────────────────────────
-# Portfolio tickers
 PORTFOLIO = [
     "VTI", "VXUS",
     "SOXQ", "CHAT", "BOTZ", "DTCR", "GRID",
@@ -40,7 +39,6 @@ PORTFOLIO = [
     "DBMF", "KMLM",
 ]
 
-# Reference / benchmark tickers kept in the history file
 REFERENCE = [
     "SPY", "QQQ", "GLD", "SLV", "AGG",
     "IBB", "SOXX", "PICK", "SRVR",
@@ -49,58 +47,79 @@ REFERENCE = [
 
 ALL_TICKERS = PORTFOLIO + REFERENCE
 
+# Tickers known to have limited history — don't warn on these
+SHORT_HISTORY_EXPECTED = {
+    "CHAT", "DTCR", "GRID", "SOXQ", "DBMF", "KMLM", "IBIT", "IAUM"
+}
+
 START_DATE = "2019-01-01"
 OUT_FILE   = Path(__file__).parent / "mws_ticker_history.csv"
 
-# ── Fetch ─────────────────────────────────────────────────────────────────────
+# ── Fetch per ticker (avoids batch-download fc.yahoo.com auth issues) ────────
 print(f"Fetching {len(ALL_TICKERS)} tickers from {START_DATE} to today ...")
-raw = yf.download(
-    ALL_TICKERS,
-    start=START_DATE,
-    auto_adjust=True,
-    progress=True,
-)
+print("(Using per-ticker fetch to avoid batch-download auth issues)\n")
 
-if raw.empty:
-    sys.exit("ERROR: yfinance returned no data. Check network connection.")
+frames = []
+failed = []
 
-# Flatten: (Date, Ticker, AdjClose)
-close = raw["Close"]
-long = (
-    close
-    .stack(level=0, future_stack=True)
-    .reset_index()
-    .rename(columns={"level_1": "Ticker", 0: "AdjClose", "Price": "AdjClose"})
-)
+for i, ticker in enumerate(ALL_TICKERS, 1):
+    display = "INDEXCBOE:VIX" if ticker == "^VIX" else ticker
+    try:
+        hist = yf.Ticker(ticker).history(start=START_DATE, auto_adjust=True)
+        if hist.empty:
+            print(f"  [{i:2d}/{len(ALL_TICKERS)}] {ticker:<12} — NO DATA")
+            failed.append(ticker)
+            continue
 
-# Normalise ^VIX ticker name to match existing CSV convention
-long["Ticker"] = long["Ticker"].str.replace(r"^\^VIX$", "INDEXCBOE:VIX", regex=True)
+        # Normalise to flat long-form
+        hist = hist[["Close"]].copy()
+        hist.index = pd.to_datetime(hist.index).tz_localize(None)  # strip tz
+        hist = hist.rename(columns={"Close": "AdjClose"})
+        hist["Ticker"] = display
+        hist = hist.reset_index().rename(columns={"index": "Date", "Datetime": "Date"})
+        hist = hist[["Date", "Ticker", "AdjClose"]].dropna()
 
-long = long.dropna(subset=["AdjClose"])
+        frames.append(hist)
+        print(f"  [{i:2d}/{len(ALL_TICKERS)}] {ticker:<12} — {len(hist):>5} rows  "
+              f"({hist['Date'].min().date()} → {hist['Date'].max().date()})")
+
+    except Exception as e:
+        print(f"  [{i:2d}/{len(ALL_TICKERS)}] {ticker:<12} — ERROR: {e}")
+        failed.append(ticker)
+
+    # Small delay to avoid rate-limiting
+    time.sleep(0.3)
+
+if not frames:
+    sys.exit("\nERROR: No data fetched. Check network connection.")
+
+# ── Combine and write ─────────────────────────────────────────────────────────
+long = pd.concat(frames, ignore_index=True)
 long["AdjClose"] = long["AdjClose"].round(6)
 long = long.sort_values(["Ticker", "Date"])
 
-# ── Write ─────────────────────────────────────────────────────────────────────
 long.to_csv(OUT_FILE, index=False)
 
 # ── Summary ───────────────────────────────────────────────────────────────────
-print(f"\n✅  Saved {len(long):,} rows → {OUT_FILE}")
+print(f"\n{'='*60}")
+print(f"✅  Saved {len(long):,} rows → {OUT_FILE}")
 print(f"    Date range : {long['Date'].min().date()} → {long['Date'].max().date()}")
 print(f"    Tickers    : {long['Ticker'].nunique()}")
-print()
-print("Rows per ticker:")
+
+if failed:
+    print(f"\n⚠️  Failed tickers ({len(failed)}): {failed}")
+
 counts = long.groupby("Ticker")["Date"].count().sort_values(ascending=False)
+print("\nRows per ticker:")
 print(counts.to_string())
 
-# ── Quick sanity: flag any ticker with < 1000 rows (less than ~4 trading years)
-short = counts[counts < 1000]
+short = counts[(counts < 1000) & (~counts.index.isin(SHORT_HISTORY_EXPECTED))]
 if not short.empty:
-    print(f"\n⚠️  Short history (<1000 rows) — may have limited inception dates:")
+    print(f"\n⚠️  Unexpectedly short history (<1000 rows):")
     print(short.to_string())
-    print("   (CHAT, DTCR, IBIT, DBMF, KMLM, SOXQ, GRID are expected to be short)")
 
 print("\nNext step:")
 print("  git add mws_ticker_history.csv")
 print("  git commit -m 'data: extend ticker history to 2019-01-01 for F1 vol clamp validation'")
 print("  git push origin main")
-print("  Then re-open Claude and run the F1 vol clamp stress test.")
+print("  Then re-open Claude and say: ready to run F1 stress test")
