@@ -1,0 +1,71 @@
+name: MWS Portfolio Run
+
+# ── Triggers ──────────────────────────────────────────────────────────────────
+#
+# 1. Scheduled: every Monday at 14:00 UTC (9am ET / 6am PT)
+#    The runner checks the policy calendar trigger (first Monday of month)
+#    and reports whether a full rebalance is warranted. Running every Monday
+#    is intentional — even non-rebalance weeks produce a monitoring digest.
+#
+# 2. On-demand: trigger manually from GitHub → Actions → "Run workflow"
+#    with an optional reason string. No laptop required.
+#
+on:
+  schedule:
+    - cron: '0 14 * * 1'   # Every Monday 14:00 UTC
+  workflow_dispatch:
+    inputs:
+      trigger_reason:
+        description: 'Why is this run being triggered? (e.g. breach_alert, ad_hoc_check)'
+        required: false
+        default: 'manual'
+
+# ── Permissions ───────────────────────────────────────────────────────────────
+permissions:
+  contents: write   # needed to commit mws_market_context.md + mws_run_results.csv back
+
+# ── Job ───────────────────────────────────────────────────────────────────────
+jobs:
+  mws-run:
+    name: MWS Full Run
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+
+      # 1. Checkout repo
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # 2. Python setup
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # 3. Install dependencies
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # 4. Run MWS — calls Claude API, searches news, produces recommendation
+      - name: Run MWS
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GAS_WEBHOOK_URL:   ${{ secrets.GAS_WEBHOOK_URL }}
+          TRIGGER_REASON:    ${{ github.event.inputs.trigger_reason || 'scheduled_monday' }}
+        run: python3 mws_github_runner.py
+
+      # 5. Commit outputs back to repo
+      #    [skip ci] prevents this commit from re-triggering the workflow
+      - name: Commit run outputs
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "auto: MWS run ${{ github.run_number }} — ${{ github.event.inputs.trigger_reason || 'scheduled_monday' }} [skip ci]"
+          file_pattern: |
+            mws_market_context.md
+            mws_run_results.csv
+          commit_user_name:  mws-bot
+          commit_user_email: mws-bot@users.noreply.github.com

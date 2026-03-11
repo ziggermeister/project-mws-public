@@ -1804,6 +1804,35 @@
           "Approve any proposed policy or code changes",
           "Commit and push if changes were made"
         ]
+      },
+      "automation": {
+        "cloud_runner": {
+          "platform": "GitHub Actions",
+          "workflow_file": ".github/workflows/mws_run.yml",
+          "orchestrator_script": "mws_github_runner.py",
+          "laptop_required": false,
+          "schedule": "Every Monday 14:00 UTC (9am ET). Runner determines if full rebalance is warranted per policy calendar trigger.",
+          "on_demand": "GitHub → Actions → MWS Portfolio Run → Run workflow (no laptop required)",
+          "secrets_required": {
+            "ANTHROPIC_API_KEY": "Anthropic API key from console.anthropic.com — NEW, separate from Claude Code subscription",
+            "GAS_WEBHOOK_URL": "GAS doPost URL for email dispatch — set once in GitHub repo secrets"
+          },
+          "auto_provided": {
+            "GITHUB_TOKEN": "GitHub injects automatically — enables commit-back of mws_market_context.md and mws_run_results.csv"
+          }
+        },
+        "local_runner": {
+          "script": "commit_and_run.sh",
+          "laptop_required": true,
+          "use_when": "Want local charts from mws_analytics.py, or committing manual holdings/policy changes before triggering cloud run",
+          "clasp_flag": "Pass --clasp only when GAS code was edited in browser and needs syncing to git"
+        },
+        "data_pipeline": {
+          "always_on": "GAS updates mws_ticker_history.csv and mws_recent_performance.csv in Drive daily",
+          "drive_sync": "Google Drive syncs to local folder — Python and git both read from there",
+          "holdings_freshness": "mws_holdings.csv reflects last Chase upload committed to git. Stale if positions changed since last commit. Runner flags holdings date prominently in recommendation.",
+          "holdings_update_flow": "Chase export → update mws_holdings.csv → commit_and_run.sh OR manual commit → push → trigger GitHub Actions run"
+        }
       }
     }
   }

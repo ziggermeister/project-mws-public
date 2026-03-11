@@ -1314,3 +1314,39 @@ function fmtMDY_(ymd) {
   const Y = ymd.substring(0, 4), M = ymd.substring(5, 7), D = ymd.substring(8, 10);
   return `${M}/${D}/${Y}`;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WEBHOOK — receives MWS recommendation from GitHub Actions and emails it
+//
+// Deploy as Web App: Execute as Me, Access: Anyone (or Anyone with Google account)
+// Store the /exec URL as GAS_WEBHOOK_URL in GitHub repo secrets.
+//
+// POST body (JSON): { subject: string, body: string, source: string }
+// ═══════════════════════════════════════════════════════════════════════════
+function doPost(e) {
+  try {
+    const payload = JSON.parse(e.postData.contents);
+    const subject = payload.subject || "MWS Automated Run";
+    const body    = payload.body    || "(no body)";
+    const source  = payload.source  || "unknown";
+
+    const C = getC_();
+    const recipient = C.EMAIL_RECIPIENT || "bhatnagar.vivek@gmail.com";
+
+    // Plain-text email — recommendation is already formatted text from Claude
+    MailApp.sendEmail({
+      to:      recipient,
+      subject: subject,
+      body:    `Source: ${source}\n\n${body}`
+    });
+
+    return ContentService
+      .createTextOutput(JSON.stringify({ status: "ok", recipient }))
+      .setMimeType(ContentService.MimeType.JSON);
+
+  } catch (err) {
+    return ContentService
+      .createTextOutput(JSON.stringify({ status: "error", message: String(err) }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
