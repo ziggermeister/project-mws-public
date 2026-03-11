@@ -1427,7 +1427,7 @@ def check_drawdown_state(policy: dict, perf_log: str = PERF_LOG_CSV) -> dict:
 # ==============================================================================
 # 7) Main
 # ==============================================================================
-# 7) Execution gate (v2.9.3) — per-ticker z-score timing filter
+# 7) Execution gate (v2.9.4) — per-ticker z-score timing filter with vol clamp
 # ==============================================================================
 
 def compute_ewma_vol_2d(prices: pd.Series, span: int = 126) -> Optional[float]:
@@ -1446,6 +1446,25 @@ def compute_ewma_vol_2d(prices: pd.Series, span: int = 126) -> Optional[float]:
     return vol_ann / float(np.sqrt(126))
 
 
+def compute_rv1y_2d(prices: pd.Series, window: int = 252) -> Optional[float]:
+    """
+    Compute 1-year realised vol (252-day rolling std of daily log returns, annualised)
+    and convert to 2-day vol units to match compute_ewma_vol_2d output.
+      rv1y_2d = (rolling_std(log_rets, 252) * sqrt(252)) / sqrt(126)
+    Returns None if fewer than window // 2 observations are available.
+    Used by vol clamp (v2.9.4): effective_vol = clamp(ewma_vol, 0.75×rv1y, 1.50×rv1y).
+    """
+    if len(prices) < window // 2:
+        return None
+    log_rets = np.log(prices / prices.shift(1)).dropna()
+    if len(log_rets) < window // 2:
+        return None
+    rv_ann = log_rets.rolling(window, min_periods=window // 2).std().iloc[-1] * np.sqrt(252)
+    if pd.isna(rv_ann) or rv_ann <= 0:
+        return None
+    return float(rv_ann) / float(np.sqrt(126))
+
+
 def check_execution_gate(
     policy: dict,
     ticker: str,
@@ -1454,7 +1473,7 @@ def check_execution_gate(
     stress_active: bool = False,
 ) -> dict:
     """
-    Evaluate the v2.9.3 execution gate for a single ticker + trade direction.
+    Evaluate the v2.9.4 execution gate for a single ticker + trade direction.
 
     Policy logic (mws_policy.json § execution_gates.short_term_confirmation):
       - BUY  defer:    z >= +buy_sigma   → defer up to max_defer_calendar_days
@@ -1462,18 +1481,27 @@ def check_execution_gate(
       - SELL spike-trim: z >= +2.0σ AND direction=SELL → execute immediately
       - Stress regime: sell-defer window collapses to 3 calendar days
 
+    v2.9.4 change: vol clamp applied before z-score.
+      effective_vol = clamp(ewma_vol, 0.75×RV1y, 1.50×RV1y)
+      z = ret_2d / effective_vol
+    Clamp is enabled by vol_clamp_enabled in short_term_confirmation.
+    Falls back to raw EWMA vol if RV1y cannot be computed (insufficient history).
+
     v2.9.3 change: per-ticker gate_sigma_buy / gate_sigma_sell overrides in
     execution_gates.per_ticker_thresholds take precedence over global
     buy_defer_sigma / sell_defer_sigma for fat_tail_fixed tickers.
 
     Returns dict with keys:
-      action         : "proceed" | "defer" | "spike_trim"
-      reason         : human-readable explanation
-      z_score        : float | None
-      threshold      : float | None  (unsigned magnitude)
-      sigma_used     : float
-      gate_source    : "per_ticker_override" | "global_default"
-      max_defer_days : int
+      action           : "proceed" | "defer" | "spike_trim"
+      reason           : human-readable explanation
+      z_score          : float | None
+      threshold        : float | None  (unsigned magnitude)
+      sigma_used       : float
+      gate_source      : "per_ticker_override" | "global_default"
+      max_defer_days   : int
+      vol_clamp_type   : "floor" | "ceiling" | "none" | "n/a"
+      raw_vol_2d       : float | None
+      effective_vol_2d : float | None
     """
     gate_cfg = (
         policy.get("execution_gates", {})
@@ -1482,7 +1510,8 @@ def check_execution_gate(
     if not gate_cfg.get("enabled", True):
         return {"action": "proceed", "reason": "gate_disabled",
                 "z_score": None, "threshold": None,
-                "sigma_used": 0.0, "gate_source": "n/a", "max_defer_days": 0}
+                "sigma_used": 0.0, "gate_source": "n/a", "max_defer_days": 0,
+                "vol_clamp_type": "n/a", "raw_vol_2d": None, "effective_vol_2d": None}
 
     direction = trade_direction.upper()
 
@@ -1521,7 +1550,8 @@ def check_execution_gate(
                 "reason": f"no_price_history_for_{ticker}",
                 "z_score": None, "threshold": None,
                 "sigma_used": sigma, "gate_source": gate_source,
-                "max_defer_days": max_defer_days}
+                "max_defer_days": max_defer_days,
+                "vol_clamp_type": "n/a", "raw_vol_2d": None, "effective_vol_2d": None}
 
     prices = t_data.set_index("Date")["AdjClose"]
     vol_2d = compute_ewma_vol_2d(prices, span=span)
@@ -1530,7 +1560,27 @@ def check_execution_gate(
                 "reason": "insufficient_vol_history",
                 "z_score": None, "threshold": None,
                 "sigma_used": sigma, "gate_source": gate_source,
-                "max_defer_days": max_defer_days}
+                "max_defer_days": max_defer_days,
+                "vol_clamp_type": "n/a", "raw_vol_2d": None, "effective_vol_2d": None}
+
+    # ── Vol clamp (v2.9.4): effective_vol = clamp(ewma_vol, 0.75×RV1y, 1.50×RV1y) ──
+    clamp_enabled   = gate_cfg.get("vol_clamp_enabled", False)
+    effective_vol_2d = vol_2d
+    vol_clamp_type   = "none"
+    if clamp_enabled:
+        rv1y_window = int(gate_cfg.get("vol_clamp_rv1y_window_days", 252))
+        floor_mult  = float(gate_cfg.get("vol_clamp_floor_multiplier",  0.75))
+        ceil_mult   = float(gate_cfg.get("vol_clamp_ceiling_multiplier", 1.50))
+        rv1y_2d = compute_rv1y_2d(prices, window=rv1y_window)
+        if rv1y_2d is not None and rv1y_2d > 0:
+            floor_2d = rv1y_2d * floor_mult
+            ceil_2d  = rv1y_2d * ceil_mult
+            if vol_2d < floor_2d:
+                effective_vol_2d = floor_2d
+                vol_clamp_type   = "floor"
+            elif vol_2d > ceil_2d:
+                effective_vol_2d = ceil_2d
+                vol_clamp_type   = "ceiling"
 
     # ── 2-day return (latest close vs close 2 trading days prior) ────────────
     if len(prices) < 3:
@@ -1538,22 +1588,26 @@ def check_execution_gate(
                 "reason": "insufficient_ret2d_history",
                 "z_score": None, "threshold": None,
                 "sigma_used": sigma, "gate_source": gate_source,
-                "max_defer_days": max_defer_days}
+                "max_defer_days": max_defer_days,
+                "vol_clamp_type": vol_clamp_type,
+                "raw_vol_2d": vol_2d, "effective_vol_2d": effective_vol_2d}
 
     ret_2d = (prices.iloc[-1] / prices.iloc[-3]) - 1.0
 
     # ── Z-score and gate decision ─────────────────────────────────────────────
-    z         = ret_2d / vol_2d
-    threshold = sigma * vol_2d   # unsigned magnitude for logging
+    z         = ret_2d / effective_vol_2d
+    threshold = sigma * effective_vol_2d   # unsigned magnitude for logging
 
     if direction == "SELL" and z >= global_buy_sigma:
         # Spike-trim: large upward move on a sell → execute immediately into strength
         return {"action": "spike_trim",
                 "reason": (f"spike_trim: z={z:.2f} >= +{global_buy_sigma}σ on SELL "
                            f"(execute into strength)"),
-                "z_score": z, "threshold": global_buy_sigma * vol_2d,
+                "z_score": z, "threshold": global_buy_sigma * effective_vol_2d,
                 "sigma_used": global_buy_sigma, "gate_source": "global_default",
-                "max_defer_days": 0}
+                "max_defer_days": 0,
+                "vol_clamp_type": vol_clamp_type,
+                "raw_vol_2d": vol_2d, "effective_vol_2d": effective_vol_2d}
 
     if direction == "BUY" and z >= sigma:
         return {"action": "defer",
@@ -1561,7 +1615,9 @@ def check_execution_gate(
                            f"[{gate_source}] — don't chase spike"),
                 "z_score": z, "threshold": threshold,
                 "sigma_used": sigma, "gate_source": gate_source,
-                "max_defer_days": max_defer_days}
+                "max_defer_days": max_defer_days,
+                "vol_clamp_type": vol_clamp_type,
+                "raw_vol_2d": vol_2d, "effective_vol_2d": effective_vol_2d}
 
     if direction == "SELL" and z <= -sigma:
         return {"action": "defer",
@@ -1569,14 +1625,18 @@ def check_execution_gate(
                            f"[{gate_source}] — don't sell into capitulation"),
                 "z_score": z, "threshold": -threshold,
                 "sigma_used": sigma, "gate_source": gate_source,
-                "max_defer_days": max_defer_days}
+                "max_defer_days": max_defer_days,
+                "vol_clamp_type": vol_clamp_type,
+                "raw_vol_2d": vol_2d, "effective_vol_2d": effective_vol_2d}
 
     return {"action": "proceed",
             "reason": (f"z={z:.2f}, ±{sigma}σ threshold [{gate_source}], "
                        f"within normal range"),
             "z_score": z, "threshold": threshold,
             "sigma_used": sigma, "gate_source": gate_source,
-            "max_defer_days": max_defer_days}
+            "max_defer_days": max_defer_days,
+            "vol_clamp_type": vol_clamp_type,
+            "raw_vol_2d": vol_2d, "effective_vol_2d": effective_vol_2d}
 
 
 # ==============================================================================

@@ -1,10 +1,10 @@
 {
   "meta": {
-    "policy_name": "MWS v2.9.3",
-    "policy_version": "v2.9.3",
+    "policy_name": "MWS v2.9.4",
+    "policy_version": "v2.9.4",
     "policy_family": "Titanium MWS",
     "last_updated": "2026-03-11",
-    "notes": "v2.9.3: Fat-tail gate fix for SIVR and IBIT. Per-ticker gate_sigma overrides added to per_ticker_thresholds — replaces EWMA 2.0/2.5σ global defaults for these two tickers only. SIVR: gate_sigma_buy=1.25, gate_sigma_sell=1.25. IBIT: gate_sigma_buy=1.5, gate_sigma_sell=1.5. Reviewed by ChatGPT + Gemini (1 round). Unanimous: reject 1.0σ sell for SIVR (too sensitive, ~16% fire rate), adopt 1.25σ. GPT: defer vol clamp (Fix 1b) and IAUM to separate review. Gemini: include both now. Reconciliation: Fix 1 only in v2.9.3; vol clamp and IAUM logged as future_review_items. No changes to signal engine, allocation targets, sleeve structure, turnover rules, or any other gate parameters. v2.9.2: Round 4 consensus — spike_trim_cap_interaction investigation closed. Path A (monitor-only) adopted by both reviewers. Automatic 90-day rolling event counter; escalation at >5% of spike_trim events activates contingent spike_trim_reentry_buffer (0.75% weight gap, momentum buys only, does not override compliance enforcement). No hard cooldown rule added. Execution gate declared production-ready by both reviewers (ChatGPT + Gemini, 4 rounds). No changes to signal engine, allocation targets, sleeve structure, or ticker constraints."
+    "notes": "v2.9.4: Vol clamp (Fix 1b) implemented in execution gate. effective_vol = clamp(ewma_vol, 0.75×RV1y, 1.50×RV1y). RV1y = 252-day rolling std of daily log returns, annualised. Bounds validated against 2019–2026 history including 2020 COVID and 2022 rate shock onsets. Bank of Canada calm-window concern not empirically confirmed. All existing gate parameters (sigma thresholds, defer windows, per-ticker overrides) unchanged. No changes to signal engine, allocation targets, sleeve structure, or turnover rules. v2.9.3: Fat-tail gate fix for SIVR and IBIT. Per-ticker gate_sigma overrides added to per_ticker_thresholds — replaces EWMA 2.0/2.5σ global defaults for these two tickers only. SIVR: gate_sigma_buy=1.25, gate_sigma_sell=1.25. IBIT: gate_sigma_buy=1.5, gate_sigma_sell=1.5. Reviewed by ChatGPT + Gemini (1 round). Unanimous: reject 1.0σ sell for SIVR (too sensitive, ~16% fire rate), adopt 1.25σ. GPT: defer vol clamp (Fix 1b) and IAUM to separate review. Gemini: include both now. Reconciliation: Fix 1 only in v2.9.3; vol clamp and IAUM logged as future_review_items. No changes to signal engine, allocation targets, sleeve structure, turnover rules, or any other gate parameters. v2.9.2: Round 4 consensus — spike_trim_cap_interaction investigation closed. Path A (monitor-only) adopted by both reviewers. Automatic 90-day rolling event counter; escalation at >5% of spike_trim events activates contingent spike_trim_reentry_buffer (0.75% weight gap, momentum buys only, does not override compliance enforcement). No hard cooldown rule added. Execution gate declared production-ready by both reviewers (ChatGPT + Gemini, 4 rounds). No changes to signal engine, allocation targets, sleeve structure, or ticker constraints."
   },
   "governance": {
     "reporting_baselines": {
@@ -876,6 +876,11 @@
       "lookback_days": 2,
       "vol_source": "ewma_annual_vol",
       "ewma_span_days": 126,
+      "vol_clamp_enabled": true,
+      "vol_clamp_floor_multiplier": 0.75,
+      "vol_clamp_ceiling_multiplier": 1.5,
+      "vol_clamp_rv1y_window_days": 252,
+      "vol_clamp_note": "v2.9.4: effective_vol = clamp(ewma_vol, 0.75×RV1y, 1.50×RV1y). Validated against 2019–2026 history (COVID 2020, rate shock 2022). Prevents gate over-sensitivity in compressed-vol regimes (floor) and gate lock-up during velocity shocks (ceiling). See future_review_items.ewma_regime_shift_vol_clamp for full F1 validation.",
       "vol_conversion": "(annual_vol / sqrt(252)) * sqrt(2)",
       "vol_conversion_simplified": "annual_vol / sqrt(126)",
       "vol_conversion_derivation": "daily_vol = annual_vol / sqrt(252); 2d_vol = daily_vol * sqrt(2); simplified: annual_vol / sqrt(126). Both forms are equivalent.",
@@ -1199,7 +1204,7 @@
   "future_review_items": {
     "_note": "Items logged for future policy review cycles. Not active constraints. Not part of execution gate.",
     "ewma_regime_shift_vol_clamp": {
-      "status": "validated_ready_for_implementation",
+      "status": "implemented_v2.9.4",
       "source": "ChatGPT fat-tail review (2026-03-11), confirmed by Gemini. Full F1 validation completed 2026-03-11 against extended history (2019–2026).",
       "description": "EWMA volatility lags true volatility during regime transitions, causing z-score gate to oscillate between blindness (vol spike: EWMA slow to rise, threshold widens, gate stops firing) and over-firing (post-crisis: EWMA slow to fall, routine moves score as statistically extreme). Proposed fix (Fix 1b): clamp effective_vol = clamp(ewma_vol, 0.75 × realized_vol_1y, 1.50 × realized_vol_1y). Affects all tickers but disproportionate impact on SIVR and IBIT due to faster vol regime cycling.",
       "scope": "execution_gate — system-wide (all tickers)",
@@ -1402,7 +1407,8 @@
         },
         "key_insight": "The ceiling binding during COVID occurs mid-stress (April 2020), NOT at onset. By this point the clamp is functioning correctly: it caps EWMA to prevent extreme z-scores that would lock up the gate entirely during maximum drawdown. The 10–11% vol suppression on VTI and COPX at peak stress keeps z-scores within a range where sell-defer continues to function rather than blocking all trades. The 2022 rate shock shows no clamp interaction at all, confirming the clamp does not distort the gate during normal slow-moving bear markets.",
         "verdict": "PASS. Both 0.75× floor and 1.50× ceiling bounds are well-calibrated across 7 years of history including two major stress regimes. Bank of Canada calm-window concern is not empirically confirmed. Implement Fix 1b in v2.9.4."
-      }
+      },
+      "implemented_date": "2026-03-11"
     },
     "iaum_fat_tail_monitoring": {
       "status": "logged_for_future_review",
