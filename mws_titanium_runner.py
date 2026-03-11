@@ -1427,6 +1427,159 @@ def check_drawdown_state(policy: dict, perf_log: str = PERF_LOG_CSV) -> dict:
 # ==============================================================================
 # 7) Main
 # ==============================================================================
+# 7) Execution gate (v2.9.3) — per-ticker z-score timing filter
+# ==============================================================================
+
+def compute_ewma_vol_2d(prices: pd.Series, span: int = 126) -> Optional[float]:
+    """
+    Compute EWMA-based annualised vol from a price series and convert to 2-day vol.
+      vol_2d = vol_ann / sqrt(126)   [equivalent to daily_vol * sqrt(2)]
+    Returns None if there are fewer than span // 2 observations available.
+    """
+    if len(prices) < span // 2:
+        return None
+    log_rets = np.log(prices / prices.shift(1)).dropna()
+    ewma_var = log_rets.ewm(span=span, adjust=False).var()
+    if ewma_var.empty or pd.isna(ewma_var.iloc[-1]):
+        return None
+    vol_ann = float(np.sqrt(ewma_var.iloc[-1] * 252))
+    return vol_ann / float(np.sqrt(126))
+
+
+def check_execution_gate(
+    policy: dict,
+    ticker: str,
+    trade_direction: str,   # "BUY" or "SELL"
+    hist: pd.DataFrame,
+    stress_active: bool = False,
+) -> dict:
+    """
+    Evaluate the v2.9.3 execution gate for a single ticker + trade direction.
+
+    Policy logic (mws_policy.json § execution_gates.short_term_confirmation):
+      - BUY  defer:    z >= +buy_sigma   → defer up to max_defer_calendar_days
+      - SELL defer:    z <= -sell_sigma  → defer up to max_defer_calendar_days
+      - SELL spike-trim: z >= +2.0σ AND direction=SELL → execute immediately
+      - Stress regime: sell-defer window collapses to 3 calendar days
+
+    v2.9.3 change: per-ticker gate_sigma_buy / gate_sigma_sell overrides in
+    execution_gates.per_ticker_thresholds take precedence over global
+    buy_defer_sigma / sell_defer_sigma for fat_tail_fixed tickers.
+
+    Returns dict with keys:
+      action         : "proceed" | "defer" | "spike_trim"
+      reason         : human-readable explanation
+      z_score        : float | None
+      threshold      : float | None  (unsigned magnitude)
+      sigma_used     : float
+      gate_source    : "per_ticker_override" | "global_default"
+      max_defer_days : int
+    """
+    gate_cfg = (
+        policy.get("execution_gates", {})
+              .get("short_term_confirmation", {})
+    )
+    if not gate_cfg.get("enabled", True):
+        return {"action": "proceed", "reason": "gate_disabled",
+                "z_score": None, "threshold": None,
+                "sigma_used": 0.0, "gate_source": "n/a", "max_defer_days": 0}
+
+    direction = trade_direction.upper()
+
+    # ── Global sigma defaults ─────────────────────────────────────────────────
+    global_buy_sigma  = float(gate_cfg.get("buy_defer_sigma",  2.0))
+    global_sell_sigma = float(gate_cfg.get("sell_defer_sigma", 2.5))
+    max_defer_days    = int(gate_cfg.get("max_defer_calendar_days", 10))
+
+    # Stress: sell-defer window collapses (buy-defer unchanged)
+    if stress_active and direction == "SELL":
+        stress_ovr = gate_cfg.get("stress_regime_overrides", {})
+        max_defer_days = int(stress_ovr.get("sell_defer_max_calendar_days", 3))
+
+    # ── Per-ticker sigma overrides (v2.9.3) ───────────────────────────────────
+    per_ticker = (
+        policy.get("execution_gates", {})
+              .get("per_ticker_thresholds", {})
+              .get(ticker, {})
+    )
+    if direction == "BUY":
+        sigma      = float(per_ticker["gate_sigma_buy"]) \
+                     if "gate_sigma_buy"  in per_ticker else global_buy_sigma
+        gate_source = "per_ticker_override" if "gate_sigma_buy"  in per_ticker \
+                      else "global_default"
+    else:
+        sigma      = float(per_ticker["gate_sigma_sell"]) \
+                     if "gate_sigma_sell" in per_ticker else global_sell_sigma
+        gate_source = "per_ticker_override" if "gate_sigma_sell" in per_ticker \
+                      else "global_default"
+
+    # ── Compute EWMA vol_2d from price history ────────────────────────────────
+    span   = int(gate_cfg.get("ewma_span_days", 126))
+    t_data = hist[hist["Ticker"] == ticker].sort_values("Date")
+    if t_data.empty:
+        return {"action": "proceed",
+                "reason": f"no_price_history_for_{ticker}",
+                "z_score": None, "threshold": None,
+                "sigma_used": sigma, "gate_source": gate_source,
+                "max_defer_days": max_defer_days}
+
+    prices = t_data.set_index("Date")["AdjClose"]
+    vol_2d = compute_ewma_vol_2d(prices, span=span)
+    if vol_2d is None or vol_2d == 0:
+        return {"action": "proceed",
+                "reason": "insufficient_vol_history",
+                "z_score": None, "threshold": None,
+                "sigma_used": sigma, "gate_source": gate_source,
+                "max_defer_days": max_defer_days}
+
+    # ── 2-day return (latest close vs close 2 trading days prior) ────────────
+    if len(prices) < 3:
+        return {"action": "proceed",
+                "reason": "insufficient_ret2d_history",
+                "z_score": None, "threshold": None,
+                "sigma_used": sigma, "gate_source": gate_source,
+                "max_defer_days": max_defer_days}
+
+    ret_2d = (prices.iloc[-1] / prices.iloc[-3]) - 1.0
+
+    # ── Z-score and gate decision ─────────────────────────────────────────────
+    z         = ret_2d / vol_2d
+    threshold = sigma * vol_2d   # unsigned magnitude for logging
+
+    if direction == "SELL" and z >= global_buy_sigma:
+        # Spike-trim: large upward move on a sell → execute immediately into strength
+        return {"action": "spike_trim",
+                "reason": (f"spike_trim: z={z:.2f} >= +{global_buy_sigma}σ on SELL "
+                           f"(execute into strength)"),
+                "z_score": z, "threshold": global_buy_sigma * vol_2d,
+                "sigma_used": global_buy_sigma, "gate_source": "global_default",
+                "max_defer_days": 0}
+
+    if direction == "BUY" and z >= sigma:
+        return {"action": "defer",
+                "reason": (f"buy_defer: z={z:.2f} >= +{sigma}σ "
+                           f"[{gate_source}] — don't chase spike"),
+                "z_score": z, "threshold": threshold,
+                "sigma_used": sigma, "gate_source": gate_source,
+                "max_defer_days": max_defer_days}
+
+    if direction == "SELL" and z <= -sigma:
+        return {"action": "defer",
+                "reason": (f"sell_defer: z={z:.2f} <= -{sigma}σ "
+                           f"[{gate_source}] — don't sell into capitulation"),
+                "z_score": z, "threshold": -threshold,
+                "sigma_used": sigma, "gate_source": gate_source,
+                "max_defer_days": max_defer_days}
+
+    return {"action": "proceed",
+            "reason": (f"z={z:.2f}, ±{sigma}σ threshold [{gate_source}], "
+                       f"within normal range"),
+            "z_score": z, "threshold": threshold,
+            "sigma_used": sigma, "gate_source": gate_source,
+            "max_defer_days": max_defer_days}
+
+
+# ==============================================================================
 def main() -> None:
     policy, state, hist, hold = load_system_files()
 
