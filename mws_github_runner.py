@@ -82,8 +82,13 @@ def run_analytics() -> dict:
             t_hist = hist[hist["Ticker"] == ticker].sort_values("Date")
             if len(t_hist) < 5:
                 continue
-            prices = t_hist.set_index("Date")["AdjClose"]
-            result = mws_analytics.check_execution_gate(prices, gate_cfg, direction="BUY")
+            result = mws_analytics.check_execution_gate(
+                policy=policy,
+                ticker=ticker,
+                trade_direction="BUY",
+                hist=hist,
+                stress_active=(dd.get("state") == "soft_limit"),
+            )
             gate_rows.append({
                 "ticker":       ticker,
                 "gate_action":  result.get("action", "UNKNOWN"),
