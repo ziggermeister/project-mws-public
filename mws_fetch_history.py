@@ -87,7 +87,7 @@ DISPLAY_OVERRIDE = {
 def stooq_symbol(ticker: str) -> str:
     """Convert standard ticker to Stooq symbol."""
     if ticker == "^VIX":
-        return "^vix"
+        return "vix"   # Stooq serves VIX without the caret prefix
     return ticker.lower() + ".us"
 
 
