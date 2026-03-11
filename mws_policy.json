@@ -1,10 +1,10 @@
 {
   "meta": {
-    "policy_name": "MWS v2.8.5",
-    "policy_version": "v2.8.5",
+    "policy_name": "MWS v2.9.2",
+    "policy_version": "v2.9.2",
     "policy_family": "Titanium MWS",
-    "last_updated": "2026-03-04",
-    "notes": "v2.8.5: Hygiene fix only. governance.execution.trigger_precedence priority-1 action label updated to match drawdown_rules.hard_limit_action wording (conditional, not absolute). No economic, cap, or logic changes from v2.8.4."
+    "last_updated": "2026-03-10",
+    "notes": "v2.9.2: Round 4 consensus — spike_trim_cap_interaction investigation closed. Path A (monitor-only) adopted by both reviewers. Automatic 90-day rolling event counter; escalation at >5% of spike_trim events activates contingent spike_trim_reentry_buffer (0.75% weight gap, momentum buys only, does not override compliance enforcement). No hard cooldown rule added. Execution gate declared production-ready by both reviewers (ChatGPT + Gemini, 4 rounds). No changes to signal engine, allocation targets, sleeve structure, or ticker constraints."
   },
   "governance": {
     "reporting_baselines": {
@@ -845,6 +845,186 @@
       "day": 5
     }
   ],
+  "execution_gates": {
+    "_meta": {
+      "added_version": "v2.9.0",
+      "added_date": "2026-03-10",
+      "reviewed_by": ["ChatGPT", "Gemini"],
+      "review_rounds_completed": 4,
+      "review_date": "2026-03-10",
+      "production_ready": true,
+      "status": "active",
+      "applies_to": "momentum_driven_trades_only",
+      "does_not_apply_to": [
+        "hard_limit_drawdown_reduction",
+        "bucket_a_restoration",
+        "cap_floor_compliance_enforcement",
+        "turnover_cap_clipping"
+      ],
+      "spike_trim_annotation_applies_to": [
+        "momentum_driven_trades",
+        "cap_floor_compliance_sells"
+      ],
+      "notes": "Execution timing filter. Does not change target weights or momentum signals. Defers or accelerates trade execution based on statistical extremity of the 2-day price move relative to each ticker's own EWMA volatility. Spike-trim is informational for cap-breach sells — execution remains unconditional; annotation flags optimal timing only."
+    },
+    "short_term_confirmation": {
+      "enabled": true,
+      "method": "z_score",
+      "lookback_days": 2,
+      "vol_source": "ewma_annual_vol",
+      "ewma_span_days": 126,
+      "vol_conversion": "(annual_vol / sqrt(252)) * sqrt(2)",
+      "vol_conversion_simplified": "annual_vol / sqrt(126)",
+      "vol_conversion_derivation": "daily_vol = annual_vol / sqrt(252); 2d_vol = daily_vol * sqrt(2); simplified: annual_vol / sqrt(126). Both forms are equivalent.",
+      "sell_defer_sigma": 2.5,
+      "buy_defer_sigma": 2.0,
+      "sell_defer_if": "z_score <= -2.5",
+      "buy_defer_if": "z_score >= +2.0",
+      "spike_trim_if": "z_score >= +2.0 AND trade_direction == SELL",
+      "spike_trim_effect": "execute_immediately_flag_as_spike_trim",
+      "spike_trim_scope": "momentum_trades_and_cap_breach_sells",
+      "max_defer_calendar_days": 10,
+      "stress_regime_overrides": {
+        "condition": "drawdown_rules.soft_limit_breached == true",
+        "sell_defer_max_calendar_days": 3,
+        "buy_defer_max_calendar_days": 10,
+        "rationale": "During soft_limit drawdown, prolonged sell-deferral conflicts with the goal of risk reduction. Sell-side capitulation protection is shortened from 10 to 3 calendar days so the portfolio can reduce exposure within a tight window even in stress. Buy-defer window unchanged — freezing new buys is already enforced by stress_override; the 10-day buy-defer does not add material constraint. Both reviewers reviewed this interaction: ChatGPT recommended disabling sell-defer entirely; Gemini recommended accepting the full freeze. Resolved as a middle path — sell-defer preserved at compressed 3-day window to protect against worst panic-day execution while ensuring risk reduction within 3 days."
+      },
+      "turnover_accounting": {
+        "rule": "deferred_trade_turnover_attributed_to_originating_rebalance_event",
+        "description": "A deferred trade's dollar volume counts against the turnover cap of the rebalance event that originally generated it, not the event during which it eventually executes. If the deferred trade executes between scheduled rebalances (e.g., at max_defer_calendar_days expiry), its turnover is logged as a post-event adjustment to the originating cycle's turnover ledger. It does not consume turnover budget for any subsequent rebalance event.",
+        "rationale": "Prevents a deferred trade from causing a cascade: if it counted against the next rebalance, that rebalance could be artificially constrained by the turnover cap, clipping otherwise valid momentum trades. Both reviewers independently flagged this gap. Gemini provided the attribution-to-originating-cycle framing; ChatGPT confirmed it must not count against the next event.",
+        "implementation_note": "Engine must tag each trade with originating_rebalance_id at signal generation time, not at execution time. Execution engine posts turnover to originating_rebalance_id regardless of when settlement occurs."
+      },
+      "hard_overrides": [
+        "hard_limit_drawdown",
+        "per_ticker_cap_breach",
+        "bucket_a_minimum_breach"
+      ],
+      "recompute_vol_at": "each_rebalance_event",
+      "review_decisions": {
+        "asymmetric_sigma": {
+          "decision": "adopted",
+          "sell_defer_sigma": 2.5,
+          "buy_defer_sigma": 2.0,
+          "rationale": "False sell-deferral (holding deteriorating position) is more costly than false buy-deferral (missing a buy entry). Asymmetry has principled basis. Both reviewers considered; Gemini recommended, ChatGPT suggested defer. Adopted upfront — zero implementation cost."
+        },
+        "max_defer_units": {
+          "decision": "calendar_days",
+          "value": 10,
+          "value_stress_sell": 3,
+          "rationale": "Both reviewers independently recommended calendar days over rebalance cycles. Frequency-independent. Stress regime shortens sell-defer to 3 days to allow timely risk reduction."
+        },
+        "fat_tail_tickers": {
+          "decision": "keep_ewma_uniform",
+          "flag_tickers": ["SIVR", "IBIT"],
+          "rationale": "Both reviewers agreed EWMA uniform is acceptable given position caps (SIVR max 6% TPV, IBIT max 5% TPV). Monitor flag retained."
+        },
+        "spike_trim_scope": {
+          "decision": "extend_annotation_to_cap_breach_sells",
+          "rationale": "Gemini recommended extension; ChatGPT preferred momentum-only. Resolved as informational annotation only — cap-breach sells execute unconditionally regardless."
+        },
+        "stress_sell_defer": {
+          "decision": "shorten_to_3_days_not_disable",
+          "chatgpt_recommendation": "disable_sell_defer_during_soft_limit",
+          "gemini_recommendation": "accept_full_freeze",
+          "rationale": "ChatGPT: risk reduction must not be blocked. Gemini: panic execution costs are highest — freeze is beneficial. Middle path: 3-day sell-defer window preserves protection against worst-day execution while ensuring risk reduction within 3 calendar days, not 10."
+        },
+        "turnover_accounting": {
+          "decision": "attribute_to_originating_rebalance",
+          "rationale": "Both reviewers confirmed gap. Gemini provided originating-cycle framing; ChatGPT confirmed must not count against next event."
+        },
+        "vol_conversion_documentation": {
+          "decision": "document_full_derivation",
+          "rationale": "Both reviewers recommended explicit derivation for auditability. Gemini proposed compact form; both forms now documented."
+        }
+      },
+      "open_items": {
+        "hidden_gate_allocation_interaction": {
+          "status": "confirmed_and_accepted",
+          "confirmed_by": ["ChatGPT Round 2", "Gemini Round 2"],
+          "mechanisms": [
+            "Mean-reversion tilt: systematic sell-deferral during drawdowns causes portfolio to hold losers longer than momentum signal intends.",
+            "Trade supersession: deferred sell may never execute if fresh rebalance recomputes a smaller gap at a recovered price.",
+            "Signal drift amplification (ChatGPT Round 2, new): actual_weight > intended_weight post-deferral means future rank changes have larger-than-intended portfolio impact, introducing path dependency in the allocation engine."
+          ],
+          "magnitude": "Small. Sell-defer fires at 2.5sigma (~0.6% of days per ticker). 10-day expiry limits persistence. Estimated 2-4% of sells deferred annually.",
+          "net_effect": "Mild momentum × mean-reversion overlay. Not a bug. Accepted as structural trade-off of execution timing protection.",
+          "action": "Monitor via rebalance logs. Quantify in Round 3 simulation over multi-cycle backtest."
+        },
+        "spike_trim_cap_interaction": {
+          "status": "accepted_with_monitoring",
+          "confirmed_by": ["ChatGPT Round 3+4", "Gemini Round 3+4"],
+          "mechanism": "Cap-boundary oscillation: spike-trim execution at P_spike > P_signal may cause post-trim weight to undershoot target, triggering a compensating buy at next rebalance on the same ticker. Conditions required: ticker near cap + short-term spike >= 2sigma + momentum rank persistent. Most likely tickers: SOXQ, CHAT, SIVR, URNM.",
+          "frequency_estimate": "< 1% of trades. Bounded structurally by existing 20% turnover cap (round-trip consumes two slots in the same cycle).",
+          "directionality": "Not necessarily harmful. SELL at spike then BUY slightly lower is often a profitable micro-rebalance capturing the volatility premium. Harmful only if spike persists without mean-reversion — less common than reversion in short windows.",
+          "path_decision": "Path A — monitor with automatic counter and escalation. No cooldown rule added. Both reviewers endorsed after ChatGPT directionality and turnover-cap-adequacy arguments.",
+          "review_decisions": {
+            "chatgpt_round4": "Path A endorsed. Monitoring sufficient. Cooldown would introduce signal-suppression artifact (strong winners held below target), arguably worse than the rare oscillation.",
+            "gemini_round4": "Path A endorsed — conceded directionality and turnover-cap arguments. Hard cooldown ruled out."
+          },
+          "monitoring": {
+            "event_definition": "spike_trim_followed_by_same_ticker_buy_within_next_rebalance",
+            "rolling_window_days": 90,
+            "alert_threshold": "event_rate > 5% of spike_trim_events",
+            "monitoring_mode": "automatic_counter",
+            "action_on_threshold": "activate_spike_trim_reentry_buffer",
+            "additional_metrics": {
+              "avg_days_between_spike_trim_and_reentry": {
+                "log": true,
+                "rationale": "Distinguishes 1-cycle oscillations (short-lived spike reversals) from multi-cycle patterns (persistent trend breaks). Helps diagnose whether oscillation events are benign mean-reversion captures or structural execution drag. Source: ChatGPT Round 4 operational suggestion."
+              }
+            }
+          },
+          "contingent_mitigation": {
+            "rule": "spike_trim_reentry_buffer",
+            "status": "inactive_until_threshold_breached",
+            "gap_threshold_weight": 0.0075,
+            "description": "Buy allowed only if target_weight - actual_weight >= 0.75%. Prevents momentum-driven rebuy of a recently spike-trimmed ticker that is only marginally below target.",
+            "applies_to": "momentum_buys_only",
+            "does_not_override": [
+              "cap_floor_compliance_enforcement",
+              "bucket_restoration",
+              "hard_risk_rules"
+            ],
+            "activation": "automatic_when_monitoring_threshold_breached",
+            "override_hierarchy": "hard_overrides > cap_floor_compliance > spike_trim_reentry_buffer > normal_momentum_trades"
+          }
+        }
+      },
+      "notes": [
+        "Asymmetric sigma: sell_defer at 2.5sigma; buy_defer at 2.0sigma.",
+        "Stress regime: sell_defer window shortened to 3 calendar days when soft_limit active. Buy_defer unchanged at 10 days.",
+        "Turnover: deferred trade counted against originating rebalance event, not execution event. Engine must tag trades with originating_rebalance_id.",
+        "SIVR and IBIT: EWMA-implied gate wider than empirical p97.5 (SIVR +5.59pp, IBIT +2.36pp). fat_tail_monitor flag active.",
+        "Spike-trim fires when z >= +2.0 on sell-direction trade. Execution immediate. Applies to both momentum and cap-breach sells.",
+        "Gate fires on ~2.5% of trading days per ticker (buy-side). Sell-side 2.5sigma fires on ~0.6% of days.",
+        "Vol derivation: daily_vol = annual_vol / sqrt(252); 2d_vol = daily_vol * sqrt(2) = annual_vol / sqrt(126)."
+      ]
+    },
+    "per_ticker_thresholds": {
+      "_computed_date": "2026-03-10",
+      "_source": "mws_ticker_history.csv",
+      "_method": "ewma_126d_annualised / sqrt(126) applied asymmetrically: buy_defer at 2.0sigma, sell_defer at 2.5sigma",
+      "_note": "Thresholds recomputed at each rebalance from live EWMA vol. Values below are reference snapshot only.",
+      "SIVR":  { "vol_ann": 0.7955, "vol_2d": 0.0709, "buy_gate": 0.1417, "sell_gate": 0.1771, "emp_p975": 0.0858, "ewma_emp_gap": 0.0559, "flag": "fat_tail_monitor" },
+      "URNM":  { "vol_ann": 0.5377, "vol_2d": 0.0479, "buy_gate": 0.0958, "sell_gate": 0.1197, "emp_p975": 0.0881, "ewma_emp_gap": 0.0077 },
+      "IBIT":  { "vol_ann": 0.5186, "vol_2d": 0.0462, "buy_gate": 0.0924, "sell_gate": 0.1155, "emp_p975": 0.0688, "ewma_emp_gap": 0.0236, "flag": "fat_tail_monitor" },
+      "REMX":  { "vol_ann": 0.4684, "vol_2d": 0.0417, "buy_gate": 0.0835, "sell_gate": 0.1043, "emp_p975": 0.0784, "ewma_emp_gap": 0.0050 },
+      "COPX":  { "vol_ann": 0.4569, "vol_2d": 0.0407, "buy_gate": 0.0814, "sell_gate": 0.1018, "emp_p975": 0.0693, "ewma_emp_gap": 0.0121 },
+      "SOXQ":  { "vol_ann": 0.3232, "vol_2d": 0.0288, "buy_gate": 0.0576, "sell_gate": 0.0720, "emp_p975": 0.0569, "ewma_emp_gap": 0.0007 },
+      "IAUM":  { "vol_ann": 0.3056, "vol_2d": 0.0272, "buy_gate": 0.0544, "sell_gate": 0.0681, "emp_p975": 0.0386, "ewma_emp_gap": 0.0158 },
+      "CHAT":  { "vol_ann": 0.2948, "vol_2d": 0.0263, "buy_gate": 0.0525, "sell_gate": 0.0657, "emp_p975": 0.0546, "ewma_emp_gap": -0.0021 },
+      "XBI":   { "vol_ann": 0.2311, "vol_2d": 0.0206, "buy_gate": 0.0412, "sell_gate": 0.0515, "emp_p975": 0.0437, "ewma_emp_gap": -0.0025 },
+      "BOTZ":  { "vol_ann": 0.2147, "vol_2d": 0.0191, "buy_gate": 0.0383, "sell_gate": 0.0478, "emp_p975": 0.0413, "ewma_emp_gap": -0.0030 },
+      "DTCR":  { "vol_ann": 0.2105, "vol_2d": 0.0188, "buy_gate": 0.0375, "sell_gate": 0.0469, "emp_p975": 0.0362, "ewma_emp_gap": 0.0013 },
+      "ITA":   { "vol_ann": 0.1948, "vol_2d": 0.0174, "buy_gate": 0.0347, "sell_gate": 0.0434, "emp_p975": 0.0376, "ewma_emp_gap": -0.0029 },
+      "XLE":   { "vol_ann": 0.1850, "vol_2d": 0.0165, "buy_gate": 0.0330, "sell_gate": 0.0412, "emp_p975": 0.0331, "ewma_emp_gap": -0.0001 },
+      "GRID":  { "vol_ann": 0.1777, "vol_2d": 0.0158, "buy_gate": 0.0317, "sell_gate": 0.0396, "emp_p975": 0.0316, "ewma_emp_gap": 0.0001 },
+      "VXUS":  { "vol_ann": 0.1430, "vol_2d": 0.0127, "buy_gate": 0.0255, "sell_gate": 0.0318, "emp_p975": 0.0224, "ewma_emp_gap": 0.0031 },
+      "VTI":   { "vol_ann": 0.1182, "vol_2d": 0.0105, "buy_gate": 0.0211, "sell_gate": 0.0263, "emp_p975": 0.0268, "ewma_emp_gap": -0.0058 }
+    }
+  },
   "drawdown_rules": {
     "enabled": true,
     "measurement": "peak_to_trough_rolling_252d",
@@ -874,6 +1054,17 @@
       "priority_3_normal": "overlay bands (DBMF/KMLM maintained within 6-12% TPV)",
       "priority_4_normal": "L2 sleeve floors (soft \u2014 relaxed proportionally if infeasible)",
       "hard_limit_override": "hard_limit_action may override per_ticker_min_total if reducing to sleeve floors is insufficient to exit breach. Override must be logged."
+    }
+  },
+  "future_review_items": {
+    "_note": "Items logged for future policy review cycles. Not active constraints. Not part of execution gate.",
+    "allocation_layer_sleeve_constraint_interaction": {
+      "status": "logged_for_future_review",
+      "source": "ChatGPT Round 4 (2026-03-10), out-of-scope observation",
+      "description": "percentile_in_band + sleeve-constraint interaction may create systematic over-weighting of mid-rank assets during regime transitions. When a regime shift moves momentum ranks sharply, mid-rank tickers within a sleeve that is at its L1 cap receive proportionally more weight than their updated rank warrants, because the reallocation is bounded by the cap. Effect: short-lived over-weight in transitional assets during the rebalance cycle immediately following a regime shift.",
+      "scope": "allocation_engine",
+      "priority": "low",
+      "action": "Investigate in next allocation-engine policy review. Quantify via regime-transition backtests."
     }
   }
 }
