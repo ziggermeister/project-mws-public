@@ -1487,5 +1487,172 @@
       "current_gap_pp": 1.74,
       "action": "Include URNM in monthly calibration audit output. No action until buy_gap_pp > 3pp for 2 consecutive monthly runs."
     }
+  },
+  "news_intelligence": {
+    "_note": "Framework for incorporating real-world news and market context into LLM-based run execution. The Python runner (mws_titanium_runner.py) computes momentum scores, charts, and breach alerts. The LLM is the actual execution engine that produces final recommendations. News is an advisory overlay — it modifies execution decisions but does not override hard policy rules.",
+    "architecture": {
+      "role": "advisory_overlay",
+      "primary_signal": "systematic momentum + policy constraints (mws_policy.json)",
+      "news_role": "modifier — confirms or challenges systematic signal; informs discretionary override candidates; provides rationale context",
+      "hard_rule": "News alone CANNOT override hard_limit drawdown rules, cap/floor constraints, Bucket A minimums, or turnover caps. News CAN trigger a discretionary_override_review for any trade.",
+      "data_file": "mws_market_context.md — populated by user before each run, read by LLM runner alongside all other inputs"
+    },
+    "categories": {
+      "macro_rates_inflation": {
+        "description": "Federal Reserve communications, CPI/PCE/jobs data, yield curve moves, global central bank policy",
+        "affected_sleeves": [
+          "core_equity",
+          "monetary_hedges",
+          "stabilizers",
+          "ALL"
+        ],
+        "high_materiality_triggers": [
+          "Unexpected Fed rate decision or forward guidance shift",
+          "CPI/PCE surprise > 0.3pp vs consensus",
+          "Yield curve inversion or dis-inversion",
+          "Recession signal from 2+ leading indicators simultaneously"
+        ]
+      },
+      "geopolitical": {
+        "description": "Armed conflict escalation, sanctions, trade restrictions, energy supply disruptions",
+        "affected_sleeves": [
+          "defense_energy",
+          "strategic_materials",
+          "monetary_hedges"
+        ],
+        "high_materiality_triggers": [
+          "New sanctions on commodity-producing nations (uranium, rare earth, copper)",
+          "Major military escalation involving energy-producing regions",
+          "Trade restriction on semiconductors or critical minerals",
+          "Energy supply disruption affecting >2% of global supply"
+        ]
+      },
+      "ai_tech_policy": {
+        "description": "AI regulation, semiconductor export controls, major model releases, compute demand signals, antitrust actions",
+        "affected_sleeves": [
+          "ai_tech"
+        ],
+        "high_materiality_triggers": [
+          "New chip export restriction (US, Netherlands, Japan)",
+          "Major antitrust action against AI/semiconductor company",
+          "Paradigm-shifting model release that resets compute demand curve",
+          "National AI strategy shift in US, EU, or China"
+        ]
+      },
+      "energy_transition": {
+        "description": "Grid investment policy, nuclear licensing, EV adoption, energy storage breakthroughs, carbon pricing",
+        "affected_sleeves": [
+          "defense_energy",
+          "strategic_materials"
+        ],
+        "high_materiality_triggers": [
+          "Nuclear plant approval or cancellation affecting uranium demand",
+          "Major grid investment bill passage or repeal",
+          "Significant EV demand data miss or beat affecting battery metals"
+        ]
+      },
+      "crypto_regulatory": {
+        "description": "SEC/CFTC enforcement actions, ETF structure changes, exchange failures, stablecoin regulation",
+        "affected_sleeves": [
+          "speculative"
+        ],
+        "high_materiality_triggers": [
+          "SEC/CFTC action directly targeting Bitcoin ETF structure or custody",
+          "Major exchange insolvency or fraud",
+          "Stablecoin regulatory framework passage affecting crypto market structure"
+        ]
+      },
+      "biotech_fda": {
+        "description": "FDA calendar, major clinical trial readouts, drug approval/rejection, CMS coverage decisions",
+        "affected_sleeves": [
+          "biotech"
+        ],
+        "high_materiality_triggers": [
+          "FDA rejection of major drug class affecting XBI basket significantly",
+          "Surprise approval or accelerated review for major platform technology",
+          "CMS coverage decision materially affecting sector revenue"
+        ]
+      },
+      "precious_metals_macro": {
+        "description": "Real interest rates, DXY moves, central bank gold buying, inflation expectations, safe-haven flows",
+        "affected_sleeves": [
+          "monetary_hedges"
+        ],
+        "high_materiality_triggers": [
+          "Real rates move > 30bp in a week",
+          "DXY move > 2% in a week",
+          "Major central bank gold buying/selling announcement",
+          "Significant shift in 5y5y inflation breakevens"
+        ]
+      },
+      "managed_futures_regime": {
+        "description": "Trend environment quality, cross-asset momentum, CTA positioning, correlation regime shifts",
+        "affected_sleeves": [
+          "stabilizers"
+        ],
+        "high_materiality_triggers": [
+          "Sharp cross-asset correlation spike (equity-bond correlation turns positive unexpectedly)",
+          "Trend reversal signal across 3+ asset classes simultaneously",
+          "Major CTA fund liquidation event"
+        ]
+      }
+    },
+    "materiality_scale": {
+      "HIGH": {
+        "definition": "News that a reasonable investor would expect to materially affect sleeve-level returns over the next 30–90 days. May change allocation recommendation or trigger override review.",
+        "llm_action": "Assess whether news CONFIRMS or CONTRADICTS current momentum signal for affected sleeve. Document explicitly in recommendation. If contradicts: state override candidate and rationale. If confirms: note as conviction booster."
+      },
+      "MEDIUM": {
+        "definition": "Relevant context that adds nuance but does not alter the systematic recommendation. Informs risk awareness.",
+        "llm_action": "Document in news_overlay_summary. No change to recommendation unless combined with other MEDIUM items pointing the same direction."
+      },
+      "LOW": {
+        "definition": "Background awareness. Does not affect current run.",
+        "llm_action": "Log in market context file. Not required in recommendation output."
+      }
+    },
+    "signal_news_interaction": {
+      "confirms_momentum": {
+        "definition": "News directionally consistent with the current momentum signal for the affected sleeve",
+        "example": "Strong AI capex announcements when ai_tech sleeve has high momentum rank",
+        "llm_action": "Note as conviction booster in rationale. No change to target weights — signal already captures this."
+      },
+      "contradicts_momentum": {
+        "definition": "News directionally inconsistent with current momentum signal",
+        "example": "Major semiconductor export ban announced when ai_tech sleeve has high momentum and would be a BUY",
+        "llm_action": "Flag as override_candidate. State: (1) what the systematic signal says, (2) what the news implies, (3) recommendation on whether to follow signal or invoke discretionary override, (4) explicit rationale. Default to following signal unless news is HIGH materiality AND not yet priced (< 2 trading days old)."
+      },
+      "novel_not_yet_priced": {
+        "definition": "Breaking news within 2 trading days that has not yet been reflected in momentum signals",
+        "llm_action": "Highest scrutiny. Explicitly state 'signal may not yet reflect this news.' Consider deferring the affected trade by 2–5 trading days to allow price discovery, OR invoke discretionary override with documented rationale.",
+        "governance": "Any trade deferred or overridden due to novel news must be logged in mws_tracker.json with news_override flag."
+      }
+    },
+    "required_recommendation_output": {
+      "description": "Every LLM run recommendation must include a news_overlay_summary section",
+      "format": {
+        "items_reviewed": "List of HIGH and MEDIUM news items considered, with category and materiality rating",
+        "signal_interactions": "For each HIGH item: CONFIRMS or CONTRADICTS momentum signal, and for which sleeve",
+        "override_candidates": "Any trades flagged for discretionary override review due to news, with rationale",
+        "net_news_stance": "One-line summary: e.g., 'News context is broadly supportive of current momentum signals. No override candidates.' or 'Two HIGH items contradict ai_tech BUY signal — see override candidates.'"
+      },
+      "default_stance": "If mws_market_context.md is not populated or is stale (> 5 business days old), note this in recommendation and proceed on systematic signals only."
+    },
+    "news_weight_governance": {
+      "maximum_news_influence": "News can defer a trade up to 5 business days pending price discovery, or trigger a discretionary override review. It cannot unilaterally cancel a trade that passes all policy constraints.",
+      "news_cannot_do": [
+        "Override hard_limit or soft_limit drawdown controls",
+        "Override per_ticker_min or per_ticker_max constraints",
+        "Override Bucket A minimum",
+        "Increase total position size beyond turnover cap",
+        "Change momentum signal weights"
+      ],
+      "news_can_do": [
+        "Flag a momentum trade as override_candidate with documented rationale",
+        "Defer a specific trade execution by up to 5 business days (novel news only)",
+        "Inform sleeve-level conviction in written recommendation",
+        "Trigger a policy review request for a structural change"
+      ]
+    }
   }
 }
