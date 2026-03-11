@@ -1814,12 +1814,15 @@
           "schedule": "Every Monday 14:00 UTC (9am ET). Runner determines if full rebalance is warranted per policy calendar trigger.",
           "on_demand": "GitHub → Actions → MWS Portfolio Run → Run workflow (no laptop required)",
           "secrets_required": {
-            "ANTHROPIC_API_KEY": "Anthropic API key from console.anthropic.com — NEW, separate from Claude Code subscription",
-            "GAS_WEBHOOK_URL": "GAS doPost URL for email dispatch — set once in GitHub repo secrets"
+            "ANTHROPIC_API_KEY": "Anthropic API key from console.anthropic.com. Same key you already have locally — copy the value into GitHub repo → Settings → Secrets and variables → Actions."
           },
           "auto_provided": {
             "GITHUB_TOKEN": "GitHub injects automatically — enables commit-back of mws_market_context.md and mws_run_results.csv"
-          }
+          },
+          "optional_secrets": {
+            "GMAIL_APP_PASSWORD": "Optional. If set, GitHub Actions emails the full recommendation body directly. Generate at Google account → Security → App passwords. If not set, GitHub sends a workflow-complete notification and recommendation is readable in the committed mws_market_context.md."
+          },
+          "email_delivery": "Primary: Gmail direct via GMAIL_APP_PASSWORD secret (recommendation in email body). Fallback: GitHub workflow notification email (zero config) + check committed mws_market_context.md. GAS emailer continues its existing daily digest role independently."
         },
         "local_runner": {
           "script": "commit_and_run.sh",

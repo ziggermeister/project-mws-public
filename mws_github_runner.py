@@ -1,334 +1,326 @@
 #!/usr/bin/env python3
 """
-mws_github_runner.py
-────────────────────
-GitHub Actions orchestrator for fully automated MWS runs.
+mws_github_runner.py — GitHub Actions orchestrator for MWS portfolio runs.
 
-Runs in the cloud (GitHub's servers) — no laptop required.
+Runs automatically every Monday (14:00 UTC) via GitHub Actions cron,
+or on-demand via workflow_dispatch. Works entirely without a local laptop.
 
-Sequence:
-  1. Load all input files from repo
-  2. Compute analytics summary via mws_analytics.py functions
-  3. Call Claude API with full input bundle (policy, macro, holdings,
-     tracker, analytics summary, ticker history tail)
-  4. Claude performs news search (Step 1 of run protocol) and produces
-     full recommendation including mws_market_context.md content
-  5. Write mws_market_context.md output back to repo
-  6. Append to mws_run_results.csv
-  7. Send recommendation email via GAS webhook
+Architecture:
+  1. Import mws_analytics to compute momentum scores + breach flags
+  2. Build a structured context bundle (rankings, portfolio value, drawdown state)
+  3. Call Claude API with web_search tool — Claude executes the full 8-step run protocol
+     defined in mws_policy.json → news_intelligence.run_protocol.llm_run_sequence
+  4. Extract mws_market_context.md from Claude's response and write to disk
+  5. Email full recommendation via Gmail SMTP (if GMAIL_APP_PASSWORD set)
 
-Environment variables (set as GitHub Secrets):
-  ANTHROPIC_API_KEY     — Anthropic API key (console.anthropic.com)
-  GAS_WEBHOOK_URL       — GAS doPost URL for email dispatch
-  TRIGGER_REASON        — Why this run fired (set by workflow)
-
-Usage (local test):
-  export ANTHROPIC_API_KEY=sk-ant-...
-  export GAS_WEBHOOK_URL=https://script.google.com/macros/s/.../exec
-  export TRIGGER_REASON=manual_test
-  python3 mws_github_runner.py
+Required GitHub Secrets:  ANTHROPIC_API_KEY
+Optional GitHub Secrets:  GMAIL_APP_PASSWORD, GMAIL_FROM, GMAIL_TO
 """
+
+# Set headless matplotlib backend BEFORE any other imports
+import matplotlib
+matplotlib.use("Agg")
 
 import json
+import logging
 import os
+import smtplib
 import sys
-import csv
-import requests
-from datetime import datetime, date
-from pathlib import Path
+import traceback
+from datetime import datetime
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+import anthropic
 import pandas as pd
-import numpy as np
 
-try:
-    import anthropic
-except ImportError:
-    sys.exit("anthropic SDK not installed. Run: pip install anthropic")
+# Now safe to import mws_analytics (matplotlib already set to Agg)
+import mws_analytics
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
-ROOT = Path(__file__).parent
-POLICY_FILE   = ROOT / "mws_policy.json"
-MACRO_FILE    = ROOT / "mws_macro.md"
-HOLDINGS_FILE = ROOT / "mws_holdings.csv"
-TRACKER_FILE  = ROOT / "mws_tracker.json"
-HISTORY_FILE  = ROOT / "mws_ticker_history.csv"
-RECENT_FILE   = ROOT / "mws_recent_performance.csv"
-CONTEXT_FILE  = ROOT / "mws_market_context.md"
-RESULTS_FILE  = ROOT / "mws_run_results.csv"
+# ── Constants ──────────────────────────────────────────────────────────────────
+TODAY          = datetime.now().strftime("%Y-%m-%d")
+TRIGGER_REASON = os.environ.get("TRIGGER_REASON", "scheduled")
+MODEL          = "claude-3-7-sonnet-20250219"
+MAX_TOKENS     = 16000
+MARKET_CTX_FILE = "mws_market_context.md"
 
-# ── Config ────────────────────────────────────────────────────────────────────
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-GAS_WEBHOOK_URL   = os.environ.get("GAS_WEBHOOK_URL", "")
-TRIGGER_REASON    = os.environ.get("TRIGGER_REASON", "scheduled")
-CLAUDE_MODEL      = "claude-opus-4-5"
-HISTORY_TAIL_DAYS = 300   # rows per ticker sent to Claude (enough for all momentum calcs)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+log = logging.getLogger("mws_github_runner")
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Step 1: Run Python analytics ──────────────────────────────────────────────
 
-def load_file(path: Path, label: str) -> str:
-    if not path.exists():
-        print(f"  WARNING: {label} not found at {path}")
-        return f"[{label} not available]"
-    content = path.read_text(encoding="utf-8")
-    print(f"  ✓ {label} ({len(content):,} chars)")
-    return content
-
-
-def history_tail(path: Path, tail_days: int) -> str:
-    """Return last `tail_days` rows per ticker as CSV string."""
-    if not path.exists():
-        return "[ticker history not available]"
-    df = pd.read_csv(path, parse_dates=["Date"])
-    df = (df.sort_values(["Ticker", "Date"])
-            .groupby("Ticker", group_keys=False)
-            .apply(lambda g: g.tail(tail_days)))
-    result = df.to_csv(index=False)
-    print(f"  ✓ ticker history tail ({len(df):,} rows across {df['Ticker'].nunique()} tickers)")
-    return result
-
-
-def compute_analytics_summary() -> str:
+def run_analytics() -> dict:
     """
-    Run a lightweight analytics pass and return a structured text summary
-    for Claude. Avoids matplotlib (no display in Actions) — numbers only.
+    Call mws_analytics functions directly and return a structured summary dict
+    suitable for inclusion in the Claude prompt.
     """
+    log.info("Loading system files via mws_analytics...")
+    policy, state, hist, hold = mws_analytics.load_system_files()
+
+    log.info("Checking drawdown state...")
+    dd = mws_analytics.check_drawdown_state(policy)
+
+    log.info("Running MWS audit (candidate universe)...")
+    candidates, _, missing = mws_analytics.run_mws_audit(policy, state, hist, hold)
+
+    log.info("Calculating portfolio value...")
+    total_val, asof = mws_analytics.calculate_portfolio_value(policy, hold, hist)
+
+    log.info("Generating momentum rankings...")
+    df_scores = mws_analytics.generate_rankings(policy, hist, candidates, hold)
+
+    # Per-ticker execution gate (buy direction as default for reporting)
+    gate_rows = []
+    gate_cfg = (policy.get("execution_gates", {}) or {}).get("short_term_confirmation", {})
+    if gate_cfg.get("enabled", False):
+        for ticker in candidates:
+            t_hist = hist[hist["Ticker"] == ticker].sort_values("Date")
+            if len(t_hist) < 5:
+                continue
+            prices = t_hist.set_index("Date")["AdjClose"]
+            result = mws_analytics.check_execution_gate(prices, gate_cfg, direction="BUY")
+            gate_rows.append({
+                "ticker":       ticker,
+                "gate_action":  result.get("action", "UNKNOWN"),
+                "z_score":      round(result.get("z_score", 0), 3),
+                "vol_clamp":    result.get("vol_clamp_type", "none"),
+                "raw_vol_pct":  round(result.get("raw_vol_2d", 0) * 100, 3),
+                "eff_vol_pct":  round(result.get("effective_vol_2d", 0) * 100, 3),
+            })
+    df_gates = pd.DataFrame(gate_rows) if gate_rows else pd.DataFrame()
+
+    return {
+        "policy":          policy,
+        "state":           state,
+        "holdings":        hold,
+        "drawdown":        dd,
+        "total_val":       total_val,
+        "val_asof":        asof,
+        "candidates":      candidates,
+        "missing_hist":    missing,
+        "df_scores":       df_scores,
+        "df_gates":        df_gates,
+    }
+
+
+# ── Step 2: Build Claude prompt ───────────────────────────────────────────────
+
+def build_prompt(analytics: dict) -> str:
+    policy  = analytics["policy"]
+    state   = analytics["state"]
+    hold    = analytics["holdings"]
+    dd      = analytics["drawdown"]
+    scores  = analytics["df_scores"]
+    gates   = analytics["df_gates"]
+
+    # Trim policy for prompt — keep news_intelligence and key sections
+    policy_trimmed = {k: v for k, v in policy.items() if k not in [
+        "ticker_constraints",   # very long, not needed for recommendation
+    ]}
+
+    scores_str = scores.to_string(index=False) if not scores.empty else "No rankings generated."
+    gates_str  = gates.to_string(index=False)  if not gates.empty  else "Execution gate disabled or no data."
+    hold_str   = hold.to_csv(index=False)
+    state_str  = json.dumps(state, indent=2)
+
+    macro_text = ""
     try:
-        import mws_analytics as mws
-    except ImportError:
-        return "[mws_analytics import failed — analytics summary unavailable]"
+        with open("mws_macro.md") as f:
+            macro_text = f.read()
+    except FileNotFoundError:
+        macro_text = "[mws_macro.md not found]"
 
-    try:
-        policy  = json.loads(POLICY_FILE.read_text())
-        state   = json.loads(TRACKER_FILE.read_text())
-        hist    = pd.read_csv(HISTORY_FILE, parse_dates=["Date"])
-        hold    = pd.read_csv(HOLDINGS_FILE)
+    return f"""You are the MWS (Momentum-Weighted Scaling) portfolio runner. Today is {TODAY}.
+This run was triggered by: **{TRIGGER_REASON}**.
 
-        candidates, diag, gate_results = mws.run_mws_audit(policy, state, hist, hold)
+Execute the full MWS run protocol as defined in mws_policy.json → news_intelligence.run_protocol.llm_run_sequence:
 
-        lines = ["=== ANALYTICS SUMMARY (mws_analytics.py) ===\n"]
+**STEP 1 (FIRST):** Use the web_search tool to search for current news across all 8 categories in
+news_intelligence.categories. Use the exact search queries in news_intelligence.generation_protocol.search_queries.
+Rate each item HIGH / MEDIUM / LOW per the materiality_scale rules.
 
-        # Holdings date
-        lines.append(f"Holdings file last modified: {datetime.fromtimestamp(HOLDINGS_FILE.stat().st_mtime).date()}")
-        lines.append(f"Ticker history current to: {hist['Date'].max().date()}\n")
+**STEPS 2–8:** Using all inputs below, produce a complete MWS run output including:
+- Sleeve-level target weights vs current holdings
+- Per-ticker trade recommendations with execution gate assessment
+- News overlay per sleeve (confirms / contradicts / novel)
+- Override candidates for any HIGH-materiality contradictions
+- Final actionable trade list with direction and sizing rationale
+- Any proposed policy or code changes (explicit, with rationale — do not silently modify)
 
-        # Rebalance candidates
-        if candidates:
-            lines.append(f"REBALANCE CANDIDATES ({len(candidates)}):")
-            for c in candidates:
-                lines.append(f"  {c.get('ticker','?'):8s}  target={c.get('target_weight_pct','?')}%  "
-                             f"current={c.get('current_weight_pct','?')}%  "
-                             f"action={c.get('action','?')}")
-        else:
-            lines.append("REBALANCE CANDIDATES: none")
+Structure your response in two clearly delimited sections:
 
-        # Gate results
-        if gate_results:
-            lines.append(f"\nEXECUTION GATE RESULTS ({len(gate_results)} tickers checked):")
-            for g in gate_results:
-                clamp = g.get("vol_clamp_type", "none")
-                lines.append(f"  {g.get('ticker','?'):8s}  z={g.get('z_score','?'):+.2f}  "
-                             f"gate={g.get('gate_action','?'):12s}  "
-                             f"vol_clamp={clamp}")
+--- MWS_MARKET_CONTEXT_START ---
+# MWS Market Context — AUTO-GENERATED {TODAY}
+_Generated by LLM runner. Do not edit manually. Overwritten each run._
 
-        # Diagnostics
-        if diag:
-            lines.append(f"\nDIAGNOSTICS:")
-            for k, v in diag.items():
-                lines.append(f"  {k}: {v}")
+[populate all 8 news categories here with items, materiality ratings, and signal interactions]
 
-        return "\n".join(lines)
+## Override Candidates
+[list any HIGH-materiality contradictions with ticker, direction, rationale]
 
-    except Exception as e:
-        return f"[Analytics summary failed: {type(e).__name__}: {e}]"
+## Market Regime Snapshot
+[VIX level + trend, TPV drawdown from tracker, risk regime assessment]
+--- MWS_MARKET_CONTEXT_END ---
 
+--- MWS_RECOMMENDATION_START ---
+[full recommendation output per required_recommendation_output format in policy]
+--- MWS_RECOMMENDATION_END ---
 
-def build_prompt(policy: str, macro: str, holdings: str, tracker: str,
-                 history_csv: str, recent: str, analytics: str,
-                 trigger: str, run_date: str) -> str:
-    return f"""You are the MWS portfolio runner executing a full systematic run.
+==============================================================================
+## INPUTS
+==============================================================================
 
-Run date: {run_date}
-Trigger: {trigger}
+### POLICY (mws_policy.json — ticker_constraints omitted for brevity)
+```json
+{json.dumps(policy_trimmed, indent=2, ensure_ascii=False)}
+```
 
-Follow the 8-step run protocol in mws_policy.json → news_intelligence.run_protocol exactly.
+### GOVERNANCE RATIONALE (mws_macro.md)
+{macro_text}
 
-STEP 1 is to search the web for current news across all 8 categories defined in
-mws_policy.json → news_intelligence.generation_protocol. Rate each item HIGH/MEDIUM/LOW.
-Assess signal–news interactions for HIGH items.
+### CURRENT HOLDINGS (mws_holdings.csv)
+```
+{hold_str}
+```
 
-After completing all 8 steps, produce your output in TWO clearly separated sections:
+### SYSTEM STATE (mws_tracker.json)
+```json
+{state_str}
+```
 
-━━━ SECTION A: mws_market_context.md ━━━
-The full auto-generated market context file content (this will be written back to the repo).
-Follow the output_format spec in news_intelligence.generation_protocol exactly.
+### PORTFOLIO VALUE & DRAWDOWN
+- Total Portfolio Value: ${analytics['total_val']:,.2f} (as of {analytics['val_asof']})
+- Drawdown State: {dd['state'].upper()} | Current drawdown: {abs(dd.get('drawdown', 0)) * 100:.1f}%
 
-━━━ SECTION B: MWS RECOMMENDATION ━━━
-The full recommendation following the required_recommendation_output format in
-mws_policy.json → news_intelligence.required_recommendation_output.
-Include:
-- holdings_staleness_note: flag if holdings file is >3 trading days old
-- sleeve_targets: target weight % per sleeve
-- trade_list: specific buy/sell/hold per ticker with rationale
-- gate_decisions: defer/execute/spike_trim per ticker with z-score
-- news_overlay_summary: how news affected the recommendation
-- override_review_candidates: any HIGH-materiality contradictions
-- proposed_rule_changes: explicit proposals with rationale (if any)
-- proposed_code_changes: explicit proposals with rationale (if any)
+### MOMENTUM RANKINGS (computed by mws_analytics.py)
+```
+{scores_str}
+```
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+### EXECUTION GATE RESULTS (per-ticker, BUY direction)
+```
+{gates_str}
+```
 
-INPUT FILES:
-────────────────────────────────────────
-FILE: mws_policy.json
-{policy}
-
-────────────────────────────────────────
-FILE: mws_macro.md
-{macro}
-
-────────────────────────────────────────
-FILE: mws_holdings.csv
-{holdings}
-
-────────────────────────────────────────
-FILE: mws_tracker.json
-{tracker}
-
-────────────────────────────────────────
-FILE: mws_recent_performance.csv (last 30 days)
-{recent}
-
-────────────────────────────────────────
-FILE: mws_ticker_history.csv (last {HISTORY_TAIL_DAYS} rows per ticker)
-{history_csv}
-
-────────────────────────────────────────
-ANALYTICS SUMMARY (pre-computed by mws_analytics.py)
-{analytics}
+### MISSING FROM HISTORY
+{analytics['missing_hist'] if analytics['missing_hist'] else 'None'}
 """
 
 
-def parse_sections(response_text: str) -> tuple[str, str]:
-    """Split Claude's response into market context and recommendation."""
-    ctx_marker  = "SECTION A: mws_market_context.md"
-    rec_marker  = "SECTION B: MWS RECOMMENDATION"
+# ── Step 3: Call Claude API ───────────────────────────────────────────────────
 
-    ctx_start = response_text.find(ctx_marker)
-    rec_start = response_text.find(rec_marker)
+def call_claude(prompt: str) -> str:
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY environment variable not set.")
 
-    if ctx_start == -1 or rec_start == -1:
-        # Fallback: treat whole response as recommendation
-        return "", response_text
+    client = anthropic.Anthropic(api_key=api_key)
 
-    ctx_content = response_text[ctx_start + len(ctx_marker):rec_start].strip("━ \n")
-    rec_content = response_text[rec_start + len(rec_marker):].strip("━ \n")
-    return ctx_content, rec_content
+    log.info("Calling Claude API (model=%s, max_tokens=%d)...", MODEL, MAX_TOKENS)
 
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        tools=[{"type": "web_search_20250305", "name": "web_search"}],
+        messages=[{"role": "user", "content": prompt}],
+    )
 
-def write_market_context(content: str, run_date: str) -> None:
-    header = (f"# MWS Market Context — AUTO-GENERATED {run_date}\n"
-              f"_Generated by LLM runner (GitHub Actions). "
-              f"Do not edit manually. Overwritten each run._\n\n")
-    CONTEXT_FILE.write_text(header + content, encoding="utf-8")
-    print(f"  ✓ mws_market_context.md written ({len(content):,} chars)")
+    # Concatenate all text blocks (tool results are interleaved but text is what we want)
+    full_text = ""
+    for block in response.content:
+        if hasattr(block, "text"):
+            full_text += block.text
 
-
-def append_run_results(run_date: str, trigger: str, recommendation_summary: str) -> None:
-    file_exists = RESULTS_FILE.exists()
-    with open(RESULTS_FILE, "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(["run_date", "trigger", "source", "summary"])
-        # Truncate recommendation to first 500 chars for the log
-        short = recommendation_summary[:500].replace("\n", " ")
-        writer.writerow([run_date, trigger, "github_actions", short])
-    print(f"  ✓ mws_run_results.csv appended")
+    log.info("Claude response: %d chars, stop_reason=%s", len(full_text), response.stop_reason)
+    return full_text
 
 
-def send_via_gas_webhook(subject: str, body: str) -> None:
-    if not GAS_WEBHOOK_URL:
-        print("  WARNING: GAS_WEBHOOK_URL not set — skipping email dispatch")
+# ── Step 4: Parse and write mws_market_context.md ────────────────────────────
+
+def extract_section(text: str, start_tag: str, end_tag: str) -> str:
+    if start_tag in text and end_tag in text:
+        return text.split(start_tag)[1].split(end_tag)[0].strip()
+    return ""
+
+def write_market_context(response_text: str) -> None:
+    content = extract_section(
+        response_text,
+        "--- MWS_MARKET_CONTEXT_START ---",
+        "--- MWS_MARKET_CONTEXT_END ---",
+    )
+    if not content:
+        content = (
+            f"# MWS Market Context — AUTO-GENERATED {TODAY}\n\n"
+            "_Context extraction failed — see full run log in GitHub Actions._\n"
+        )
+        log.warning("Could not extract MWS_MARKET_CONTEXT section from response.")
+
+    with open(MARKET_CTX_FILE, "w", encoding="utf-8") as f:
+        f.write(content)
+    log.info("Wrote %s (%d chars)", MARKET_CTX_FILE, len(content))
+
+
+# ── Step 5: Send email ────────────────────────────────────────────────────────
+
+def send_email(response_text: str) -> None:
+    password  = os.environ.get("GMAIL_APP_PASSWORD")
+    from_addr = os.environ.get("GMAIL_FROM", "bhatnagar.vivek@gmail.com")
+    to_addr   = os.environ.get("GMAIL_TO",   "bhatnagar.vivek@gmail.com")
+
+    if not password:
+        log.warning("GMAIL_APP_PASSWORD not set — skipping email. Output committed to repo.")
         return
+
+    recommendation = extract_section(
+        response_text,
+        "--- MWS_RECOMMENDATION_START ---",
+        "--- MWS_RECOMMENDATION_END ---",
+    ) or response_text  # fallback: send full response
+
+    subject = f"MWS Run — {TODAY} — {TRIGGER_REASON}"
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"]    = from_addr
+    msg["To"]      = to_addr
+    msg.attach(MIMEText(recommendation, "plain"))
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(from_addr, password)
+        smtp.sendmail(from_addr, to_addr, msg.as_string())
+
+    log.info("Email sent to %s", to_addr)
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    log.info("=== MWS GitHub Runner start | %s | trigger=%s ===", TODAY, TRIGGER_REASON)
+
     try:
-        payload = {"subject": subject, "body": body, "source": "github_actions"}
-        resp = requests.post(GAS_WEBHOOK_URL, json=payload, timeout=30)
-        resp.raise_for_status()
-        print(f"  ✓ Email dispatched via GAS webhook (status {resp.status_code})")
+        analytics = run_analytics()
+        log.info("Analytics complete — %d candidates, TPV $%.0f",
+                 len(analytics["candidates"]), analytics["total_val"])
+
+        prompt = build_prompt(analytics)
+        log.info("Prompt built (%d chars)", len(prompt))
+
+        response = call_claude(prompt)
+
+        write_market_context(response)
+        send_email(response)
+
+        log.info("=== MWS GitHub Runner complete ===")
+
     except Exception as e:
-        print(f"  WARNING: GAS webhook failed: {e}")
-        print("  (Recommendation is committed to repo — check mws_market_context.md)")
-
-
-# ── Main ───────────────────────────────────────────────────────────────────────
-
-def main():
-    if not ANTHROPIC_API_KEY:
-        sys.exit("ERROR: ANTHROPIC_API_KEY environment variable not set")
-
-    run_date = date.today().isoformat()
-    print(f"\n{'='*60}")
-    print(f"MWS GitHub Actions Run — {run_date}")
-    print(f"Trigger: {TRIGGER_REASON}")
-    print(f"{'='*60}\n")
-
-    # ── Load inputs ───────────────────────────────────────────────────────────
-    print("Loading input files...")
-    policy   = load_file(POLICY_FILE,   "mws_policy.json")
-    macro    = load_file(MACRO_FILE,    "mws_macro.md")
-    holdings = load_file(HOLDINGS_FILE, "mws_holdings.csv")
-    tracker  = load_file(TRACKER_FILE,  "mws_tracker.json")
-    recent   = load_file(RECENT_FILE,   "mws_recent_performance.csv")
-    hist_csv = history_tail(HISTORY_FILE, HISTORY_TAIL_DAYS)
-
-    print("\nRunning analytics...")
-    analytics = compute_analytics_summary()
-    print()
-
-    # ── Build prompt ─────────────────────────────────────────────────────────
-    prompt = build_prompt(
-        policy, macro, holdings, tracker,
-        hist_csv, recent, analytics,
-        TRIGGER_REASON, run_date
-    )
-    print(f"Prompt size: {len(prompt):,} chars")
-
-    # ── Call Claude ───────────────────────────────────────────────────────────
-    print(f"\nCalling Claude API ({CLAUDE_MODEL})...")
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
-    message = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=8192,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    response_text = message.content[0].text
-    print(f"  ✓ Response received ({len(response_text):,} chars, "
-          f"{message.usage.input_tokens:,} in / {message.usage.output_tokens:,} out tokens)")
-
-    # ── Parse and write outputs ───────────────────────────────────────────────
-    print("\nParsing response...")
-    ctx_content, rec_content = parse_sections(response_text)
-
-    print("Writing outputs...")
-    if ctx_content:
-        write_market_context(ctx_content, run_date)
-    else:
-        print("  WARNING: Could not parse Section A — mws_market_context.md not updated")
-
-    append_run_results(run_date, TRIGGER_REASON, rec_content)
-
-    # ── Email ─────────────────────────────────────────────────────────────────
-    print("\nDispatching email...")
-    subject = f"MWS Run — {run_date} ({TRIGGER_REASON})"
-    email_body = f"MWS automated run completed.\n\n{rec_content}"
-    send_via_gas_webhook(subject, email_body)
-
-    # ── Done ──────────────────────────────────────────────────────────────────
-    print(f"\n{'='*60}")
-    print(f"✅  Run complete — {run_date}")
-    print(f"    Outputs committed by workflow step (git-auto-commit)")
-    print(f"{'='*60}\n")
+        log.error("Runner failed: %s", e)
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
