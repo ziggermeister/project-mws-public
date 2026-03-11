@@ -42,7 +42,7 @@ TODAY          = datetime.now().strftime("%Y-%m-%d")
 TRIGGER_REASON = os.environ.get("TRIGGER_REASON", "scheduled")
 # Model is env-configurable — set ANTHROPIC_MODEL secret in GitHub Actions to override.
 # claude-3-5-sonnet-20241022 is the default: widely available, supports web_search_20250305.
-MODEL          = os.environ.get("ANTHROPIC_MODEL") or "claude-3-5-sonnet-20241022"
+MODEL          = os.environ.get("ANTHROPIC_MODEL") or "claude-sonnet-4-5-20251001"
 MAX_TOKENS     = 16000
 # File paths — single source of truth lives in mws_analytics; imported here
 POLICY_FILE     = mws_analytics.POLICY_FILENAME
