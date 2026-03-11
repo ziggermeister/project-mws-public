@@ -20,7 +20,7 @@ git add \
   daily-emailer/DailyEmailRunner.js \
   daily-emailer/VnextContract.js \
   commit_and_run.sh \
-  mws_titanium_runner.py \
+  mws_analytics.py \
   mws_macro.md \
   mws_tracker.json
 
@@ -36,6 +36,6 @@ else
 fi
 
 echo "Running Titanium runner..."
-python3 mws_titanium_runner.py
+python3 mws_analytics.py
 
 echo "Done."

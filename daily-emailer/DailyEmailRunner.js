@@ -170,7 +170,7 @@ function getPolicyRequiredTickers_(policy) {
 
   // Add every ticker that appears in ticker_constraints regardless of lifecycle stage
   // so that inducted, watchlist, and phasing-out tickers are all tracked in HIST.
-  // Mirrors Python's get_policy_required_tickers() in mws_titanium_runner.py.
+  // Mirrors Python's get_policy_required_tickers() in mws_analytics.py.
   // Fixed-price synthetic assets (e.g. CASH, TREASURY_NOTE) — never real market tickers
   const fixedPrices = policy?.governance?.fixed_asset_prices || {};
   const syntheticTickers = new Set(Object.keys(fixedPrices).map(t => String(t).trim().toUpperCase()));
@@ -960,7 +960,7 @@ function isMonday_(ymd) {
   return new Date(y, m - 1, d).getDay() === 1;
 }
 
-// Display names for benchmark tickers — mirrors BENCH_DISPLAY_NAMES in mws_titanium_runner.py
+// Display names for benchmark tickers — mirrors BENCH_DISPLAY_NAMES in mws_analytics.py
 const BENCH_DISPLAY_NAMES_ = {
   "SPY":  "S&P 500",
   "VTI":  "Total Market",
@@ -975,7 +975,7 @@ function benchDisplay_(ticker) {
   return BENCH_DISPLAY_NAMES_[String(ticker).trim().toUpperCase()] || String(ticker).trim().toUpperCase();
 }
 
-// Color palette — matches mws_titanium_runner.py exactly
+// Color palette — matches mws_analytics.py exactly
 const CHART_COLORS_ = {
   titanium: "#1f77b4",   // blue
   b0:       "#e69500",   // orange

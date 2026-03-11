@@ -1,5 +1,5 @@
 """
-test_mws.py — Unit tests for mws_titanium_runner.py
+test_mws.py — Unit tests for mws_analytics.py
 
 Run with:
     python -m pytest test_mws.py -v
@@ -32,7 +32,7 @@ matplotlib.use("Agg")
 # ---------------------------------------------------------------------------
 # Import the module under test
 # ---------------------------------------------------------------------------
-import mws_titanium_runner as mws
+import mws_analytics as mws
 
 
 # ===========================================================================

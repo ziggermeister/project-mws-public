@@ -1489,7 +1489,7 @@
     }
   },
   "news_intelligence": {
-    "_note": "Framework for incorporating real-world news and market context into LLM-based run execution. The Python runner (mws_titanium_runner.py) computes momentum scores, charts, and breach alerts. The LLM is the actual execution engine that produces final recommendations. News is an advisory overlay — it modifies execution decisions but does not override hard policy rules.",
+    "_note": "Framework for incorporating real-world news and market context into LLM-based run execution. The Python runner (mws_analytics.py) computes momentum scores, charts, and breach alerts. The LLM is the actual execution engine that produces final recommendations. News is an advisory overlay — it modifies execution decisions but does not override hard policy rules.",
     "architecture": {
       "role": "advisory_overlay",
       "primary_signal": "systematic momentum + policy constraints (mws_policy.json)",
@@ -1769,7 +1769,7 @@
           },
           {
             "file": "python_output",
-            "role": "Momentum scores, breach flags, vol diagnostics, charts. Produced by mws_titanium_runner.py immediately before LLM run."
+            "role": "Momentum scores, breach flags, vol diagnostics, charts. Produced by mws_analytics.py immediately before LLM run."
           },
           {
             "file": "mws_market_context.md",

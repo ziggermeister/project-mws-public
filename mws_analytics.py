@@ -284,7 +284,7 @@ def get_ticker_sleeve(policy: dict, ticker: str) -> str:
 # ==============================================================================
 # 3) Audit + valuation
 # ==============================================================================
-def run_titanium_audit(policy: dict, state: dict, hist: pd.DataFrame, hold: pd.DataFrame):
+def run_mws_audit(policy: dict, state: dict, hist: pd.DataFrame, hold: pd.DataFrame):
     logger.info("Phase 1: Starting Titanium Hard-Stop Audit...")
 
     policy_required = get_policy_required_tickers(policy)
@@ -1660,7 +1660,7 @@ def main() -> None:
     else:
         logger.info("Drawdown status: normal (current %.1f%%)", abs(dd["drawdown"]) * 100)
 
-    candidates, _, _ = run_titanium_audit(policy, state, hist, hold)
+    candidates, _, _ = run_mws_audit(policy, state, hist, hold)
     _ = calculate_portfolio_value(policy, hold, hist)
 
     df_scores = generate_rankings(policy, hist, candidates, hold)

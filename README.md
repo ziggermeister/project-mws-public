@@ -34,7 +34,7 @@ A systematic, rules-based portfolio management system for a personal investment 
 ### Execution
 | File | Role |
 |------|------|
-| [`mws_titanium_runner.py`](mws_titanium_runner.py) | Python engine — price fetch, momentum calc, rebalance |
+| [`mws_analytics.py`](mws_analytics.py) | Python engine — price fetch, momentum calc, rebalance |
 | [`daily-emailer/DailyEmailRunner.js`](daily-emailer/DailyEmailRunner.js) | Google Apps Script daily digest emailer |
 
 ### Outputs
@@ -111,5 +111,5 @@ https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_trac
 https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_ticker_history.csv
 https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_recent_performance.csv
 https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_macro.md
-https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_titanium_runner.py
+https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_analytics.py
 ```
