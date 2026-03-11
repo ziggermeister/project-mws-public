@@ -2,16 +2,14 @@
 """
 mws_fetch_history.py
 ────────────────────
-One-shot script to extend mws_ticker_history.csv back to 2019-01-01.
-Run once from the terminal — requires network access.
+Extends mws_ticker_history.csv back to 2019-01-01.
+Uses Yahoo Finance chart API directly via requests — does NOT go through
+fc.yahoo.com (the yfinance cookie-auth endpoint that is often blocked).
 
 Usage:
     python3 mws_fetch_history.py
 
-Output:
-    mws_ticker_history.csv  (overwritten in-place, full history 2019→today)
-
-After running, commit the updated CSV:
+After running:
     git add mws_ticker_history.csv
     git commit -m "data: extend ticker history to 2019-01-01 for F1 vol clamp validation"
     git push origin main
@@ -19,15 +17,19 @@ After running, commit the updated CSV:
 
 import sys
 import time
+import math
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
+
 import pandas as pd
 
 try:
-    import yfinance as yf
+    import requests
 except ImportError:
-    sys.exit("yfinance not installed. Run: pip install yfinance")
+    sys.exit("requests not installed. Run: pip install requests")
 
-# ── Tickers ──────────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 PORTFOLIO = [
     "VTI", "VXUS",
     "SOXQ", "CHAT", "BOTZ", "DTCR", "GRID",
@@ -47,7 +49,6 @@ REFERENCE = [
 
 ALL_TICKERS = PORTFOLIO + REFERENCE
 
-# Tickers known to have limited history — don't warn on these
 SHORT_HISTORY_EXPECTED = {
     "CHAT", "DTCR", "GRID", "SOXQ", "DBMF", "KMLM", "IBIT", "IAUM"
 }
@@ -55,71 +56,124 @@ SHORT_HISTORY_EXPECTED = {
 START_DATE = "2019-01-01"
 OUT_FILE   = Path(__file__).parent / "mws_ticker_history.csv"
 
-# ── Fetch per ticker (avoids batch-download fc.yahoo.com auth issues) ────────
+# ── Yahoo Finance v8 chart API (no cookie required) ───────────────────────────
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+}
+
+BASE_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+FALLBACK_URL = "https://query2.finance.yahoo.com/v8/finance/chart/{ticker}"
+
+
+def to_unix(date_str: str) -> int:
+    dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
+def fetch_ticker(ticker: str, start: str) -> Optional[pd.DataFrame]:
+    display = "INDEXCBOE:VIX" if ticker == "^VIX" else ticker
+    params = {
+        "period1": to_unix(start),
+        "period2": int(datetime.now(timezone.utc).timestamp()),
+        "interval": "1d",
+        "events": "history",
+        "includeAdjustedClose": "true",
+    }
+
+    for url_template in (BASE_URL, FALLBACK_URL):
+        url = url_template.format(ticker=ticker)
+        try:
+            resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+
+            result = data.get("chart", {}).get("result")
+            if not result:
+                continue
+
+            r = result[0]
+            timestamps = r.get("timestamp", [])
+            adjclose = (
+                r.get("indicators", {})
+                 .get("adjclose", [{}])[0]
+                 .get("adjclose", [])
+            )
+
+            if not timestamps or not adjclose:
+                continue
+
+            dates = pd.to_datetime(timestamps, unit="s", utc=True).tz_localize(None)
+            df = pd.DataFrame({
+                "Date": dates.normalize(),   # strip time component
+                "Ticker": display,
+                "AdjClose": [round(v, 6) if v and not math.isnan(v) else None
+                             for v in adjclose],
+            }).dropna(subset=["AdjClose"])
+
+            return df
+
+        except requests.exceptions.RequestException as e:
+            last_err = e
+            continue
+
+    return None
+
+
+# ── Main ───────────────────────────────────────────────────────────────────────
 print(f"Fetching {len(ALL_TICKERS)} tickers from {START_DATE} to today ...")
-print("(Using per-ticker fetch to avoid batch-download auth issues)\n")
+print("(Direct Yahoo Finance chart API — bypasses fc.yahoo.com)\n")
 
 frames = []
 failed = []
 
 for i, ticker in enumerate(ALL_TICKERS, 1):
-    display = "INDEXCBOE:VIX" if ticker == "^VIX" else ticker
-    try:
-        hist = yf.Ticker(ticker).history(start=START_DATE, auto_adjust=True)
-        if hist.empty:
-            print(f"  [{i:2d}/{len(ALL_TICKERS)}] {ticker:<12} — NO DATA")
-            failed.append(ticker)
-            continue
-
-        # Normalise to flat long-form
-        hist = hist[["Close"]].copy()
-        hist.index = pd.to_datetime(hist.index).tz_localize(None)  # strip tz
-        hist = hist.rename(columns={"Close": "AdjClose"})
-        hist["Ticker"] = display
-        hist = hist.reset_index().rename(columns={"index": "Date", "Datetime": "Date"})
-        hist = hist[["Date", "Ticker", "AdjClose"]].dropna()
-
-        frames.append(hist)
-        print(f"  [{i:2d}/{len(ALL_TICKERS)}] {ticker:<12} — {len(hist):>5} rows  "
-              f"({hist['Date'].min().date()} → {hist['Date'].max().date()})")
-
-    except Exception as e:
-        print(f"  [{i:2d}/{len(ALL_TICKERS)}] {ticker:<12} — ERROR: {e}")
+    df = fetch_ticker(ticker, START_DATE)
+    if df is None or df.empty:
+        print(f"  [{i:2d}/{len(ALL_TICKERS)}] {ticker:<12} — NO DATA")
         failed.append(ticker)
+    else:
+        frames.append(df)
+        print(f"  [{i:2d}/{len(ALL_TICKERS)}] {ticker:<12} — "
+              f"{len(df):>5} rows  "
+              f"({df['Date'].min().date()} → {df['Date'].max().date()})")
 
-    # Small delay to avoid rate-limiting
-    time.sleep(0.3)
+    time.sleep(0.25)
 
 if not frames:
-    sys.exit("\nERROR: No data fetched. Check network connection.")
+    sys.exit("\nERROR: No data fetched. Check network — try: curl https://query1.finance.yahoo.com/")
 
-# ── Combine and write ─────────────────────────────────────────────────────────
+# ── Write ─────────────────────────────────────────────────────────────────────
 long = pd.concat(frames, ignore_index=True)
-long["AdjClose"] = long["AdjClose"].round(6)
 long = long.sort_values(["Ticker", "Date"])
-
 long.to_csv(OUT_FILE, index=False)
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 print(f"\n{'='*60}")
-print(f"✅  Saved {len(long):,} rows → {OUT_FILE}")
+print(f"✅  Saved {len(long):,} rows → {OUT_FILE.name}")
 print(f"    Date range : {long['Date'].min().date()} → {long['Date'].max().date()}")
 print(f"    Tickers    : {long['Ticker'].nunique()}")
 
 if failed:
-    print(f"\n⚠️  Failed tickers ({len(failed)}): {failed}")
+    print(f"\n⚠️  Failed ({len(failed)}): {failed}")
 
 counts = long.groupby("Ticker")["Date"].count().sort_values(ascending=False)
 print("\nRows per ticker:")
 print(counts.to_string())
 
-short = counts[(counts < 1000) & (~counts.index.isin(SHORT_HISTORY_EXPECTED))]
+short = counts[
+    (counts < 1000) &
+    (~counts.index.isin(SHORT_HISTORY_EXPECTED))
+]
 if not short.empty:
-    print(f"\n⚠️  Unexpectedly short history (<1000 rows):")
-    print(short.to_string())
+    print(f"\n⚠️  Unexpectedly short history (<1000 rows): {short.index.tolist()}")
 
-print("\nNext step:")
+print("\nNext steps:")
 print("  git add mws_ticker_history.csv")
 print("  git commit -m 'data: extend ticker history to 2019-01-01 for F1 vol clamp validation'")
 print("  git push origin main")
-print("  Then re-open Claude and say: ready to run F1 stress test")
+print("  Then tell Claude: ready to run F1")
