@@ -1168,6 +1168,48 @@
         "emp_p975": 0.0268,
         "ewma_emp_gap": -0.0058
       }
+    },
+    "monitoring_design": {
+      "_note": "Three-layer monitoring framework. Recommended by ChatGPT post-v2.9.4 review (2026-03-11), referencing Hendricks VaR evaluation, ESRB procyclicality, and WFE impulse-response literature.",
+      "tail_calibration_drift": {
+        "frequency": "monthly",
+        "description": "Per-ticker tail calibration audit. Tracks empirical p2.5/p97.5 for 2-day returns, implied effective sigma (quantile ÷ vol estimate), and pp gap vs current gate thresholds.",
+        "new_v294_addition": {
+          "metric": "n_tail_obs",
+          "definition": "Number of 2-day return observations in the calibration window that fall above emp_p97.5 (buy-side) or below emp_p2.5 (sell-side).",
+          "rationale": "Hendricks (1996): extreme quantile estimates can be driven by only a few observations and shift abruptly with finite windows. If n_tail < 5, flag the pp gap as statistically unreliable regardless of magnitude.",
+          "alert_threshold": "n_tail < 5 → suppress recalibration recommendation; add 'low_sample' flag to audit output"
+        },
+        "tickers_under_watch": [
+          "IAUM",
+          "URNM"
+        ],
+        "action": "No change to gate parameters until pp gap exceeds threshold for 2 consecutive monthly runs AND n_tail >= 5."
+      },
+      "clamp_binding_diagnostics": {
+        "frequency": "monthly, plus event-driven after any vol spike",
+        "description": "Per-ticker clamp activation statistics computed from gate evaluation logs.",
+        "metrics": [
+          "floor_binding_rate_pct: % of gate evaluations in period where vol_clamp_type == 'floor'",
+          "ceiling_binding_rate_pct: % of gate evaluations in period where vol_clamp_type == 'ceiling'",
+          "clamp_impact_ratio: mean(effective_vol_2d / raw_vol_2d) for the period — 1.0 = no clamp effect"
+        ],
+        "rationale": "Measures 'tool activation' analogous to procyclicality-mitigation frameworks (Bank of Canada, ESRB). Detects if clamp is binding more frequently than expected, which could signal a regime shift warranting recalibration of 0.75×/1.50× bounds.",
+        "alert_threshold": "ceiling_binding_rate_pct > 15% for any ticker over a rolling 63-day window → flag for review. Floor > 30% for any ticker → flag for review.",
+        "data_source": "vol_clamp_type field in gate evaluation return dicts (logged per trade)"
+      },
+      "outcome_based_kpis": {
+        "frequency": "quarterly",
+        "description": "Gate effectiveness metrics computed from mws_run_results.csv. Measures whether the gate is adding or subtracting value relative to immediate execution.",
+        "metrics": [
+          "deferral_rate_by_ticker_direction: % of gate evaluations resulting in 'defer' per ticker/BUY/SELL",
+          "mean_defer_duration_days: average calendar days between defer decision and eventual execution",
+          "slippage_proxy: (execution_price - signal_time_price) / signal_time_price, sign-adjusted for direction — positive = gate improved entry/exit timing"
+        ],
+        "rationale": "Industry volatility-control methodologies add turnover buffers because volatility-estimation noise causes churn. Quarterly KPI review verifies the vol clamp (v2.9.4) does not increase deferral frequency or churn in calm periods (floor binding side-effect check).",
+        "implementation_status": "pending — requires lightweight audit script reading mws_run_results.csv. No runner changes needed.",
+        "target_version": "v2.9.5 audit script"
+      }
     }
   },
   "drawdown_rules": {
@@ -1269,7 +1311,7 @@
               "ceiling_breach": false
             }
           },
-          "verdict": "NOT CONFIRMED. EWMA/RV1y ratios at both stress onsets were 0.86–1.11 in the first 30 trading days — well below the 1.50× ceiling. The Bank of Canada scenario (EWMA spiking above a calm-window ceiling at onset) did not materialise in either 2020 COVID or 2022 rate shock. 1y RV1y lookback is sufficient; no need to extend to 3y or 5y unconditional vol."
+          "verdict": "NOT CONFIRMED EMPIRICALLY. After extending mws_ticker_history.csv back to 2019, the Bank of Canada concern became testable for the first time (it required stress onsets with a calm prior-year RV1y window — absent in the Sep 2024–Mar 2026 data). EWMA/RV1y ratios in the first 30 trading days of both stress onsets were 0.86–1.11 — well below the 1.50× ceiling. The scenario (EWMA spiking above a calm-window ceiling at onset) did not materialise in either 2020 COVID or 2022 rate shock. 1y RV1y lookback is sufficient; no need to extend to 3y or 5y unconditional vol. Resolved as: concern not empirically confirmed on 7-year dataset spanning two stress regimes."
         },
         "stress_period_clamp_behavior": {
           "COVID_onset_2020_full_window": {
