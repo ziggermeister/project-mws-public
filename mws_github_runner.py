@@ -29,6 +29,7 @@ import smtplib
 import sys
 import traceback
 from datetime import datetime
+from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -296,11 +297,22 @@ def send_email(response_text: str) -> None:
 
     subject = f"MWS Run — {TODAY} — {TRIGGER_REASON}"
 
-    msg = MIMEMultipart("alternative")
+    msg = MIMEMultipart("mixed")
     msg["Subject"] = subject
     msg["From"]    = from_addr
     msg["To"]      = to_addr
     msg.attach(MIMEText(recommendation, "plain"))
+
+    # Attach equity curve chart if available
+    chart_path = mws_analytics.CHART_FILENAME
+    if os.path.exists(chart_path):
+        with open(chart_path, "rb") as f:
+            img = MIMEImage(f.read(), name=chart_path)
+            img.add_header("Content-Disposition", "attachment", filename=chart_path)
+            msg.attach(img)
+        log.info("Chart attached: %s", chart_path)
+    else:
+        log.warning("Chart not found, sending without attachment: %s", chart_path)
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
         smtp.login(from_addr, password)
@@ -318,6 +330,13 @@ def main() -> None:
         analytics = run_analytics()
         log.info("Analytics complete — %d candidates, TPV $%.0f",
                  len(analytics["candidates"]), analytics["total_val"])
+
+        # Generate equity curve chart (saved to mws_equity_curve.png)
+        try:
+            mws_analytics.rotate_and_chart(analytics["df_scores"], analytics["policy"])
+            log.info("Chart generated: %s", mws_analytics.CHART_FILENAME)
+        except Exception as chart_err:
+            log.warning("Chart generation skipped: %s", chart_err)
 
         prompt = build_prompt(analytics)
         log.info("Prompt built (%d chars)", len(prompt))

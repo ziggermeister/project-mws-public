@@ -2,26 +2,28 @@
 """
 mws_fetch_history.py
 ────────────────────
-Extends mws_ticker_history.csv back to 2019-01-01.
-Uses Stooq (stooq.com) — free, no auth, returns CSV directly.
+Fetches/extends mws_ticker_history.csv using Stooq (free, no auth).
+
+Modes:
+    Full (default):
+        python3 mws_fetch_history.py
+        Fetches from 2019-01-01 to today. Use once to bootstrap history.
+
+    Incremental:
+        python3 mws_fetch_history.py --days 60
+        Fetches the last N days only and merges into the existing CSV.
+        Used by the daily GitHub Actions workflow for efficient daily updates.
 
 NOTE: Stooq provides split-adjusted + dividend-adjusted closing prices
-for US ETFs and stocks. The "Close" column in their output is the
-total-return adjusted price, equivalent to Yahoo Finance's "Adj Close".
-
-Usage:
-    python3 mws_fetch_history.py
-
-After running:
-    git add mws_ticker_history.csv
-    git commit -m "data: extend ticker history to 2019-01-01 for F1 vol clamp validation"
-    git push origin main
+for US ETFs and stocks. The "Close" column is the total-return adjusted
+price, equivalent to Yahoo Finance's "Adj Close".
 """
 
+import argparse
 import sys
 import time
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +33,15 @@ try:
     import requests
 except ImportError:
     sys.exit("requests not installed. Run: pip install requests")
+
+# ── CLI args ──────────────────────────────────────────────────────────────────
+_parser = argparse.ArgumentParser(description="Fetch MWS ticker price history from Stooq")
+_parser.add_argument(
+    "--days", type=int, default=None, metavar="N",
+    help="Incremental mode: fetch only the last N days and merge with existing CSV",
+)
+_args = _parser.parse_args()
+INCREMENTAL_DAYS: int | None = _args.days
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PORTFOLIO = [
@@ -140,14 +151,37 @@ def fetch_ticker(ticker: str, start: str) -> Optional[pd.DataFrame]:
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
-print(f"Fetching {len(ALL_TICKERS)} tickers from {START_DATE} to today ...")
+
+# Determine fetch start date
+if INCREMENTAL_DAYS is not None:
+    # Incremental: find last date in existing CSV, fetch from (last - 5 days) as overlap buffer
+    if OUT_FILE.exists():
+        try:
+            existing = pd.read_csv(OUT_FILE, parse_dates=["Date"])
+            last_date = existing["Date"].max()
+            fetch_start = (last_date - timedelta(days=5)).strftime("%Y-%m-%d")
+            print(f"Incremental mode: last date in CSV = {last_date.date()}, "
+                  f"fetching from {fetch_start} (5-day overlap buffer)")
+        except Exception as e:
+            print(f"⚠️  Could not read existing CSV ({e}); falling back to full fetch")
+            existing = pd.DataFrame()
+            fetch_start = START_DATE
+    else:
+        print("No existing CSV found; falling back to full fetch")
+        existing = pd.DataFrame()
+        fetch_start = START_DATE
+else:
+    existing = pd.DataFrame()
+    fetch_start = START_DATE
+
+print(f"Fetching {len(ALL_TICKERS)} tickers from {fetch_start} to today ...")
 print("(Source: Stooq.com — no auth required)\n")
 
 frames = []
 failed = []
 
 for i, ticker in enumerate(ALL_TICKERS, 1):
-    df = fetch_ticker(ticker, START_DATE)
+    df = fetch_ticker(ticker, fetch_start)
     if df is None or df.empty:
         print(f"  [{i:2d}/{len(ALL_TICKERS)}] {ticker:<12} — NO DATA")
         failed.append(ticker)
@@ -162,9 +196,24 @@ for i, ticker in enumerate(ALL_TICKERS, 1):
 if not frames:
     sys.exit("\nERROR: No data fetched. Check: curl -s 'https://stooq.com/q/d/l/?s=spy.us&d1=20240101&d2=20240110&i=d'")
 
+# ── Merge incremental data with existing history ────────────────────────────
+fresh = pd.concat(frames, ignore_index=True)
+fresh["Date"] = pd.to_datetime(fresh["Date"])
+
+if not existing.empty and INCREMENTAL_DAYS is not None:
+    # Drop overlap window from existing, then concat fresh on top
+    cutoff = fresh["Date"].min()
+    base = existing[existing["Date"] < cutoff]
+    long = pd.concat([base, fresh], ignore_index=True)
+    print(f"\nMerged: {len(base):,} existing rows + {len(fresh):,} fresh rows")
+else:
+    long = fresh
+
+long = long.sort_values(["Ticker", "Date"]).drop_duplicates(
+    subset=["Ticker", "Date"], keep="last"
+).reset_index(drop=True)
+
 # ── Write ─────────────────────────────────────────────────────────────────────
-long = pd.concat(frames, ignore_index=True)
-long = long.sort_values(["Ticker", "Date"])
 long.to_csv(OUT_FILE, index=False)
 
 # ── Summary ───────────────────────────────────────────────────────────────────
@@ -180,15 +229,10 @@ counts = long.groupby("Ticker")["Date"].count().sort_values(ascending=False)
 print("\nRows per ticker:")
 print(counts.to_string())
 
-short = counts[
-    (counts < 1000) &
-    (~counts.index.isin(SHORT_HISTORY_EXPECTED))
-]
-if not short.empty:
-    print(f"\n⚠️  Unexpectedly short history (<1000 rows): {short.index.tolist()}")
-
-print("\nNext steps:")
-print("  git add mws_ticker_history.csv")
-print("  git commit -m 'data: extend ticker history to 2019-01-01 for F1 vol clamp validation'")
-print("  git push origin main")
-print("  Then tell Claude: ready to run F1")
+if INCREMENTAL_DAYS is None:
+    short = counts[
+        (counts < 1000) &
+        (~counts.index.isin(SHORT_HISTORY_EXPECTED))
+    ]
+    if not short.empty:
+        print(f"\n⚠️  Unexpectedly short history (<1000 rows): {short.index.tolist()}")

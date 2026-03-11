@@ -1,0 +1,40 @@
+name: MWS Daily Price Fetch
+
+on:
+  # Weekdays at 21:30 UTC (5:30 PM ET) — after US market close
+  schedule:
+    - cron: "30 21 * * 1-5"
+
+  # Manual trigger (e.g., after adding a new ticker)
+  workflow_dispatch:
+
+jobs:
+  fetch-prices:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write   # needed to commit mws_ticker_history.csv back to repo
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch latest price history (incremental — last 60 days)
+        run: python mws_fetch_history.py --days 60
+
+      - name: Commit updated ticker history
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "data: daily price update [skip ci]"
+          file_pattern: mws_ticker_history.csv
+          commit_user_name: "MWS GitHub Runner"
+          commit_user_email: "github-actions[bot]@users.noreply.github.com"
