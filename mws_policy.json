@@ -1,10 +1,10 @@
 {
   "meta": {
-    "policy_name": "MWS v2.9.2",
-    "policy_version": "v2.9.2",
+    "policy_name": "MWS v2.9.3",
+    "policy_version": "v2.9.3",
     "policy_family": "Titanium MWS",
-    "last_updated": "2026-03-10",
-    "notes": "v2.9.2: Round 4 consensus — spike_trim_cap_interaction investigation closed. Path A (monitor-only) adopted by both reviewers. Automatic 90-day rolling event counter; escalation at >5% of spike_trim events activates contingent spike_trim_reentry_buffer (0.75% weight gap, momentum buys only, does not override compliance enforcement). No hard cooldown rule added. Execution gate declared production-ready by both reviewers (ChatGPT + Gemini, 4 rounds). No changes to signal engine, allocation targets, sleeve structure, or ticker constraints."
+    "last_updated": "2026-03-11",
+    "notes": "v2.9.3: Fat-tail gate fix for SIVR and IBIT. Per-ticker gate_sigma overrides added to per_ticker_thresholds — replaces EWMA 2.0/2.5σ global defaults for these two tickers only. SIVR: gate_sigma_buy=1.25, gate_sigma_sell=1.25. IBIT: gate_sigma_buy=1.5, gate_sigma_sell=1.5. Reviewed by ChatGPT + Gemini (1 round). Unanimous: reject 1.0σ sell for SIVR (too sensitive, ~16% fire rate), adopt 1.25σ. GPT: defer vol clamp (Fix 1b) and IAUM to separate review. Gemini: include both now. Reconciliation: Fix 1 only in v2.9.3; vol clamp and IAUM logged as future_review_items. No changes to signal engine, allocation targets, sleeve structure, turnover rules, or any other gate parameters. v2.9.2: Round 4 consensus — spike_trim_cap_interaction investigation closed. Path A (monitor-only) adopted by both reviewers. Automatic 90-day rolling event counter; escalation at >5% of spike_trim events activates contingent spike_trim_reentry_buffer (0.75% weight gap, momentum buys only, does not override compliance enforcement). No hard cooldown rule added. Execution gate declared production-ready by both reviewers (ChatGPT + Gemini, 4 rounds). No changes to signal engine, allocation targets, sleeve structure, or ticker constraints."
   },
   "governance": {
     "reporting_baselines": {
@@ -916,9 +916,15 @@
           "rationale": "Both reviewers independently recommended calendar days over rebalance cycles. Frequency-independent. Stress regime shortens sell-defer to 3 days to allow timely risk reduction."
         },
         "fat_tail_tickers": {
-          "decision": "keep_ewma_uniform",
-          "flag_tickers": ["SIVR", "IBIT"],
-          "rationale": "Both reviewers agreed EWMA uniform is acceptable given position caps (SIVR max 6% TPV, IBIT max 5% TPV). Monitor flag retained."
+          "decision": "per_ticker_gate_sigma_override",
+          "fixed_tickers": ["SIVR", "IBIT"],
+          "monitor_only_tickers": ["IAUM"],
+          "rationale": "v2.9.3: Per-ticker gate_sigma overrides adopted for SIVR and IBIT after 1-round LLM review (ChatGPT + Gemini). SIVR sell-side gap was 10.82pp (EWMA 2.5σ = −17.71% vs empirical p2.5 = −6.89%) — capitulation protection functionally disabled. IBIT buy-side gap 2.36pp. Unanimous: Fix 1 (sigma override), reject Fix 3 (Student-t), SIVR gate_sigma_sell = 1.25 not 1.0 (1.0σ fires ~16% of days). Split on Fix 1b (vol clamp) and IAUM — deferred. Recalibration: annual base + manual exception if ewma_emp_gap > 3pp buy-side or 5pp sell-side for 2 consecutive monthly runs. Prior decision (v2.9.2): keep_ewma_uniform — both reviewers agreed EWMA uniform acceptable given position caps. Fat-tail issue deferred with monitor flag.",
+          "recalibration": {
+            "base_cadence": "annual",
+            "exception_trigger": "ewma_emp_gap > 3pp buy-side OR > 5pp sell-side for 2 consecutive monthly runs",
+            "exception_action": "manual gate_sigma recalibration and policy version bump"
+          }
         },
         "spike_trim_scope": {
           "decision": "extend_annotation_to_cap_breach_sells",
@@ -996,7 +1002,7 @@
         "Asymmetric sigma: sell_defer at 2.5sigma; buy_defer at 2.0sigma.",
         "Stress regime: sell_defer window shortened to 3 calendar days when soft_limit active. Buy_defer unchanged at 10 days.",
         "Turnover: deferred trade counted against originating rebalance event, not execution event. Engine must tag trades with originating_rebalance_id.",
-        "SIVR and IBIT: EWMA-implied gate wider than empirical p97.5 (SIVR +5.59pp, IBIT +2.36pp). fat_tail_monitor flag active.",
+        "SIVR and IBIT: fat_tail_fixed via per_ticker_gate_sigma_override (v2.9.3). SIVR gate_sigma_buy=1.25, gate_sigma_sell=1.25 (gates: buy 8.86%, sell 8.86%). IBIT gate_sigma_buy=1.5, gate_sigma_sell=1.5 (gates: buy 6.93%, sell 6.93%). IAUM: fat_tail_monitor only (gap 1.58pp, below 2pp threshold — deferred).",
         "Spike-trim fires when z >= +2.0 on sell-direction trade. Execution immediate. Applies to both momentum and cap-breach sells.",
         "Gate fires on ~2.5% of trading days per ticker (buy-side). Sell-side 2.5sigma fires on ~0.6% of days.",
         "Vol derivation: daily_vol = annual_vol / sqrt(252); 2d_vol = daily_vol * sqrt(2) = annual_vol / sqrt(126)."
@@ -1007,9 +1013,9 @@
       "_source": "mws_ticker_history.csv",
       "_method": "ewma_126d_annualised / sqrt(126) applied asymmetrically: buy_defer at 2.0sigma, sell_defer at 2.5sigma",
       "_note": "Thresholds recomputed at each rebalance from live EWMA vol. Values below are reference snapshot only.",
-      "SIVR":  { "vol_ann": 0.7955, "vol_2d": 0.0709, "buy_gate": 0.1417, "sell_gate": 0.1771, "emp_p975": 0.0858, "ewma_emp_gap": 0.0559, "flag": "fat_tail_monitor" },
+      "SIVR":  { "vol_ann": 0.7955, "vol_2d": 0.0709, "buy_gate": 0.0886, "sell_gate": 0.0886, "gate_sigma_buy": 1.25, "gate_sigma_sell": 1.25, "emp_p975": 0.0858, "ewma_emp_gap": 0.0559, "flag": "fat_tail_fixed", "fix_method": "per_ticker_gate_sigma_override" },
       "URNM":  { "vol_ann": 0.5377, "vol_2d": 0.0479, "buy_gate": 0.0958, "sell_gate": 0.1197, "emp_p975": 0.0881, "ewma_emp_gap": 0.0077 },
-      "IBIT":  { "vol_ann": 0.5186, "vol_2d": 0.0462, "buy_gate": 0.0924, "sell_gate": 0.1155, "emp_p975": 0.0688, "ewma_emp_gap": 0.0236, "flag": "fat_tail_monitor" },
+      "IBIT":  { "vol_ann": 0.5186, "vol_2d": 0.0462, "buy_gate": 0.0693, "sell_gate": 0.0693, "gate_sigma_buy": 1.5, "gate_sigma_sell": 1.5, "emp_p975": 0.0688, "ewma_emp_gap": 0.0236, "flag": "fat_tail_fixed", "fix_method": "per_ticker_gate_sigma_override" },
       "REMX":  { "vol_ann": 0.4684, "vol_2d": 0.0417, "buy_gate": 0.0835, "sell_gate": 0.1043, "emp_p975": 0.0784, "ewma_emp_gap": 0.0050 },
       "COPX":  { "vol_ann": 0.4569, "vol_2d": 0.0407, "buy_gate": 0.0814, "sell_gate": 0.1018, "emp_p975": 0.0693, "ewma_emp_gap": 0.0121 },
       "SOXQ":  { "vol_ann": 0.3232, "vol_2d": 0.0288, "buy_gate": 0.0576, "sell_gate": 0.0720, "emp_p975": 0.0569, "ewma_emp_gap": 0.0007 },
@@ -1058,6 +1064,24 @@
   },
   "future_review_items": {
     "_note": "Items logged for future policy review cycles. Not active constraints. Not part of execution gate.",
+    "ewma_regime_shift_vol_clamp": {
+      "status": "logged_for_future_review",
+      "source": "ChatGPT fat-tail review (2026-03-11), confirmed by Gemini",
+      "description": "EWMA volatility lags true volatility during regime transitions, causing z-score gate to oscillate between blindness (vol spike: EWMA slow to rise, threshold widens, gate stops firing) and over-firing (post-crisis: EWMA slow to fall, routine moves score as statistically extreme). Proposed fix (Fix 1b): clamp effective_vol = clamp(ewma_vol, 0.75 × realized_vol_1y, 1.50 × realized_vol_1y). Affects all tickers but disproportionate impact on SIVR and IBIT due to faster vol regime cycling. GPT recommended deferring to separate structural review; Gemini recommended including in v2.9.3. Reconciliation: defer. Bounds (0.75/1.50) are provisional and must be validated against mws_ticker_history.csv before policy adoption.",
+      "scope": "execution_gate — system-wide (all tickers)",
+      "priority": "medium",
+      "action": "Validate 0.75x/1.50x clamp bounds against historical data. Criteria: clamp binds on <5% of trading days per ticker; reduces gate over-firing after vol compression; reduces gate blindness after vol spikes. Implement as separate policy version bump.",
+      "proposed_implementation": "effective_vol_2d = clamp(ewma_vol_2d, 0.75 × realized_vol_2d_1y, 1.50 × realized_vol_2d_1y); z = ret_2d / effective_vol_2d. ~3 runner lines. Add vol_clamp_floor_multiplier and vol_clamp_ceiling_multiplier to short_term_confirmation block.",
+      "validation_caution": "Bank of Canada (2023): Vol floors anchored on a 1y realized-vol lookback may be ineffective in stress if that lookback window contains only calm periods — the floor is calibrated on calm data and will be too low to constrain EWMA during a true shock onset. Validation must include a stress-period coverage test: verify the 0.75× floor binds meaningfully during a shock year where the prior 1y-realized-vol window was calm (e.g., 2020 COVID onset, 2022 rate shock onset). If the floor fails to bind in such scenarios, consider extending the lookback window (e.g., 3y or 5y unconditional vol) or using a long-run unconditional vol estimate as the anchor instead of 1y realized vol."
+    },
+    "iaum_fat_tail_monitoring": {
+      "status": "logged_for_future_review",
+      "source": "ChatGPT + Gemini fat-tail review (2026-03-11)",
+      "description": "IAUM (gold) has ewma_emp_gap of 1.58pp (emp_p975 = 3.86%, EWMA 2σ = 5.44%). Below the 2pp intervention threshold used to select SIVR/IBIT for v2.9.3 fix. Gemini argued for inclusion (same precious-metals fat-tail structure as SIVR); GPT argued for exclusion (below threshold, keeps patch crisp). Reconciliation: exclude from v2.9.3, log for monitoring. If IAUM gap breaches 2pp buy-side or 3pp sell-side, recalibrate alongside next SIVR/IBIT recalibration cycle.",
+      "scope": "execution_gate — IAUM only",
+      "priority": "low",
+      "action": "Monitor ewma_emp_gap for IAUM in rebalance run logs. Trigger review if gap exceeds 2pp buy-side or 3pp sell-side."
+    },
     "allocation_layer_sleeve_constraint_interaction": {
       "status": "logged_for_future_review",
       "source": "ChatGPT Round 4 (2026-03-10), out-of-scope observation",
