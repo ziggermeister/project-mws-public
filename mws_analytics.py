@@ -46,11 +46,17 @@ def _bench_display(ticker: str) -> str:
     """Human-readable display name for a benchmark ticker."""
     return BENCH_DISPLAY_NAMES.get(ticker.upper(), ticker.upper())
 
+# ── File paths — single source of truth for all scripts ──────────────────────
+# mws_github_runner.py and any other scripts import these constants
+# rather than hardcoding filenames independently.
 POLICY_FILENAME  = "mws_policy.json"
 TRACKER_FILENAME = "mws_tracker.json"
 HOLDINGS_CSV     = "mws_holdings.csv"
 HISTORY_CSV      = "mws_ticker_history.csv"
 PERF_LOG_CSV     = "mws_recent_performance.csv"
+RESULTS_CSV      = "mws_run_results.csv"
+MACRO_MD         = "mws_macro.md"
+MARKET_CTX_MD    = "mws_market_context.md"
 CHART_FILENAME   = "mws_equity_curve.png"
 
 

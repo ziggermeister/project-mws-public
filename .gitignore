@@ -1,22 +1,26 @@
 # OS / junk
 .DS_Store
+*.pdf
 
 # Never publish scratch
 temp/
 
-Private config
+# Private GAS config (Drive file IDs — never commit)
 daily-emailer/CONFIG_PVT.json
 
-# Avoid publishing holdings files
+# Google Sheets shortcut files
 *.gsheet
 
 # Common secret patterns
 *.env
 
-# chart
+# Generated chart artifact (re-created on each local run)
 mws_equity_curve.png
 
-#other untracked files
+# Local utility scripts — useful on disk, not part of automated pipeline
+# convert.py: converts Chase positions.csv export → mws_holdings.csv
+# data_pull.py: old yfinance data pull (superseded by GAS + mws_fetch_history.py)
+# mws_portfolio_balancer.py: early prototype (superseded by mws_analytics.py)
 convert.py
 data_pull.py
 mws_portfolio_balancer.py

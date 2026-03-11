@@ -40,9 +40,18 @@ import mws_analytics
 # ── Constants ──────────────────────────────────────────────────────────────────
 TODAY          = datetime.now().strftime("%Y-%m-%d")
 TRIGGER_REASON = os.environ.get("TRIGGER_REASON", "scheduled")
-MODEL          = "claude-3-7-sonnet-20250219"
+# Model is env-configurable — set ANTHROPIC_MODEL secret in GitHub Actions to override.
+# claude-3-5-sonnet-20241022 is the default: widely available, supports web_search_20250305.
+MODEL          = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
 MAX_TOKENS     = 16000
-MARKET_CTX_FILE = "mws_market_context.md"
+# File paths — single source of truth lives in mws_analytics; imported here
+POLICY_FILE     = mws_analytics.POLICY_FILENAME
+TRACKER_FILE    = mws_analytics.TRACKER_FILENAME
+HOLDINGS_FILE   = mws_analytics.HOLDINGS_CSV
+HISTORY_FILE    = mws_analytics.HISTORY_CSV
+MACRO_FILE      = mws_analytics.MACRO_MD
+MARKET_CTX_FILE = mws_analytics.MARKET_CTX_MD
+RESULTS_FILE    = mws_analytics.RESULTS_CSV
 
 logging.basicConfig(
     level=logging.INFO,
@@ -135,10 +144,10 @@ def build_prompt(analytics: dict) -> str:
 
     macro_text = ""
     try:
-        with open("mws_macro.md") as f:
+        with open(MACRO_FILE) as f:
             macro_text = f.read()
     except FileNotFoundError:
-        macro_text = "[mws_macro.md not found]"
+        macro_text = f"[{MACRO_FILE} not found]"
 
     return f"""You are the MWS (Momentum-Weighted Scaling) portfolio runner. Today is {TODAY}.
 This run was triggered by: **{TRIGGER_REASON}**.

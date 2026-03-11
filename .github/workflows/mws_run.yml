@@ -38,6 +38,8 @@ jobs:
       - name: Run MWS portfolio analysis
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Optional: set ANTHROPIC_MODEL secret to override default model
+          ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           GMAIL_FROM: ${{ secrets.GMAIL_FROM }}
           GMAIL_TO: ${{ secrets.GMAIL_TO }}
