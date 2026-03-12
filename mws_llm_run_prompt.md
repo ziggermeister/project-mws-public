@@ -1,4 +1,4 @@
-<!-- MWS_LLM_RUN_PROMPT v1.6 — 2026-03-12 -->
+<!-- MWS_LLM_RUN_PROMPT v1.7 — 2026-03-12 -->
 <!-- CANONICAL MWS EXECUTION PROTOCOL — read by any LLM to run a full MWS cycle.   -->
 <!--                                                                                 -->
 <!-- The protocol never changes between runs. Only the live data changes.            -->
@@ -536,14 +536,33 @@ complete instruction set and executes the full protocol autonomously using the B
 The protocol is identical every run — only the live data differs.
 
 **Mandatory pre-analysis steps (always, in this order — Claude runs these via Bash):**
-1. **Fetch today's prices** — `python3 mws_fetch_history.py` — **never optional**;
-   stale prices produce incorrect momentum scores and invalid gate z-scores.
-2. **Run analytics** — `python3 mws_analytics.py` — produces momentum rankings, gate z-scores,
-   sleeve status, and drawdown state from the now-current history file.
-3. **Read output files** — populate all `{{PLACEHOLDER}}` values by reading the files directly
-   (mws_holdings.csv, mws_tracker.json, analytics output). Do not ask the user to paste data.
-4. **Proceed with Steps 1–8 of this protocol** — use `web_search` for Step 1 (news).
-   Produce both output blocks (market context + recommendation) per the OUTPUT FORMAT section.
+
+**Step 0 — Update holdings (always ask first):**
+Ask: "Do you have an updated portfolio/holdings to paste in before I run?"
+- If **yes**: accept the paste in whatever format the broker provides (positions export,
+  copy-paste from brokerage UI, etc.). Reformat it to match `mws_holdings.csv`:
+  - Columns: `Ticker, Shares, Class`
+  - Preserve the `Class` value from the existing `mws_holdings.csv` for all known tickers
+    (the broker doesn't know MWS sleeve assignments — do not overwrite them)
+  - For any ticker not in the existing file, ask the user which class it belongs to
+  - Include CASH (from "Cash & Cash Equivalents" or similar) as `CASH,<amount>,bucket_b`
+  - Include TREASURY_NOTE as `TREASURY_NOTE,<shares>,bucket_a` if present
+  - Write the updated file, commit it:
+    `git add mws_holdings.csv && git commit -m "holdings update <date>"`
+  - Push: `git push`
+- If **no**: proceed with the existing `mws_holdings.csv` on disk.
+
+**Step 1 — Fetch today's prices** — `python3 mws_fetch_history.py` — **never optional**;
+stale prices produce incorrect momentum scores and invalid gate z-scores.
+
+**Step 2 — Run analytics** — `python3 mws_analytics.py` — produces momentum rankings,
+gate z-scores, sleeve status, and drawdown state from the now-current history file.
+
+**Step 3 — Read output files** — populate all `{{PLACEHOLDER}}` values by reading the files
+directly (mws_holdings.csv, mws_tracker.json, analytics output). Do not ask the user to paste.
+
+**Step 4 — Execute protocol Steps 1–8** — use `web_search` for Step 1 (news).
+Produce both output blocks (market context + recommendation) per the OUTPUT FORMAT section.
 
 ### Mode 3 — Manual use with ChatGPT or Gemini
 No Bash tool available. Export and paste data manually.
@@ -560,9 +579,9 @@ No Bash tool available. Export and paste data manually.
 
 ---
 
-*End of MWS LLM Run Prompt — v1.6 — 2026-03-12*
+*End of MWS LLM Run Prompt — v1.7 — 2026-03-12*
 *Review status: CLEARED FOR PRODUCTION COMMIT.*
-*Gemini ✓ Round 1 (4 fixes) + Red-team PASS (all 4 tests). ChatGPT ✓ Round 1 (4 fixes) + Deep Research (3 fixes). v1.4 (3 runner fixes). v1.5: three-mode portability notes; price fetch made mandatory in all modes. v1.6: promoted to canonical protocol for all LLM modes; Mode 2 (Claude interactive) clarified as self-sufficient — Claude reads this file and runs full protocol autonomously. All adversarial tests pass.*
+*Gemini ✓ Round 1 (4 fixes) + Red-team PASS (all 4 tests). ChatGPT ✓ Round 1 (4 fixes) + Deep Research (3 fixes). v1.4 (3 runner fixes). v1.5: three-mode portability notes; price fetch made mandatory in all modes. v1.6: promoted to canonical protocol; Mode 2 self-sufficient. v1.7: Mode 2 Step 0 — ask for updated holdings, accept broker paste, reformat to mws_holdings.csv preserving Class, commit + push before run. All adversarial tests pass.*
 
 ---
 
