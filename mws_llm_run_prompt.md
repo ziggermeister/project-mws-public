@@ -1,4 +1,4 @@
-<!-- MWS_LLM_RUN_PROMPT v1.9 — 2026-03-12 -->
+<!-- MWS_LLM_RUN_PROMPT v2.0 — 2026-03-12 -->
 <!-- CANONICAL MWS EXECUTION PROTOCOL — read by any LLM to run a full MWS cycle.   -->
 <!--                                                                                 -->
 <!-- The protocol never changes between runs. Only the live data changes.            -->
@@ -564,30 +564,27 @@ directly (mws_holdings.csv, mws_tracker.json, analytics output). Do not ask the 
 **Step 4 — Execute protocol Steps 1–8** — use `web_search` for Step 1 (news).
 Produce both output blocks (market context + recommendation) per the OUTPUT FORMAT section.
 
-### Mode 3 — Manual local run (`./commit_and_run.sh`)
-User runs `./commit_and_run.sh` from the terminal. Equivalent to Mode 1 when env vars are set.
+### Mode 3 — On-demand GitHub Actions trigger (`python3 trigger_run.py`)
+Fires the same GitHub Actions workflow as Mode 1, on demand from the command line.
+Identical output to Mode 1 (full LLM + email). No local env vars required.
 
-**What it does (always):**
-1. Stages and commits all tracked source files (holdings, policy, runner, etc.) if changed
-2. Pushes to main
-3. Runs `mws_fetch_history.py` — fetches today's prices (mandatory, always)
-
-**Then, conditionally:**
-- If `ANTHROPIC_API_KEY` + Gmail env vars are set → runs `mws_runner.py` (full LLM + email)
-- If env vars are missing → runs `mws_analytics.py` only (local diagnostics, no LLM/email)
-
-**To get a full run:** export the four env vars before calling the script:
 ```
-export ANTHROPIC_API_KEY=...
-export GMAIL_APP_PASSWORD=...
-export GMAIL_FROM=...
-export GMAIL_TO=...
-./commit_and_run.sh
+python3 trigger_run.py           # trigger + tail logs
+python3 trigger_run.py --no-tail # trigger only, don't wait
 ```
+
+Requires `gh` CLI authenticated: `brew install gh && gh auth login`
+
+**Workflow for committing local changes then running:**
+```
+./commit_and_run.sh && python3 trigger_run.py
+```
+`commit_and_run.sh` is a separate utility that only stages, commits, and pushes
+local file changes (holdings, policy, code). It does not run the pipeline itself.
 
 ---
 
-*End of MWS LLM Run Prompt — v1.9 — 2026-03-12*
+*End of MWS LLM Run Prompt — v2.0 — 2026-03-12*
 *Review status: CLEARED FOR PRODUCTION COMMIT.*
 *Gemini ✓ Round 1 (4 fixes) + Red-team PASS (all 4 tests). ChatGPT ✓ Round 1 (4 fixes) + Deep Research (3 fixes). v1.4 (3 runner fixes). v1.5: three-mode portability notes; price fetch made mandatory in all modes. v1.6: promoted to canonical protocol; Mode 2 self-sufficient. v1.7: Mode 2 Step 0 — ask for updated holdings, accept broker paste, reformat to mws_holdings.csv preserving Class, commit + push before run. All adversarial tests pass.*
 

@@ -1,24 +1,21 @@
 #!/bin/bash
 # ─────────────────────────────────────────────────────────────────────────────
-# commit_and_run.sh  —  LOCAL workflow (laptop required)
+# commit_and_run.sh  —  Commit local file changes and push to main
 #
 # Purpose:
-#   1. Commit any changed files (holdings, policy, code, etc.) and push
-#   2. Fetch today's prices
-#   3. Run full LLM analysis + email  (if ANTHROPIC_API_KEY is set)
-#      OR run local analytics only    (if env vars are missing)
+#   Stages and commits any changed tracked files (holdings, policy, code, etc.)
+#   and pushes to main. Does NOT run the MWS pipeline.
 #
-# Full run requires:
-#   export ANTHROPIC_API_KEY=...
-#   export GMAIL_APP_PASSWORD=...
-#   export GMAIL_FROM=...
-#   export GMAIL_TO=...
+# To trigger a run after committing, use:
+#   python3 trigger_run.py           — fires GitHub Actions (full LLM + email)
 #
-# Automated cloud runs (no laptop needed):
-#   • Daily price fetch:  GitHub Actions weekdays at 21:30 UTC
-#   • LLM run:            GitHub Actions weekdays at 14:30 UTC + 21:30 UTC
-#   • On-demand LLM run:  GitHub → Actions → "MWS Portfolio Run" → Run workflow
-#   • Interactive run:    Ask Claude directly in this session
+# Or together:
+#   ./commit_and_run.sh && python3 trigger_run.py
+#
+# Run modes:
+#   Mode 1 (automated):   GitHub Actions on schedule
+#   Mode 2 (interactive): Ask Claude directly in this session
+#   Mode 3 (on-demand):   python3 trigger_run.py
 #
 # Usage:
 #   ./commit_and_run.sh
@@ -53,35 +50,11 @@ git add \
 
 # ── Commit if anything changed ────────────────────────────────────────────────
 if git diff --cached --quiet; then
-  echo "No changes to commit; skipping commit and push."
+  echo "No changes to commit."
 else
   echo "Committing..."
   git commit -m "holdings"
   echo "Pushing to main..."
   git push
+  echo "Done. To trigger a run: python3 trigger_run.py"
 fi
-
-# ── Fetch today's prices (always) ─────────────────────────────────────────────
-echo ""
-echo "Fetching today's prices..."
-python3 mws_fetch_history.py
-
-# ── Full run or local diagnostics ─────────────────────────────────────────────
-if [ -n "$ANTHROPIC_API_KEY" ] && [ -n "$GMAIL_APP_PASSWORD" ] && \
-   [ -n "$GMAIL_FROM" ] && [ -n "$GMAIL_TO" ]; then
-  echo ""
-  echo "All env vars present — running full LLM analysis + email..."
-  python3 mws_runner.py
-else
-  echo ""
-  echo "ANTHROPIC_API_KEY / Gmail env vars not set — running local analytics only."
-  echo "To run a full LLM analysis, export the required env vars and re-run:"
-  echo "  export ANTHROPIC_API_KEY=..."
-  echo "  export GMAIL_APP_PASSWORD=..."
-  echo "  export GMAIL_FROM=..."
-  echo "  export GMAIL_TO=..."
-  python3 mws_analytics.py
-fi
-
-echo ""
-echo "Done."
