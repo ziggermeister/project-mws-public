@@ -495,6 +495,7 @@ def write_market_context(response_text: str) -> None:
 # ── Step 5: Send email ────────────────────────────────────────────────────────
 
 _EMAIL_CSS = """
+<meta charset="utf-8">
 <style>
   body  { font-family: Arial, sans-serif; font-size: 13px; color: #222; max-width: 960px; margin: 0 auto; }
   h1    { font-size: 20px; color: #111; border-bottom: 2px solid #ddd; padding-bottom: 4px; }
@@ -537,38 +538,36 @@ def _df_to_md_table(df: pd.DataFrame) -> str:
 
 def _build_portfolio_tables(analytics: dict) -> str:
     """
-    Build a unified portfolio-state HTML table for the email body.
+    Build two HTML tables for the email body:
 
-    One table, hierarchically grouped: Portfolio → L1 (sorted by $MV desc) →
-    L2 (sorted by $MV desc within L1) → Ticker (sorted by momentum rank desc).
+    Table 1 — Portfolio Positions (full hierarchy, informational)
+      Grouped: L1 → L2 → Ticker (each sorted by $MV desc; tickers by rank desc)
+      Columns: Sleeve / Ticker | Rank | Alpha vs VTI | Weight | Market Value
 
-    Columns: L1 / L2 | Ticker | Rank% | α/VTI | Wt% | $MV | Action | Gate z
+    Table 2 — Recommended Actions (only non-HOLD tickers)
+      Columns: Ticker | Sleeve | Rank | Action | Basis | Est. Trade | Est. Shares | Gate z
 
-    Action colour coding:
-      BUY        → green   (#c8e6c9)
-      DEFER-BUY  → amber   (#ffe082)
-      TRIM       → red     (#ffcdd2)
-      HOLD       → yellow  (#fff9c4)
-      SPIKE-TRIM → teal    (#b2ebf2)  – sell into strength
+    Action logic (per ticker):
+      Sleeve below floor  → BUY  (compliance)
+      Sleeve above cap    → TRIM (compliance)
+      In-band, rank ≤ 30% → TRIM (momentum reallocation)
+      In-band, rank ≥ 65% → BUY  (momentum reallocation)
+      Otherwise           → HOLD
+      gate = defer + BUY  → DEFER-BUY
+      gate = spike_trim   → SPIKE-TRIM (overrides all)
 
-    Action derivation (per ticker):
-      • Sleeve below floor            → BUY  (sleeve needs capital)
-      • Sleeve above cap              → TRIM (sleeve over-allocated)
-      • In-band, ticker Pct ≥ 0.65   → BUY  (strong momentum, within-sleeve add)
-      • In-band, ticker Pct ≤ 0.30   → TRIM (weak momentum, within-sleeve trim)
-      • Everything else               → HOLD
-      • gate_action == "defer"        → BUY → DEFER-BUY
-      • gate_action == "spike_trim"   → SPIKE-TRIM (overrides all)
-
-    Returns an HTML string (no <html>/<body> wrapper).
+    Trade size (compliance-driven only):
+      BUY:  (floor − current) × denom ÷ n_buy_tickers_in_sleeve
+      TRIM: (current − cap)   × denom × ticker_mv / total_trim_mv_in_sleeve
+      Within-band momentum trades: size shown as "—" (allocator decides)
     """
-    # ── Inline style constants ────────────────────────────────────────────────
-    _TH = (
-        "background:#f0f4f8; border:1px solid #bcd; padding:6px 10px; "
-        "text-align:left; white-space:nowrap; font-size:12px;"
-    )
+    _TH  = ("background:#f0f4f8; border:1px solid #bcd; padding:6px 10px; "
+            "text-align:left; white-space:nowrap; font-size:12px;")
+    _THR = ("background:#f0f4f8; border:1px solid #bcd; padding:6px 10px; "
+            "text-align:right; white-space:nowrap; font-size:12px;")
     _TD  = "border:1px solid #ddd; padding:5px 8px; white-space:nowrap; font-size:12px;"
     _TDR = "border:1px solid #ddd; padding:5px 8px; text-align:right; white-space:nowrap; font-size:12px;"
+    _TDC = "border:1px solid #ddd; padding:5px 8px; text-align:center; white-space:nowrap; font-size:12px;"
 
     try:
         policy    = analytics["policy"]
@@ -580,7 +579,7 @@ def _build_portfolio_tables(analytics: dict) -> str:
         df_scores = analytics["df_scores"]
         df_gates  = analytics["df_gates"]
 
-        # ── Per-ticker market value ───────────────────────────────────────────
+        # ── Per-ticker price / MV ─────────────────────────────────────────────
         fixed_raw = (policy.get("governance", {}) or {}).get("fixed_asset_prices", {}) or {}
         latest_px = hist.sort_values("Date").groupby("Ticker")["AdjClose"].last()
 
@@ -608,15 +607,20 @@ def _build_portfolio_tables(analytics: dict) -> str:
         bucket_a_mv = hold.loc[hold["Class"] == "bucket_a",        "MV"].sum()
         alloc_denom = total_val - overlay_mv - bucket_a_mv
 
-        # ── Lookup dicts: momentum + gate ─────────────────────────────────────
+        # ── Momentum lookup: rank (#1 = strongest), pct, alpha ───────────────
         scores_by_ticker: dict = {}
+        n_ranked = 0
         if not df_scores.empty:
-            for _, row in df_scores.iterrows():
+            ranked = df_scores.sort_values("Pct", ascending=False).reset_index(drop=True)
+            n_ranked = len(ranked)
+            for i, row in ranked.iterrows():
                 scores_by_ticker[row["Ticker"]] = {
+                    "rank":  i + 1,
                     "pct":   float(row["Pct"]) if pd.notna(row["Pct"]) else 0.0,
                     "alpha": str(row.get("Alpha", "—")),
                 }
 
+        # ── Gate lookup ───────────────────────────────────────────────────────
         gates_by_ticker: dict = {}
         if df_gates is not None and not df_gates.empty:
             for _, row in df_gates.iterrows():
@@ -625,59 +629,139 @@ def _build_portfolio_tables(analytics: dict) -> str:
                     "z_score": row.get("z_score"),
                 }
 
-        # ── Policy sleeve layout ──────────────────────────────────────────────
+        # ── Sleeve layout ─────────────────────────────────────────────────────
         sleeves_l1 = policy["sleeves"]["level1"]
         sleeves_l2 = policy["sleeves"]["level2"]
 
-        # ── Per-sleeve $MV totals ─────────────────────────────────────────────
         def _l2_mv(name: str) -> float:
             return float(hold.loc[hold["Class"] == name, "MV"].sum())
 
         def _l1_mv(name: str) -> float:
-            children = sleeves_l1.get(name, {}).get("children", [])
-            return sum(_l2_mv(c) for c in children)
+            return sum(_l2_mv(c) for c in sleeves_l1.get(name, {}).get("children", []))
 
-        # ── Action label + background colour per ticker ───────────────────────
-        def _action(ticker: str, sleeve_cur_pct: float,
-                    floor_pct: float, cap_pct: float) -> tuple:
-            gate        = gates_by_ticker.get(ticker, {})
-            gate_action = gate.get("action", "proceed")
-            pct         = scores_by_ticker.get(ticker, {}).get("pct", 0.5)
-
-            if gate_action == "spike_trim":
-                return "SPIKE-TRIM", "#b2ebf2"
-
-            # Base action from sleeve compliance + per-ticker momentum
-            if sleeve_cur_pct < floor_pct - 0.1:
-                base = "BUY"
-            elif sleeve_cur_pct > cap_pct + 0.1:
-                base = "TRIM"
-            elif pct >= 0.65:
-                base = "BUY"
-            elif pct <= 0.30:
-                base = "TRIM"
-            else:
-                base = "HOLD"
-
-            if base == "BUY" and gate_action == "defer":
-                return "DEFER-BUY", "#ffe082"
-            if base == "BUY":
-                return "BUY",  "#c8e6c9"
-            if base == "TRIM":
-                return "TRIM", "#ffcdd2"
-            return "HOLD", "#fff9c4"
-
-        # ── Sort L1: largest total $MV first; stabilizers (overlays) always last
         def _l1_sort(name: str) -> float:
             return -1.0 if name == "stabilizers" else _l1_mv(name)
 
         l1_sorted = sorted(sleeves_l1.keys(), key=_l1_sort, reverse=True)
 
-        # ── Build table rows ──────────────────────────────────────────────────
-        tbody_rows: list[str] = []
+        # ── Action + basis per ticker ─────────────────────────────────────────
+        def _action(ticker: str, cur_pct: float,
+                    floor_pct: float, cap_pct: float) -> tuple:
+            """Returns (label, bg_color, basis) where basis in
+               'compliance_buy' | 'compliance_trim' | 'momentum_buy' |
+               'momentum_trim' | 'hold' | 'spike_trim'."""
+            gate_action = gates_by_ticker.get(ticker, {}).get("action", "proceed")
+            pct         = scores_by_ticker.get(ticker, {}).get("pct", 0.5)
+
+            if gate_action == "spike_trim":
+                return "SPIKE-TRIM", "#b2ebf2", "spike_trim"
+
+            if cur_pct < floor_pct - 0.1:
+                base, basis = "BUY",  "compliance_buy"
+            elif cur_pct > cap_pct + 0.1:
+                base, basis = "TRIM", "compliance_trim"
+            elif pct >= 0.65:
+                base, basis = "BUY",  "momentum_buy"
+            elif pct <= 0.30:
+                base, basis = "TRIM", "momentum_trim"
+            else:
+                return "HOLD", "#fff9c4", "hold"
+
+            if base == "BUY" and gate_action == "defer":
+                return "DEFER-BUY", "#ffe082", f"defer|{basis}"
+            if base == "BUY":
+                return "BUY",  "#c8e6c9", basis
+            return "TRIM", "#ffcdd2", basis
+
+        # ── Trade size estimation (compliance-driven only) ────────────────────
+        def _est_trade(ticker: str, basis: str, l2_name: str,
+                       l2_data: dict, denom: float,
+                       buy_in_sleeve: list, trim_in_sleeve: list) -> tuple:
+            """Returns (est_usd, est_shares) or (None, None) for momentum trades."""
+            core_basis = basis.replace("defer|", "")
+            if core_basis not in ("compliance_buy", "compliance_trim"):
+                return None, None
+
+            floor_frac = l2_data.get("floor") or 0.0
+            cap_frac   = l2_data.get("cap")   or 0.0
+            l2_total   = _l2_mv(l2_name)
+            cur_frac   = l2_total / denom if denom > 0 else 0.0
+
+            if core_basis == "compliance_buy":
+                deficit = (floor_frac - cur_frac) * denom
+                n = max(1, len(buy_in_sleeve))
+                est_usd = deficit / n
+            else:  # compliance_trim
+                excess  = (cur_frac - cap_frac) * denom
+                t_mv    = float(hold.loc[hold["Ticker"] == ticker, "MV"].sum())
+                tot_mv  = sum(float(hold.loc[hold["Ticker"] == t, "MV"].sum())
+                              for t in trim_in_sleeve)
+                est_usd = excess * (t_mv / tot_mv) if tot_mv > 0 else excess / max(1, len(trim_in_sleeve))
+
+            est_usd = max(0.0, est_usd)
+            t_price = float(hold.loc[hold["Ticker"] == ticker, "Price"].iloc[0]) \
+                      if not hold.loc[hold["Ticker"] == ticker].empty else 0.0
+            est_sh  = round(est_usd / t_price) if t_price > 0 else None
+            return est_usd, est_sh
+
+        # ── First pass: collect all ticker data ───────────────────────────────
+        # ticker_data[ticker] = {l1, l2, l2_data, action, label, color, basis, cur_pct, floor_pct, cap_pct, denom}
+        ticker_data: dict = {}
+        for l1_name in l1_sorted:
+            l1_data    = sleeves_l1[l1_name]
+            is_overlay = (l1_name == "stabilizers")
+            denom      = total_val if is_overlay else alloc_denom
+            for l2_name in l1_data.get("children", []):
+                l2_data   = sleeves_l2.get(l2_name, {})
+                floor_pct = (l2_data.get("floor") or 0) * 100
+                cap_pct   = (l2_data.get("cap")   or 0) * 100
+                l2_total  = _l2_mv(l2_name)
+                cur_pct   = (l2_total / denom * 100) if denom > 0 else 0.0
+                for ticker in l2_data.get("tickers", []):
+                    if ticker not in held_tickers:
+                        continue
+                    label, color, basis = _action(ticker, cur_pct, floor_pct, cap_pct)
+                    ticker_data[ticker] = dict(
+                        l1=l1_name, l2=l2_name, l2_data=l2_data,
+                        label=label, color=color, basis=basis,
+                        cur_pct=cur_pct, floor_pct=floor_pct, cap_pct=cap_pct,
+                        denom=denom,
+                    )
+
+        # Per-sleeve BUY/TRIM ticker lists for trade-size splitting
+        sleeve_buy:  dict = {}  # l2_name → [tickers]
+        sleeve_trim: dict = {}
+        for t, d in ticker_data.items():
+            core = d["basis"].replace("defer|", "")
+            if "buy" in core:
+                sleeve_buy.setdefault(d["l2"], []).append(t)
+            elif "trim" in core:
+                sleeve_trim.setdefault(d["l2"], []).append(t)
+
+        # ── TABLE 1: Portfolio Positions ──────────────────────────────────────
+        t1_cols = [
+            ("Sleeve / Ticker",
+             "L1 and L2 sleeves with floor/cap policy limits; tickers indented within sleeve"),
+            ("Rank",
+             f"Momentum rank within universe (#1 = strongest momentum blend; {n_ranked} tickers ranked)"),
+            ("Alpha vs VTI",
+             "Total return outperformance vs VTI since portfolio inception date"),
+            ("Weight",
+             "Current weight as % of allocatable denominator (TPV minus overlays minus Bucket A); "
+             "overlays weighted vs total portfolio value"),
+            ("Market Value",
+             "Current market value in USD"),
+        ]
+        t1_thead = (
+            "<thead><tr>"
+            + "".join(f'<th style="{_TH}" title="{desc}">{name}</th>'
+                      for name, desc in t1_cols)
+            + "</tr></thead>"
+        )
+        t1_rows: list[str] = []
 
         for l1_name in l1_sorted:
-            l1_data    = sleeves_l1.get(l1_name, {})
+            l1_data    = sleeves_l1[l1_name]
             l1_cap     = l1_data.get("cap")
             children   = l1_data.get("children", [])
             is_overlay = (l1_name == "stabilizers")
@@ -686,155 +770,225 @@ def _build_portfolio_tables(analytics: dict) -> str:
             l1_cur_pct = (l1_total / denom * 100) if denom > 0 else 0.0
             l1_cap_str = f"{l1_cap * 100:.0f}%" if l1_cap else "overlay"
 
-            # L1 header row (full-width, dark blue-grey)
-            tbody_rows.append(
+            t1_rows.append(
                 f'<tr style="background:#d0dff0;">'
-                f'<td colspan="8" style="border:1px solid #aac; padding:7px 10px; '
+                f'<td colspan="5" style="border:1px solid #aac; padding:7px 10px; '
                 f'font-weight:bold; font-size:12px;">'
-                f'▶&nbsp; {l1_name}'
+                f'&#9654;&nbsp; {l1_name}'
                 f'&ensp;|&ensp;cap: {l1_cap_str}'
                 f'&ensp;|&ensp;current: {l1_cur_pct:.1f}%'
                 f'&ensp;(${l1_total:,.0f})'
                 f'</td></tr>'
             )
 
-            # Sort L2 children by $MV desc
-            children_sorted = sorted(children, key=_l2_mv, reverse=True)
-
-            for l2_name in children_sorted:
+            for l2_name in sorted(children, key=_l2_mv, reverse=True):
                 l2_data   = sleeves_l2.get(l2_name, {})
                 floor_pct = (l2_data.get("floor") or 0) * 100
                 cap_pct   = (l2_data.get("cap")   or 0) * 100
                 l2_total  = _l2_mv(l2_name)
                 cur_pct   = (l2_total / denom * 100) if denom > 0 else 0.0
-                tickers   = l2_data.get("tickers", [])
 
-                if   cur_pct < floor_pct - 0.1: l2_status = "⚠️ BELOW FLOOR"
-                elif cur_pct > cap_pct   + 0.1: l2_status = "⚠️ ABOVE CAP"
-                else:                           l2_status = "✅"
+                if   cur_pct < floor_pct - 0.1: l2_status = "&#9888; BELOW FLOOR"
+                elif cur_pct > cap_pct   + 0.1: l2_status = "&#9888; ABOVE CAP"
+                else:                           l2_status = "&#10003;"
 
-                # L2 subheader row (lighter blue-grey, indented)
-                tbody_rows.append(
+                t1_rows.append(
                     f'<tr style="background:#eef3f9;">'
-                    f'<td colspan="8" style="border:1px solid #ccd; padding:5px 10px 5px 26px; '
+                    f'<td colspan="5" style="border:1px solid #ccd; padding:5px 10px 5px 22px; '
                     f'font-style:italic; font-size:12px;">'
                     f'&nbsp;&nbsp;{l2_name}'
-                    f'&ensp;floor {floor_pct:.0f}% – cap {cap_pct:.0f}%'
+                    f'&ensp;floor {floor_pct:.0f}% &ndash; cap {cap_pct:.0f}%'
                     f'&ensp;|&ensp;current: <strong>{cur_pct:.1f}%</strong>'
                     f'&ensp;(${l2_total:,.0f})'
                     f'&ensp;{l2_status}'
                     f'</td></tr>'
                 )
 
-                # Ticker rows — held tickers only, sorted by momentum Pct desc
-                held_in_sleeve = [t for t in tickers if t in held_tickers]
+                held_in_sleeve = [
+                    t for t in l2_data.get("tickers", []) if t in held_tickers
+                ]
                 held_in_sleeve.sort(
                     key=lambda t: scores_by_ticker.get(t, {}).get("pct", 0.0),
                     reverse=True,
                 )
-
                 for ticker in held_in_sleeve:
                     t_mv  = float(hold.loc[hold["Ticker"] == ticker, "MV"].sum())
                     t_wt  = (t_mv / denom * 100) if denom > 0 else 0.0
                     s     = scores_by_ticker.get(ticker, {})
-                    pct   = s.get("pct", 0.0)
+                    rank  = s.get("rank", "—")
                     alpha = s.get("alpha", "—")
-                    gate  = gates_by_ticker.get(ticker, {})
-                    z_val = gate.get("z_score")
-                    z_str = f"{z_val:+.2f}" if z_val is not None else "—"
+                    rank_str = f"#{rank} of {n_ranked}" if isinstance(rank, int) else "—"
 
-                    action_label, action_bg = _action(ticker, cur_pct, floor_pct, cap_pct)
-                    pct_str = f"{pct * 100:.0f}%" if pct else "—"
-
-                    tbody_rows.append(
+                    t1_rows.append(
                         f'<tr>'
-                        f'<td style="{_TD}"></td>'
-                        f'<td style="{_TD}"><strong>{ticker}</strong></td>'
-                        f'<td style="{_TDR}">{pct_str}</td>'
+                        f'<td style="{_TD}">&nbsp;&nbsp;&nbsp;&nbsp;{ticker}</td>'
+                        f'<td style="{_TDR}">{rank_str}</td>'
                         f'<td style="{_TDR}">{alpha}</td>'
                         f'<td style="{_TDR}">{t_wt:.1f}%</td>'
                         f'<td style="{_TDR}">${t_mv:,.0f}</td>'
-                        f'<td style="border:1px solid #ddd; padding:5px 8px; text-align:center; '
-                        f'font-weight:bold; font-size:12px; background:{action_bg};">'
-                        f'{action_label}</td>'
-                        f'<td style="{_TDR}">{z_str}</td>'
                         f'</tr>'
                     )
 
-        # ── Bucket A + Cash footer rows ───────────────────────────────────────
+        # Bucket A + Cash footer
         bucket_a_pct = (bucket_a_mv / total_val * 100) if total_val > 0 else 0.0
-        tbody_rows.append(
+        t1_rows.append(
             f'<tr style="background:#f5f5f5;">'
-            f'<td style="{_TD}" colspan="2"><em>Bucket A — protected liquidity</em></td>'
+            f'<td style="{_TD}"><em>Bucket A &mdash; protected liquidity (TREASURY_NOTE)</em></td>'
+            f'<td style="{_TDC}">&#128274;</td>'
             f'<td style="{_TD}">—</td>'
-            f'<td style="{_TD}">—</td>'
-            f'<td style="{_TDR}">{bucket_a_pct:.1f}%</td>'
+            f'<td style="{_TDR}">{bucket_a_pct:.1f}%&nbsp;<small>(of TPV)</small></td>'
             f'<td style="{_TDR}">${bucket_a_mv:,.0f}</td>'
-            f'<td style="{_TD}">🔒</td>'
-            f'<td style="{_TD}">—</td>'
             f'</tr>'
         )
         cash_mv = float(hold.loc[hold["Class"] == "bucket_b", "MV"].sum())
         if cash_mv > 0:
-            cash_pct = (cash_mv / total_val * 100)
-            tbody_rows.append(
+            t1_rows.append(
                 f'<tr>'
-                f'<td style="{_TD}" colspan="2"><em>Cash (Bucket B)</em></td>'
-                f'<td style="{_TD}">—</td>'
-                f'<td style="{_TD}">—</td>'
-                f'<td style="{_TDR}">{cash_pct:.1f}%</td>'
+                f'<td style="{_TD}"><em>Cash (Bucket B)</em></td>'
+                f'<td style="{_TD}">—</td><td style="{_TD}">—</td>'
+                f'<td style="{_TDR}">{cash_mv / total_val * 100:.1f}%&nbsp;<small>(of TPV)</small></td>'
                 f'<td style="{_TDR}">${cash_mv:,.0f}</td>'
-                f'<td style="{_TD}">—</td>'
-                f'<td style="{_TD}">—</td>'
                 f'</tr>'
             )
 
-        # ── Portfolio status header ───────────────────────────────────────────
+        table1 = (
+            f'<table style="border-collapse:collapse; width:100%; margin:8px 0 20px;">'
+            f'{t1_thead}<tbody>{"".join(t1_rows)}</tbody></table>'
+        )
+
+        # ── TABLE 2: Recommended Actions ──────────────────────────────────────
+        action_items = [
+            (t, d) for t, d in ticker_data.items()
+            if d["label"] != "HOLD"
+        ]
+        # Sort: compliance first, then by sleeve $MV desc, then rank asc
+        def _action_sort(item):
+            t, d = item
+            compliance = 0 if "compliance" in d["basis"] else 1
+            return (compliance, -_l2_mv(d["l2"]),
+                    scores_by_ticker.get(t, {}).get("rank", 99))
+        action_items.sort(key=_action_sort)
+
+        if action_items:
+            t2_cols = [
+                ("Ticker", ""),
+                ("Sleeve", "L2 sleeve this ticker belongs to"),
+                ("Rank", f"Momentum rank, #1 = strongest (of {n_ranked})"),
+                ("Action", "BUY / DEFER-BUY / TRIM / SPIKE-TRIM"),
+                ("Basis",  "Why this action was triggered"),
+                ("Est. Trade",
+                 "Estimated trade size. Compliance-driven: sleeve deficit/excess prorated to ticker. "
+                 "Momentum-driven within-band: size determined by allocator (shown as dash)."),
+                ("Est. Shares", "Approximate shares at current price"),
+                ("Gate z",
+                 "Execution gate z-score: 2-day return divided by EWMA vol (126-day). "
+                 "BUY deferred if z >= +2.0; SELL deferred if z <= -2.5; "
+                 "SPIKE-TRIM triggered if z >= +2.0 on SELL direction."),
+            ]
+            t2_thead = (
+                "<thead><tr>"
+                + "".join(f'<th style="{_TH}" title="{desc}">{name}</th>'
+                          for name, desc in t2_cols)
+                + "</tr></thead>"
+            )
+            t2_rows: list[str] = []
+
+            for ticker, d in action_items:
+                s          = scores_by_ticker.get(ticker, {})
+                rank       = s.get("rank", "—")
+                rank_str   = f"#{rank} of {n_ranked}" if isinstance(rank, int) else "—"
+                gate       = gates_by_ticker.get(ticker, {})
+                z_val      = gate.get("z_score")
+                z_str      = f"{z_val:+.2f}" if z_val is not None else "—"
+                label      = d["label"]
+                color      = d["color"]
+                basis_raw  = d["basis"].replace("defer|", "")
+                core_basis = basis_raw
+                gate_pfx   = "Gate defer. " if "defer|" in d["basis"] else ""
+
+                # Human-readable basis
+                if basis_raw == "compliance_buy":
+                    basis_str = (f"{gate_pfx}Sleeve {d['l2']}: "
+                                 f"{d['cur_pct']:.1f}% below floor {d['floor_pct']:.0f}%")
+                elif basis_raw == "compliance_trim":
+                    basis_str = (f"{gate_pfx}Sleeve {d['l2']}: "
+                                 f"{d['cur_pct']:.1f}% above cap {d['cap_pct']:.0f}%")
+                elif basis_raw == "momentum_buy":
+                    basis_str = f"{gate_pfx}Momentum rank {rank_str} (top of universe)"
+                elif basis_raw == "momentum_trim":
+                    basis_str = f"Momentum rank {rank_str} (bottom of universe)"
+                elif basis_raw == "spike_trim":
+                    basis_str = f"Sell into strength: gate z = {z_str}"
+                else:
+                    basis_str = basis_raw
+
+                est_usd, est_sh = _est_trade(
+                    ticker, d["basis"], d["l2"], d["l2_data"], d["denom"],
+                    sleeve_buy.get(d["l2"], []),
+                    sleeve_trim.get(d["l2"], []),
+                )
+                est_usd_str = f"~${est_usd:,.0f}" if est_usd is not None and est_usd > 0 else "—"
+                est_sh_str  = f"~{est_sh:,} sh"   if est_sh  is not None and est_sh  > 0 else "—"
+
+                t2_rows.append(
+                    f'<tr>'
+                    f'<td style="{_TD}"><strong>{ticker}</strong></td>'
+                    f'<td style="{_TD}">{d["l2"]}</td>'
+                    f'<td style="{_TDR}">{rank_str}</td>'
+                    f'<td style="border:1px solid #ddd; padding:5px 8px; text-align:center; '
+                    f'font-weight:bold; font-size:12px; background:{color};">{label}</td>'
+                    f'<td style="{_TD}">{basis_str}</td>'
+                    f'<td style="{_TDR}">{est_usd_str}</td>'
+                    f'<td style="{_TDR}">{est_sh_str}</td>'
+                    f'<td style="{_TDR}">{z_str}</td>'
+                    f'</tr>'
+                )
+
+            table2 = (
+                f'<table style="border-collapse:collapse; width:100%; margin:8px 0 16px;">'
+                f'{t2_thead}<tbody>{"".join(t2_rows)}</tbody></table>'
+            )
+            t2_section = '<h3>Recommended Actions</h3>' + table2
+        else:
+            t2_section = '<p><em>No actions required — all sleeves in band, no momentum signals.</em></p>'
+
+        # ── Status header ─────────────────────────────────────────────────────
         dd_state = dd.get("state", "normal").upper()
         dd_pct   = abs(dd.get("drawdown", 0)) * 100
         peak_tpv = dd.get("peak_tpv", total_val)
         status_html = (
-            f'<p style="font-size:13px; margin:4px 0;">'
+            f'<p style="font-size:13px; margin:4px 0 12px;">'
             f'<strong>TPV:</strong> ${total_val:,.0f} (as of {val_asof})'
-            f'&ensp;|&ensp;<strong>Drawdown:</strong> {dd_state} — {dd_pct:.1f}% from peak'
+            f'&ensp;|&ensp;<strong>Drawdown:</strong> {dd_state} &mdash; {dd_pct:.1f}% from peak'
             f' (${peak_tpv:,.0f})<br>'
             f'<strong>Allocatable denominator:</strong> ${alloc_denom:,.0f}'
-            f' (TPV − overlays − Bucket A)</p>'
-        )
-
-        # ── Column headers ────────────────────────────────────────────────────
-        col_headers = ["L1 / L2 Sleeve", "Ticker", "Rank", "α / VTI", "Wt %", "$MV", "Action", "Gate z"]
-        thead = (
-            "<thead><tr>"
-            + "".join(f'<th style="{_TH}">{c}</th>' for c in col_headers)
-            + "</tr></thead>"
-        )
-
-        table = (
-            f'<table style="border-collapse:collapse; width:100%; margin:8px 0 16px;">'
-            f'{thead}'
-            f'<tbody>{"".join(tbody_rows)}</tbody>'
-            f'</table>'
+            f' (TPV &minus; overlays &minus; Bucket A)</p>'
         )
 
         # ── Colour legend ─────────────────────────────────────────────────────
         legend = (
-            '<p style="font-size:11px; color:#555; margin:0 0 12px;">'
+            '<p style="font-size:11px; color:#666; margin:12px 0 0;">'
+            '<strong>Action colours:</strong>&ensp;'
             '<span style="background:#c8e6c9; padding:1px 6px; border-radius:3px;">BUY</span>&ensp;'
             '<span style="background:#ffe082; padding:1px 6px; border-radius:3px;">DEFER-BUY</span>&ensp;'
             '<span style="background:#fff9c4; padding:1px 6px; border-radius:3px;">HOLD</span>&ensp;'
             '<span style="background:#ffcdd2; padding:1px 6px; border-radius:3px;">TRIM</span>&ensp;'
             '<span style="background:#b2ebf2; padding:1px 6px; border-radius:3px;">SPIKE-TRIM</span>'
-            '&ensp; | Action = sleeve floor/cap compliance + per-ticker momentum rank; '
-            'Gate z = EWMA vol-scaled 2-day z-score'
+            '&ensp;|&ensp;Hover column headers for definitions.'
             '</p>'
         )
 
-        return status_html + table + legend
+        return (
+            status_html
+            + '<h3>Portfolio Positions</h3>' + table1
+            + t2_section
+            + legend
+        )
 
     except Exception as tbl_err:
         log.warning("Portfolio table generation failed: %s", tbl_err, exc_info=True)
         return f'<p><em>Portfolio state table unavailable: {tbl_err}</em></p>'
+
 
 
 def send_schema_alert(violation_summary: str) -> None:
