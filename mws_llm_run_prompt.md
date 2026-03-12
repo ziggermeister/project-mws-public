@@ -1,4 +1,4 @@
-<!-- MWS_LLM_RUN_PROMPT v1.4 — 2026-03-11 -->
+<!-- MWS_LLM_RUN_PROMPT v1.5 — 2026-03-12 -->
 <!-- FOR MANUAL USE (ChatGPT / Gemini) ONLY.                                        -->
 <!-- The automated runner (mws_runner.py) builds its own inline prompt in            -->
 <!-- build_prompt() and does NOT read this file. This file documents the same        -->
@@ -521,19 +521,43 @@ Skip MEDIUM/LOW and routine confirmations.]
 
 ## LLM Portability Notes
 
-This prompt is designed to be LLM-agnostic. When using with different systems:
+This prompt is designed to be LLM-agnostic. Three execution modes exist:
 
-- **Claude (Anthropic):** Use the `web_search` tool for Step 1. The Python runner fills all `{{PLACEHOLDER}}` values before sending.
-- **ChatGPT (OpenAI):** Use Browse/search capability for Step 1. Paste this prompt with `{{PLACEHOLDER}}` values manually filled from the latest CSV/JSON exports.
-- **Gemini (Google):** Use Grounding/search for Step 1. Fill `{{PLACEHOLDER}}` values from latest exports before submitting.
+### Mode 1 — Automated runner (Claude via GitHub Actions or local Python)
+`mws_runner.py` builds its own inline prompt via `build_prompt()` and does **not** read this file.
+Sequence: `mws_fetch_history.py` → `mws_analytics.py` → `mws_runner.py` → Claude API → email.
 
-For manual use (no Python runner): export `mws_holdings.csv`, `mws_tracker.json`, and the momentum table from `mws_analytics.py` and paste them into the placeholder blocks above.
+### Mode 2 — Claude interactive session (Claude with Bash tool, no runner)
+Use when asking Claude directly in a chat session. Claude must use the Bash tool to run the
+scripts — do **not** paste data manually.
+
+**Mandatory pre-analysis steps (always, in this order):**
+1. **Fetch today's prices** — `python3 mws_fetch_history.py` — this is **never optional**;
+   running analytics on stale prices produces incorrect momentum scores.
+2. **Run analytics** — `python3 mws_analytics.py` — produces momentum rankings, gate z-scores,
+   and sleeve status from the now-current history file.
+3. **Proceed with analysis** — read the output files and apply the steps in this prompt.
+   Use `web_search` for Step 1 (news). The `{{PLACEHOLDER}}` values are populated by reading
+   the output files directly (not pasted by user).
+
+### Mode 3 — Manual use with ChatGPT or Gemini
+No Bash tool available. Export and paste data manually.
+
+**Mandatory pre-analysis steps (always, in this order — run locally before pasting):**
+1. **Fetch today's prices locally** — `python3 mws_fetch_history.py` — **mandatory**; do this
+   before exporting data. Stale prices produce incorrect momentum scores.
+2. **Run analytics locally** — `python3 mws_analytics.py`
+3. Export `mws_holdings.csv`, `mws_tracker.json`, and the momentum/gate tables, and paste them
+   into the `{{PLACEHOLDER}}` blocks above.
+
+- **ChatGPT (OpenAI):** Use Browse/search capability for Step 1 (news).
+- **Gemini (Google):** Use Grounding/search for Step 1 (news).
 
 ---
 
-*End of MWS LLM Run Prompt — v1.4 — 2026-03-11*
+*End of MWS LLM Run Prompt — v1.5 — 2026-03-12*
 *Review status: CLEARED FOR PRODUCTION COMMIT.*
-*Gemini ✓ Round 1 (4 fixes) + Red-team PASS (all 4 tests). ChatGPT ✓ Round 1 (4 fixes) + Deep Research (3 fixes). v1.4 (3 runner fixes). All adversarial tests pass.*
+*Gemini ✓ Round 1 (4 fixes) + Red-team PASS (all 4 tests). ChatGPT ✓ Round 1 (4 fixes) + Deep Research (3 fixes). v1.4 (3 runner fixes). v1.5: three-mode portability notes; price fetch made mandatory in all modes. All adversarial tests pass.*
 
 ---
 
