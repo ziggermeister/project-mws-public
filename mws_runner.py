@@ -895,70 +895,114 @@ def _build_portfolio_tables(analytics: dict) -> str:
                     scores_by_ticker.get(t, {}).get("rank", 99))
         action_items.sort(key=_action_sort)
 
-        if action_items:
-            # ── Pass 1: raw trade sizes ────────────────────────────────────────
-            raw_trades: dict = {}  # ticker → (raw_usd, pfx)
-            for ticker, d in action_items:
-                est_usd, _est_sh, est_pfx = _est_trade(
-                    ticker, d["basis"], d["l2"], d["l2_data"], d["denom"],
-                    sleeve_buy.get(d["l2"], []),
-                    sleeve_trim.get(d["l2"], []),
-                )
-                raw_trades[ticker] = (est_usd or 0.0, est_pfx or "~")
+        # ── Budget waterfall (always computed, even with no action items) ──────
+        # Pass 1: raw trade sizes
+        raw_trades: dict = {}  # ticker → (raw_usd, pfx)
+        for ticker, d in action_items:
+            est_usd, _est_sh, est_pfx = _est_trade(
+                ticker, d["basis"], d["l2"], d["l2_data"], d["denom"],
+                sleeve_buy.get(d["l2"], []),
+                sleeve_trim.get(d["l2"], []),
+            )
+            raw_trades[ticker] = (est_usd or 0.0, est_pfx or "~")
 
-            # ── Pass 2: budget-constrained waterfall ───────────────────────────
-            # DEFER-BUY = gated, will not execute today → excluded from budget.
-            # Priority: compliance sells fund compliance buys first;
-            #           remaining cash + momentum sells fund momentum buys.
-            comp_sell_t = [t for t, d in action_items
-                           if d["label"] in ("TRIM", "SPIKE-TRIM")
-                           and d["basis"] in ("compliance_trim", "spike_trim")]
-            mom_sell_t  = [t for t, d in action_items
-                           if d["label"] in ("TRIM", "SPIKE-TRIM")
-                           and "momentum" in d["basis"]]
-            comp_buy_t  = [t for t, d in action_items
-                           if d["label"] == "BUY" and "compliance_buy" in d["basis"]]
-            mom_buy_t   = [t for t, d in action_items
-                           if d["label"] == "BUY" and "momentum_buy" in d["basis"]]
+        # Pass 2: budget-constrained waterfall
+        # Reserves (ring-fenced before any discretionary spending):
+        #   1. DEFER-BUY reserve: gated buys will fire within 10 days → keep cash
+        #   2. Policy cash reserve: policy["cash_reserve"] if enabled
+        # Priority: compliance buys > deferred reserve > policy reserve >
+        #           momentum buys > residual deployment (Phase 3)
+        cr             = policy.get("cash_reserve", {})
+        policy_reserve = (float(cr.get("target_cash_usd", 0))
+                          if cr.get("enabled", False) else 0.0)
+        deferred_reserve = sum(raw_trades[t][0] for t, d in action_items
+                               if d["label"] == "DEFER-BUY")
 
-            comp_sell_proceeds = sum(raw_trades[t][0] for t in comp_sell_t)
-            mom_sell_proceeds  = sum(raw_trades[t][0] for t in mom_sell_t)
-            comp_buy_need      = sum(raw_trades[t][0] for t in comp_buy_t)
-            mom_buy_need       = sum(raw_trades[t][0] for t in mom_buy_t)
+        comp_sell_t = [t for t, d in action_items
+                       if d["label"] in ("TRIM", "SPIKE-TRIM")
+                       and d["basis"] in ("compliance_trim", "spike_trim")]
+        mom_sell_t  = [t for t, d in action_items
+                       if d["label"] in ("TRIM", "SPIKE-TRIM")
+                       and "momentum" in d["basis"]]
+        comp_buy_t  = [t for t, d in action_items
+                       if d["label"] == "BUY" and "compliance_buy" in d["basis"]]
+        mom_buy_t   = [t for t, d in action_items
+                       if d["label"] == "BUY" and "momentum_buy" in d["basis"]]
 
-            # Phase 1: existing cash + compliance sells → compliance buys
-            avail_p1       = cash_mv + comp_sell_proceeds
-            comp_buy_scale = min(1.0, avail_p1 / comp_buy_need) if comp_buy_need > 0 else 1.0
-            cash_after_p1  = avail_p1 - comp_buy_need * comp_buy_scale
+        comp_sell_proceeds = sum(raw_trades[t][0] for t in comp_sell_t)
+        mom_sell_proceeds  = sum(raw_trades[t][0] for t in mom_sell_t)
+        comp_buy_need      = sum(raw_trades[t][0] for t in comp_buy_t)
+        mom_buy_need       = sum(raw_trades[t][0] for t in mom_buy_t)
+        total_available    = cash_mv + comp_sell_proceeds + mom_sell_proceeds
 
-            # Phase 2: remaining cash + momentum sells → momentum buys
-            avail_p2       = cash_after_p1 + mom_sell_proceeds
-            mom_buy_scale  = min(1.0, avail_p2 / mom_buy_need) if mom_buy_need > 0 else 1.0
-            cash_after_all = avail_p2 - mom_buy_need * mom_buy_scale
+        # Phase 1: compliance buys — first claim on all available cash
+        comp_buy_scale  = min(1.0, total_available / comp_buy_need) if comp_buy_need > 0 else 1.0
+        cash_after_comp = total_available - comp_buy_need * comp_buy_scale
 
-            # Scaled final trade sizes
-            scaled_trades: dict = {}  # ticker → (scaled_usd, scaled_sh, pfx, note)
-            for ticker, d in action_items:
-                raw_usd, pfx = raw_trades[ticker]
-                label   = d["label"]
-                t_price = (float(hold.loc[hold["Ticker"] == ticker, "Price"].iloc[0])
-                           if not hold.loc[hold["Ticker"] == ticker].empty else 0.0)
-                if label == "DEFER-BUY":
-                    scaled_trades[ticker] = (None, None, pfx, "deferred")
-                elif ticker in comp_buy_t:
-                    s_usd = raw_usd * comp_buy_scale
-                    s_sh  = round(s_usd / t_price) if t_price > 0 and s_usd > 0 else None
-                    note  = f"⚠ scaled {comp_buy_scale:.0%}" if comp_buy_scale < 0.999 else ""
-                    scaled_trades[ticker] = (s_usd, s_sh, pfx, note)
-                elif ticker in mom_buy_t:
-                    s_usd = raw_usd * mom_buy_scale
-                    s_sh  = round(s_usd / t_price) if t_price > 0 and s_usd > 0 else None
-                    note  = f"⚠ scaled {mom_buy_scale:.0%}" if mom_buy_scale < 0.999 else ""
-                    scaled_trades[ticker] = (s_usd, s_sh, pfx, note)
-                else:  # sells — never scaled
-                    s_sh = round(raw_usd / t_price) if t_price > 0 and raw_usd > 0 else None
-                    scaled_trades[ticker] = (raw_usd, s_sh, pfx, "")
+        # Ring-fence reserves from post-compliance cash
+        deferred_reserve_actual = min(deferred_reserve, cash_after_comp)
+        policy_reserve_actual   = min(policy_reserve,
+                                      max(0.0, cash_after_comp - deferred_reserve_actual))
+        cash_for_discretionary  = (cash_after_comp
+                                   - deferred_reserve_actual
+                                   - policy_reserve_actual)
 
+        # Phase 2: momentum buys from discretionary pool
+        mom_buy_scale  = min(1.0, cash_for_discretionary / mom_buy_need) if mom_buy_need > 0 else 1.0
+        cash_after_mom = cash_for_discretionary - mom_buy_need * mom_buy_scale
+
+        # Phase 3: deploy residual to highest-momentum HOLD tickers within sleeve cap headroom.
+        # Greedy: highest-momentum HOLDs fill first up to their sleeve's cap headroom.
+        deploy_items: list = []  # (ticker, d, deploy_usd, deploy_sh)
+        residual = cash_after_mom
+        if residual > 500:
+            hold_candidates = sorted(
+                [(t, d) for t, d in ticker_data.items() if d["label"] == "HOLD"],
+                key=lambda x: scores_by_ticker.get(x[0], {}).get("pct", 0.0),
+                reverse=True,
+            )
+            for ticker, d in hold_candidates:
+                if residual < 100:
+                    break
+                cap_frac = d["l2_data"].get("cap") or 0.0
+                l2_total = _l2_mv(d["l2"])
+                cur_frac = l2_total / d["denom"] if d["denom"] > 0 else 0.0
+                headroom = max(0.0, (cap_frac - cur_frac) * d["denom"])
+                if headroom < 100:
+                    continue
+                deploy_usd = min(residual, headroom)
+                t_price    = (float(hold.loc[hold["Ticker"] == ticker, "Price"].iloc[0])
+                              if not hold.loc[hold["Ticker"] == ticker].empty else 0.0)
+                deploy_sh  = round(deploy_usd / t_price) if t_price > 0 and deploy_usd > 0 else None
+                deploy_items.append((ticker, d, deploy_usd, deploy_sh))
+                residual -= deploy_usd
+
+        cash_after_all = residual  # ≈ 0 when fully deployed; ≈ policy_reserve when reserve active
+
+        # Scaled compliance/momentum trade sizes
+        scaled_trades: dict = {}  # ticker → (scaled_usd, scaled_sh, pfx, note)
+        for ticker, d in action_items:
+            raw_usd, pfx = raw_trades[ticker]
+            label   = d["label"]
+            t_price = (float(hold.loc[hold["Ticker"] == ticker, "Price"].iloc[0])
+                       if not hold.loc[hold["Ticker"] == ticker].empty else 0.0)
+            if label == "DEFER-BUY":
+                scaled_trades[ticker] = (None, None, pfx, "deferred")
+            elif ticker in comp_buy_t:
+                s_usd = raw_usd * comp_buy_scale
+                s_sh  = round(s_usd / t_price) if t_price > 0 and s_usd > 0 else None
+                note  = f"⚠ scaled {comp_buy_scale:.0%}" if comp_buy_scale < 0.999 else ""
+                scaled_trades[ticker] = (s_usd, s_sh, pfx, note)
+            elif ticker in mom_buy_t:
+                s_usd = raw_usd * mom_buy_scale
+                s_sh  = round(s_usd / t_price) if t_price > 0 and s_usd > 0 else None
+                note  = f"⚠ scaled {mom_buy_scale:.0%}" if mom_buy_scale < 0.999 else ""
+                scaled_trades[ticker] = (s_usd, s_sh, pfx, note)
+            else:  # sells — never scaled
+                s_sh = round(raw_usd / t_price) if t_price > 0 and raw_usd > 0 else None
+                scaled_trades[ticker] = (raw_usd, s_sh, pfx, "")
+
+        if action_items or deploy_items:
             # ── Table 2 headers ────────────────────────────────────────────────
             t2_cols = [
                 ("Ticker", ""),
@@ -969,13 +1013,15 @@ def _build_portfolio_tables(analytics: dict) -> str:
                  "BUY deferred when z >= +2.0 (don't chase a spike). "
                  "SELL deferred when z <= -2.5 (don't sell into capitulation). "
                  "SPIKE-TRIM fires immediately when z >= +2.0 on a sell signal (sell into strength)."),
-                ("Action", "BUY / DEFER-BUY / TRIM / SPIKE-TRIM — determined by sleeve compliance, "
-                 "momentum rank, and vol z-score above"),
+                ("Action",
+                 "BUY / DEFER-BUY / TRIM / SPIKE-TRIM / DEPLOY — determined by sleeve compliance, "
+                 "momentum rank, vol z-score, and residual cash deployment"),
                 ("Basis",  "Primary reason the action was triggered"),
                 ("Est. Trade",
-                 "Budget-constrained trade size. Compliance buys funded first from cash + compliance "
-                 "trim proceeds; momentum buys funded from remaining cash + momentum trim proceeds. "
-                 "DEFER-BUY = gated, not executing today. ~ = compliance estimate; ≈ = momentum estimate."),
+                 "Budget-constrained trade size. Compliance buys have first claim; "
+                 "DEFER-BUY reserve ring-fenced next; momentum buys from remainder; "
+                 "DEPLOY = residual cash to highest-momentum in-band tickers within cap. "
+                 "~ = compliance estimate; ≈ = momentum estimate."),
                 ("Est. Shares", "Approximate number of shares at current price"),
             ]
             t2_thead = (
@@ -987,6 +1033,7 @@ def _build_portfolio_tables(analytics: dict) -> str:
 
             # ── Pass 3: build rows ─────────────────────────────────────────────
             t2_rows: list[str] = []
+
             for ticker, d in action_items:
                 s          = scores_by_ticker.get(ticker, {})
                 rank       = s.get("rank", "—")
@@ -1041,16 +1088,39 @@ def _build_portfolio_tables(analytics: dict) -> str:
                     f'</tr>'
                 )
 
+            # Phase 3 deploy rows (residual cash → highest-momentum HOLDs)
+            for ticker, d, deploy_usd, deploy_sh in deploy_items:
+                s        = scores_by_ticker.get(ticker, {})
+                rank     = s.get("rank", "—")
+                rank_str = f"#{rank} of {n_ranked}" if isinstance(rank, int) else "—"
+                gate     = gates_by_ticker.get(ticker, {})
+                z_val    = gate.get("z_score")
+                z_str    = f"{z_val:+.2f}" if z_val is not None else "—"
+                usd_str  = f"≈${deploy_usd:,.0f}"
+                sh_str   = f"≈{deploy_sh:,} sh" if deploy_sh and deploy_sh > 0 else "—"
+                t2_rows.append(
+                    f'<tr>'
+                    f'<td style="{_TD}"><strong>{ticker}</strong></td>'
+                    f'<td style="{_TD}">{d["l2"]}</td>'
+                    f'<td style="{_TDR}">{rank_str}</td>'
+                    f'<td style="{_TDR}">{z_str}</td>'
+                    f'<td style="border:1px solid #ddd; padding:5px 8px; text-align:center; '
+                    f'font-weight:bold; font-size:12px; background:#e3f2fd;">DEPLOY</td>'
+                    f'<td style="{_TD}">Residual cash deployment — rank {rank_str} in-band</td>'
+                    f'<td style="{_TDR}">{usd_str}</td>'
+                    f'<td style="{_TDR}">{sh_str}</td>'
+                    f'</tr>'
+                )
+
             # ── Budget summary ─────────────────────────────────────────────────
-            total_available = cash_mv + comp_sell_proceeds + mom_sell_proceeds
-            deferred_total  = sum(raw_trades[t][0] for t, d in action_items
-                                  if d["label"] == "DEFER-BUY")
+            deploy_total = sum(u for _, _, u, _ in deploy_items)
 
             _BS  = "border:1px solid #ddd; padding:4px 10px; font-size:12px; white-space:nowrap;"
             _BSR = ("border:1px solid #ddd; padding:4px 10px; text-align:right; "
                     "font-size:12px; font-family:monospace; white-space:nowrap;")
             _BSH = ("background:#f0f4f8; border:1px solid #bcd; padding:5px 10px; "
                     "font-size:12px; font-weight:bold;")
+            _SEP = f'<tr><td colspan="2" style="border:0; padding:2px 0;"></td></tr>'
 
             def _brow(lbl, val, bold=False, warn=False):
                 ls = _BS  + (" font-weight:bold;" if bold else "")
@@ -1062,21 +1132,39 @@ def _build_portfolio_tables(analytics: dict) -> str:
                 f'<tbody>'
                 f'<tr><td colspan="2" style="{_BSH}">Trade Budget</td></tr>'
                 + _brow("Cash on hand", cash_mv)
-                + _brow("+ Compliance trims / spike-trims", comp_sell_proceeds)
-                + _brow("+ Momentum trims", mom_sell_proceeds)
+                + _brow("+ Sell proceeds (trims / spike-trims)",
+                        comp_sell_proceeds + mom_sell_proceeds)
                 + _brow("= Total available", total_available, bold=True)
-                + f'<tr><td colspan="2" style="border:0; padding:2px 0;"></td></tr>'
-                + _brow("Compliance buys" + (" &nbsp;⚠ budget-scaled" if comp_buy_scale < 0.999 else ""),
-                        comp_buy_need * comp_buy_scale, warn=(comp_buy_scale < 0.999))
-                + _brow("Momentum buys"   + (" &nbsp;⚠ budget-scaled" if mom_buy_scale < 0.999 else ""),
-                        mom_buy_need * mom_buy_scale,  warn=(mom_buy_scale  < 0.999))
-                + _brow("= Net cash after trades", cash_after_all, bold=True,
-                        warn=(cash_after_all < 0))
+                + _SEP
             )
-            if deferred_total > 0:
+            if deferred_reserve > 0:
+                budget_html += _brow(
+                    "− DEFER-BUY reserve (ring-fenced)", deferred_reserve_actual,
+                    warn=(deferred_reserve_actual < deferred_reserve))
+            if policy_reserve > 0:
+                budget_html += _brow("− Policy cash reserve", policy_reserve_actual)
+            budget_html += (
+                _brow("= Deployable today",
+                      total_available - deferred_reserve_actual - policy_reserve_actual,
+                      bold=True)
+                + _SEP
+                + _brow("Compliance buys"
+                        + (" &nbsp;⚠ scaled" if comp_buy_scale < 0.999 else ""),
+                        comp_buy_need * comp_buy_scale, warn=(comp_buy_scale < 0.999))
+                + _brow("Momentum buys"
+                        + (" &nbsp;⚠ scaled" if mom_buy_scale < 0.999 else ""),
+                        mom_buy_need * mom_buy_scale, warn=(mom_buy_scale < 0.999))
+            )
+            if deploy_total > 0:
+                budget_html += _brow("Residual deployment (DEPLOY)", deploy_total)
+            budget_html += (
+                _brow("= Net cash after trades", cash_after_all, bold=True,
+                      warn=(cash_after_all < 0))
+            )
+            if deferred_reserve > 0:
                 budget_html += (
-                    f'<tr><td colspan="2" style="border:0; padding:2px 0;"></td></tr>'
-                    + _brow("DEFER-BUY — not executing today", deferred_total)
+                    _SEP
+                    + _brow("DEFER-BUY — fires within 10 days (reserved)", deferred_reserve)
                 )
             budget_html += '</tbody></table>'
 
