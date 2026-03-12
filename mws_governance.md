@@ -67,7 +67,7 @@ An inducted ticker with zero weight is dormant. Re-entry requires:
 - VIX below **28**
 - Initial weight at sleeve floor minimum
 
-**IBIT exception (2026-03-05):** Entered at 86 shares via manual discretionary override of the lifecycle gate. Logged as compliance exception.
+**IBIT exception (2026-03-05):** Entered via manual discretionary override of the lifecycle gate. Logged as compliance exception. Current position in `mws_holdings.csv`.
 
 ---
 

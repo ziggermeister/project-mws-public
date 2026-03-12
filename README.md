@@ -143,7 +143,7 @@ Each LLM run output is validated before email is sent:
 ## Key Design Decisions
 - Precious metals (IAUM, SIVR) separated from commodity miners — they behave oppositely in equity drawdowns *(v2.8.0)*
 - XLE reclassified from geopolitical_stress overlay → defense_energy sleeve *(v2.8.4)*
-- IBIT entered at 167 shares via discretionary override *(2026-03-05, compliance exception)*
+- IBIT entered via discretionary override *(2026-03-05, compliance exception)* — position in `mws_holdings.csv`
 - Geopolitical overlay disabled *(2026-03-04)*
 - Execution gate added *(v2.9.0)*, finalized after 4-round LLM review *(v2.9.2, 2026-03-10)*
 - SEPP withdrawal: $45K annually on Jan 5

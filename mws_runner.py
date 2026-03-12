@@ -39,8 +39,9 @@ import markdown as md
 import anthropic
 import pandas as pd
 
-# Now safe to import mws_analytics (matplotlib already set to Agg)
+# Now safe to import mws_analytics and mws_charts (matplotlib already set to Agg)
 import mws_analytics
+import mws_charts
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 TODAY          = datetime.now().strftime("%Y-%m-%d")
@@ -531,7 +532,7 @@ def main() -> None:
 
         # Generate equity curve chart (saved to mws_equity_curve.png)
         try:
-            mws_analytics.rotate_and_chart(analytics["df_scores"], analytics["policy"])
+            mws_charts.rotate_and_chart(analytics["df_scores"], analytics["policy"])
             log.info("Chart generated: %s", mws_analytics.CHART_FILENAME)
         except Exception as chart_err:
             log.warning("Chart generation skipped: %s", chart_err)
