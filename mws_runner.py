@@ -490,28 +490,51 @@ def send_email(response_text: str) -> None:
 
     subject = f"MWS Run — {TODAY} — {TRIGGER_REASON}"
 
-    # Outer container: mixed (allows body + attachment)
+    chart_path = mws_analytics.CHART_FILENAME
+    has_chart  = os.path.exists(chart_path)
+    chart_cid  = "mws_equity_curve"
+
+    # Build HTML — inject inline chart before </body> if available
+    html_body = _to_html(recommendation)
+    if has_chart:
+        chart_tag = (
+            f'<hr style="margin-top:24px">'
+            f'<img src="cid:{chart_cid}" style="max-width:100%;height:auto;" '
+            f'alt="MWS Equity Curve">'
+        )
+        html_body = html_body.replace("</body>", f"{chart_tag}</body>")
+
+    # MIME structure for inline image:
+    #   mixed
+    #     alternative
+    #       text/plain
+    #       related          ← only when chart present
+    #         text/html      ← references cid:mws_equity_curve
+    #         image/png      ← Content-ID + inline disposition
+    #     (no attachment)
     msg = MIMEMultipart("mixed")
     msg["Subject"] = subject
     msg["From"]    = from_addr
     msg["To"]      = to_addr
 
-    # Inner alternative: plain text + HTML (email client picks best)
-    body = MIMEMultipart("alternative")
-    body.attach(MIMEText(recommendation, "plain", "utf-8"))
-    body.attach(MIMEText(_to_html(recommendation), "html", "utf-8"))
-    msg.attach(body)
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(recommendation, "plain", "utf-8"))
 
-    # Attach equity curve chart if available
-    chart_path = mws_analytics.CHART_FILENAME
-    if os.path.exists(chart_path):
+    if has_chart:
+        related = MIMEMultipart("related")
+        related.attach(MIMEText(html_body, "html", "utf-8"))
         with open(chart_path, "rb") as f:
-            img = MIMEImage(f.read(), name=chart_path)
-            img.add_header("Content-Disposition", "attachment", filename=chart_path)
-            msg.attach(img)
-        log.info("Chart attached: %s", chart_path)
+            img = MIMEImage(f.read())
+        img.add_header("Content-ID", f"<{chart_cid}>")
+        img.add_header("Content-Disposition", "inline", filename=chart_path)
+        related.attach(img)
+        alt.attach(related)
+        log.info("Chart embedded inline: %s", chart_path)
     else:
-        log.warning("Chart not found, sending without attachment: %s", chart_path)
+        alt.attach(MIMEText(html_body, "html", "utf-8"))
+        log.warning("Chart not found, sending without chart: %s", chart_path)
+
+    msg.attach(alt)
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
         smtp.login(from_addr, password)
