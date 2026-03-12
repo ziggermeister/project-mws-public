@@ -1156,7 +1156,9 @@ def send_email(response_text: str, analytics: dict) -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    log.info("=== MWS GitHub Runner start | %s | trigger=%s ===", TODAY, TRIGGER_REASON)
+    skip_llm = os.environ.get("SKIP_LLM", "false").lower() in ("1", "true", "yes")
+    log.info("=== MWS GitHub Runner start | %s | trigger=%s | skip_llm=%s ===",
+             TODAY, TRIGGER_REASON, skip_llm)
 
     try:
         analytics = run_analytics()
@@ -1169,6 +1171,10 @@ def main() -> None:
             log.info("Chart generated: %s", mws_analytics.CHART_FILENAME)
         except Exception as chart_err:
             log.warning("Chart generation skipped: %s", chart_err)
+
+        if skip_llm:
+            log.info("SKIP_LLM set — analytics and chart complete; skipping LLM call and email.")
+            return
 
         prompt = build_prompt(analytics)
         log.info("Prompt built (%d chars)", len(prompt))

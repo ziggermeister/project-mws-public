@@ -18,6 +18,11 @@ on:
         description: "Why is this run being triggered?"
         required: false
         default: "manual"
+      skip_llm:
+        description: "Skip LLM call and email (analytics + chart only)"
+        required: false
+        default: "false"
+        type: boolean
 
 jobs:
   mws-run:
@@ -48,6 +53,7 @@ jobs:
           GMAIL_FROM: ${{ secrets.GMAIL_FROM }}
           GMAIL_TO: ${{ secrets.GMAIL_TO }}
           TRIGGER_REASON: ${{ github.event.inputs.trigger_reason || 'scheduled' }}
+          SKIP_LLM: ${{ github.event.inputs.skip_llm || 'false' }}
           MPLBACKEND: Agg   # headless matplotlib — no display needed
         run: python mws_runner.py
 
