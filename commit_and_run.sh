@@ -6,10 +6,16 @@
 #   1. Commit any changed files (holdings, policy, ticker history, etc.)
 #   2. Push to main
 #   3. Run mws_analytics.py locally for charts + diagnostic output
+#      (No LLM call, no email — pure local math/diagnostics)
+#
+# To run a FULL LLM analysis locally (equivalent to GitHub Actions):
+#   export ANTHROPIC_API_KEY=...
+#   export GMAIL_APP_PASSWORD=... GMAIL_FROM=... GMAIL_TO=...
+#   python3 mws_github_runner.py
 #
 # Automated cloud runs (no laptop needed):
 #   • Daily price fetch:  GitHub Actions weekdays at 21:30 UTC
-#   • Weekly LLM run:     GitHub Actions every Monday at 14:00 UTC
+#   • LLM run:            GitHub Actions weekdays at 14:30 UTC + 21:30 UTC
 #   • On-demand LLM run:  GitHub → Actions → "MWS Portfolio Run" → Run workflow
 #   • Interactive run:    Ask Claude directly in this session
 #
@@ -32,12 +38,14 @@ git add \
   mws_analytics.py \
   mws_github_runner.py \
   mws_fetch_history.py \
+  mws_llm_run_prompt.md \
   requirements.txt \
   .gitignore \
   commit_and_run.sh \
+  README.md \
+  test_mws.py \
   .github/workflows/mws_run.yml \
-  .github/workflows/mws_daily.yml \
-  mws_llm_run_prompt.md
+  .github/workflows/mws_daily.yml
 
 # ── Commit if anything changed ────────────────────────────────────────────────
 if git diff --cached --quiet; then
@@ -56,6 +64,7 @@ python3 mws_analytics.py
 echo ""
 echo "Done. Automated runs:"
 echo "  • Daily price fetch:  GitHub Actions weekdays at 21:30 UTC"
-echo "  • LLM run:            GitHub Actions weekdays at 14:30 UTC (open+30) and 21:30 UTC (close+30)"
+echo "  • LLM run:            GitHub Actions weekdays at 14:30 UTC (open+30) and 22:00 UTC (after price fetch)"
 echo "  • On-demand LLM run:  GitHub → Actions → MWS Portfolio Run → Run workflow"
+echo "  • Local LLM run:      python3 mws_github_runner.py (requires env vars)"
 echo "  • Interactive run:    Ask Claude directly in this session"

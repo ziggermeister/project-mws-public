@@ -2,12 +2,14 @@ name: MWS Portfolio Run
 
 on:
   # Weekdays 30 min after market open  (14:30 UTC = 10:30 AM ET)
-  # Weekdays 30 min after market close (21:30 UTC =  5:30 PM ET)
+  # Weekdays 30 min after price fetch   (22:00 UTC =  6:00 PM ET)
+  #   ↑ mws_daily.yml fetches prices at 21:30 UTC; this run is offset +30 min
+  #     to ensure fresh prices are committed before the LLM run checks out the repo.
   # First-Monday-of-month rebalance check is handled by the LLM runner
   # reading the policy triggers, not by cron filtering
   schedule:
     - cron: "30 14 * * 1-5"
-    - cron: "30 21 * * 1-5"
+    - cron: "0 22 * * 1-5"
 
   # Manual on-demand trigger from GitHub Actions UI or API
   workflow_dispatch:
