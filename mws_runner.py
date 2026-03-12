@@ -873,17 +873,21 @@ def _build_portfolio_tables(analytics: dict) -> str:
             t2_cols = [
                 ("Ticker", ""),
                 ("Sleeve", "L2 sleeve this ticker belongs to"),
-                ("Rank", f"Momentum rank, #1 = strongest (of {n_ranked})"),
-                ("Action", "BUY / DEFER-BUY / TRIM / SPIKE-TRIM"),
-                ("Basis",  "Why this action was triggered"),
+                ("Rank", f"Momentum rank within universe, #1 = strongest (of {n_ranked} tickers)"),
+                ("Vol z-score",
+                 "2-day return divided by EWMA volatility (126-day span). "
+                 "Measures whether the ticker is spiking or crashing right now. "
+                 "BUY is deferred when z >= +2.0 (don't chase a spike). "
+                 "SELL is deferred when z <= -2.5 (don't sell into capitulation). "
+                 "SPIKE-TRIM fires immediately when z >= +2.0 on a sell signal (sell into strength)."),
+                ("Action", "BUY / DEFER-BUY / TRIM / SPIKE-TRIM — determined by sleeve compliance, "
+                 "momentum rank, and vol z-score above"),
+                ("Basis",  "Primary reason the action was triggered"),
                 ("Est. Trade",
-                 "Estimated trade size. Compliance-driven: sleeve deficit/excess prorated to ticker. "
-                 "Momentum-driven within-band: size determined by allocator (shown as dash)."),
-                ("Est. Shares", "Approximate shares at current price"),
-                ("Gate z",
-                 "Execution gate z-score: 2-day return divided by EWMA vol (126-day). "
-                 "BUY deferred if z >= +2.0; SELL deferred if z <= -2.5; "
-                 "SPIKE-TRIM triggered if z >= +2.0 on SELL direction."),
+                 "Estimated trade size in USD. "
+                 "Compliance-driven (sleeve out of band): sleeve deficit or excess prorated to ticker by market value. "
+                 "Momentum-driven within-band: size is determined by the allocator — shown as dash."),
+                ("Est. Shares", "Approximate number of shares at current price"),
             ]
             t2_thead = (
                 "<thead><tr>"
@@ -935,12 +939,12 @@ def _build_portfolio_tables(analytics: dict) -> str:
                     f'<td style="{_TD}"><strong>{ticker}</strong></td>'
                     f'<td style="{_TD}">{d["l2"]}</td>'
                     f'<td style="{_TDR}">{rank_str}</td>'
+                    f'<td style="{_TDR}">{z_str}</td>'
                     f'<td style="border:1px solid #ddd; padding:5px 8px; text-align:center; '
                     f'font-weight:bold; font-size:12px; background:{color};">{label}</td>'
                     f'<td style="{_TD}">{basis_str}</td>'
                     f'<td style="{_TDR}">{est_usd_str}</td>'
                     f'<td style="{_TDR}">{est_sh_str}</td>'
-                    f'<td style="{_TDR}">{z_str}</td>'
                     f'</tr>'
                 )
 
