@@ -1,0 +1,58 @@
+# MWS Backlog
+
+Items logged for future policy review cycles. **Not active constraints. Not part of the execution gate.**
+
+Previously stored in `mws_policy.json → future_review_items` (removed in v2.9.2 — policy files should contain only binding rules).
+
+---
+
+## ewma_regime_shift_vol_clamp
+**Status:** `implemented_v2.9.4`
+**Source:** ChatGPT fat-tail review (2026-03-11), confirmed by Gemini. Full F1 validation completed 2026-03-11 against extended history (2019–2026).
+**Implemented:** 2026-03-11
+
+EWMA volatility lags true volatility during regime transitions, causing z-score gate to oscillate between blindness (vol spike: EWMA slow to rise, threshold widens, gate stops firing) and over-firing (post-crisis: EWMA slow to fall, routine moves score as statistically extreme). Fix: `effective_vol = clamp(ewma_vol, 0.75 × realized_vol_1y, 1.50 × realized_vol_1y)`. Affects all tickers; disproportionate impact on SIVR and IBIT.
+
+**Validation verdict:** PASS. Both bounds well-calibrated across 7 years including COVID (2020) and rate-shock (2022) regimes. Bank of Canada calm-window ceiling concern not empirically confirmed (EWMA/RV1y ratios 0.86–1.11 at onset, below 1.50× ceiling). Ceiling binds mid-COVID (April 2020) to prevent gate lock-up at maximum drawdown. No clamp interaction during 2022 slow grind.
+
+---
+
+## iaum_fat_tail_monitoring
+**Status:** `logged_for_future_review`
+**Source:** ChatGPT + Gemini fat-tail review (2026-03-11)
+**Priority:** Low
+**Scope:** Execution gate — IAUM only
+
+IAUM (gold) EWMA/empirical gap at 1.58pp buy-side (emp_p97.5 = 3.86%, EWMA 2σ = 5.44%). Below the 2pp intervention threshold. Sell-gap at 2.97pp — borderline (trigger at 3pp).
+
+**Action:** Monitor `ewma_emp_gap` for IAUM in rebalance run logs. Trigger review if buy-gap > 2pp or sell-gap > 3pp. Run calibration audit after each monthly rebalance until sell-gap stabilises below 2.5pp.
+
+**Current gaps (as of 2026-03-11):**
+- Buy-gap: −1.24pp (trigger: 2.0pp)
+- Sell-gap: −2.97pp (trigger: 3.0pp) ← borderline
+
+---
+
+## allocation_layer_sleeve_constraint_interaction
+**Status:** `logged_for_future_review`
+**Source:** ChatGPT Round 4 (2026-03-10), out-of-scope observation
+**Priority:** Low
+**Scope:** Allocation engine
+
+`percentile_in_band` + sleeve-constraint interaction may create systematic over-weighting of mid-rank assets during regime transitions. When momentum ranks shift sharply, mid-rank tickers within a sleeve at its L1 cap receive proportionally more weight than their updated rank warrants (reallocation bounded by cap). Effect: short-lived over-weight in transitional assets during the rebalance cycle immediately following a regime shift.
+
+**Action:** Investigate in next allocation-engine policy review. Quantify via regime-transition backtests.
+
+---
+
+## urnm_buy_gate_monitoring
+**Status:** `logged_for_future_review`
+**Source:** Portfolio-wide gate calibration audit 2026-03-11
+**Priority:** Low
+**Scope:** Execution gate — URNM buy-side only
+**Trigger:** `buy_gap_pp > 3.0`
+
+URNM (uranium miners) buy-side EWMA/empirical gap at +1.74pp (emp_p97.5 = 11.19% vs EWMA 2σ gate = 9.45%). Below 3pp recalibration threshold but trending toward fat-tail divergence. Back-solved buy sigma = 2.37 (vs global 2.0). If buy-gap exceeds 3pp: add URNM to `per_ticker_thresholds` with `gate_sigma_buy` override.
+
+**Current gap (as of 2026-03-11):** 1.74pp
+**Action:** Include URNM in monthly calibration audit output. No action until `buy_gap_pp > 3pp` for 2 consecutive monthly runs.

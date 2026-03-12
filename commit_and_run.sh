@@ -34,11 +34,13 @@ git add \
   mws_tracker.json \
   mws_market_context.md \
   mws_run_results.csv \
-  mws_macro.md \
+  mws_governance.md \
   mws_analytics.py \
+  mws_charts.py \
   mws_runner.py \
   mws_fetch_history.py \
   mws_llm_run_prompt.md \
+  BACKLOG.md \
   requirements.txt \
   .gitignore \
   commit_and_run.sh \

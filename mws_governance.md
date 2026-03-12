@@ -1,19 +1,18 @@
-# Momentum-Weighted Scaling (MWS) v2.8.5
-## Macro Lens & Governance Addendum
-**As-of:** 2026-03-05
-**Authoritative Source:** mws_policy.json
-**Role:** Advisory / explanatory only. Policy JSON is binding.
+# Momentum-Weighted Scaling (MWS) v2.9.2
+## Governance Document
+**As-of:** 2026-03-11
+**Role:** Authoritative governance rationale. Read by `mws_runner.py` and injected into every LLM run as governance context.
 
 ---
 
 ## 0. Scope & Precedence
 
-This document explains how the Momentum-Weighted Scaling (MWS) system is intended to operate **given the current policy configuration**.
+This document is **authoritative governance rationale** for the MWS system. It is injected into every LLM run prompt under the `GOVERNANCE RATIONALE` heading.
 If any conflict exists:
 
-1. `mws_policy.json` is authoritative
+1. `mws_policy.json` is authoritative for binding rules (caps, floors, signals, constraints)
 2. Execution code is authoritative over prose
-3. This document provides interpretation and macro context only
+3. This document governs intent, architecture rationale, and invariants not expressed in JSON
 
 ---
 

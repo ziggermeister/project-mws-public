@@ -6,8 +6,8 @@ A systematic, rules-based portfolio management system for a personal investment 
 
 ## ⚠️ Authority & Precedence
 
-> **`mws_policy.json` is the single authoritative source of truth.**
-> `mws_macro.md` is advisory/explanatory only.
+> **`mws_policy.json` is the single authoritative source of truth for binding rules.**
+> `mws_governance.md` is authoritative governance rationale (injected into every LLM run).
 > Execution code is authoritative over prose.
 > Any conflict: policy JSON wins.
 
@@ -33,7 +33,8 @@ A systematic, rules-based portfolio management system for a personal investment 
 | File | Role |
 |------|------|
 | [`mws_policy.json`](mws_policy.json) | **Binding rule set** — caps, floors, signals, constraints, lifecycle rules, execution gate |
-| [`mws_macro.md`](mws_macro.md) | Explanatory governance doc (advisory only) |
+| [`mws_governance.md`](mws_governance.md) | **Authoritative governance rationale** — injected into every LLM run prompt |
+| [`BACKLOG.md`](BACKLOG.md) | Future review items (not active constraints; not part of execution) |
 
 ### Data
 | File | Role |
@@ -49,9 +50,10 @@ A systematic, rules-based portfolio management system for a personal investment 
 | File | Role |
 |------|------|
 | [`mws_runner.py`](mws_runner.py) | Main runner — price fetch, LLM call, schema validation, email |
-| [`mws_analytics.py`](mws_analytics.py) | Local analytics engine — charts, breach flags, diagnostics |
+| [`mws_analytics.py`](mws_analytics.py) | Analytics library — momentum rankings, breach flags, diagnostics (imported by runner + local) |
+| [`mws_charts.py`](mws_charts.py) | Charting engine — equity curve + alpha panels (local only; not loaded by GitHub Actions CI) |
 | [`mws_fetch_history.py`](mws_fetch_history.py) | Incremental price history fetcher (used by daily GitHub Action) |
-| [`mws_llm_run_prompt.md`](mws_llm_run_prompt.md) | Canonical LLM run prompt (injected at runtime; also usable manually with ChatGPT/Gemini) |
+| [`mws_llm_run_prompt.md`](mws_llm_run_prompt.md) | LLM run prompt for **manual use** with ChatGPT / Gemini (runner builds its own prompt inline) |
 | [`commit_and_run.sh`](commit_and_run.sh) | Local workflow: commit data files, push, run local analytics |
 | [`convert.py`](convert.py) | One-off utility: converts Chase positions.csv export → `mws_holdings.csv` |
 
@@ -158,8 +160,9 @@ https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_hold
 https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_tracker.json
 https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_ticker_history.csv
 https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_recent_performance.csv
-https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_macro.md
+https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_governance.md
 https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_analytics.py
+https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_charts.py
 https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_runner.py
 https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_llm_run_prompt.md
 ```
