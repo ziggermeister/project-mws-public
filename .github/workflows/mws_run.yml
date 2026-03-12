@@ -1,11 +1,13 @@
 name: MWS Portfolio Run
 
 on:
-  # Every Monday at 14:00 UTC (10am ET) — weekly monitoring
+  # Weekdays 30 min after market open  (14:30 UTC = 10:30 AM ET)
+  # Weekdays 30 min after market close (21:30 UTC =  5:30 PM ET)
   # First-Monday-of-month rebalance check is handled by the LLM runner
   # reading the policy triggers, not by cron filtering
   schedule:
-    - cron: "0 14 * * 1"
+    - cron: "30 14 * * 1-5"
+    - cron: "30 21 * * 1-5"
 
   # Manual on-demand trigger from GitHub Actions UI or API
   workflow_dispatch:

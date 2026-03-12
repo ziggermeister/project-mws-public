@@ -36,7 +36,8 @@ git add \
   .gitignore \
   commit_and_run.sh \
   .github/workflows/mws_run.yml \
-  .github/workflows/mws_daily.yml
+  .github/workflows/mws_daily.yml \
+  mws_llm_run_prompt.md
 
 # ── Commit if anything changed ────────────────────────────────────────────────
 if git diff --cached --quiet; then
@@ -55,6 +56,6 @@ python3 mws_analytics.py
 echo ""
 echo "Done. Automated runs:"
 echo "  • Daily price fetch:  GitHub Actions weekdays at 21:30 UTC"
-echo "  • Weekly LLM run:     GitHub Actions every Monday at 14:00 UTC"
+echo "  • LLM run:            GitHub Actions weekdays at 14:30 UTC (open+30) and 21:30 UTC (close+30)"
 echo "  • On-demand LLM run:  GitHub → Actions → MWS Portfolio Run → Run workflow"
 echo "  • Interactive run:    Ask Claude directly in this session"
