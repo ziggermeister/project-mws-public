@@ -1,4 +1,4 @@
-<!-- MWS_LLM_RUN_PROMPT v1.7 — 2026-03-12 -->
+<!-- MWS_LLM_RUN_PROMPT v1.8 — 2026-03-12 -->
 <!-- CANONICAL MWS EXECUTION PROTOCOL — read by any LLM to run a full MWS cycle.   -->
 <!--                                                                                 -->
 <!-- The protocol never changes between runs. Only the live data changes.            -->
@@ -564,22 +564,23 @@ directly (mws_holdings.csv, mws_tracker.json, analytics output). Do not ask the 
 **Step 4 — Execute protocol Steps 1–8** — use `web_search` for Step 1 (news).
 Produce both output blocks (market context + recommendation) per the OUTPUT FORMAT section.
 
-### Mode 3 — Manual use with ChatGPT or Gemini
-No Bash tool available. Export and paste data manually.
+### Mode 3 — Manual local run (`./commit_and_run.sh`)
+User runs `./commit_and_run.sh` from the terminal. **No LLM call, no email, no news search.**
+Purpose: commit updated files (holdings, policy, runner code, etc.), push to main, and run
+local analytics for diagnostics and charts only.
 
-**Mandatory pre-analysis steps (always, in this order — run locally before pasting):**
-1. **Fetch today's prices locally** — `python3 mws_fetch_history.py` — **mandatory**; do this
-   before exporting data. Stale prices produce incorrect momentum scores.
-2. **Run analytics locally** — `python3 mws_analytics.py`
-3. Export `mws_holdings.csv`, `mws_tracker.json`, and the momentum/gate tables, and paste them
-   into the `{{PLACEHOLDER}}` blocks above.
+**What it does:**
+1. Stages and commits all tracked source files (holdings, policy, runner, etc.) if changed
+2. Pushes to main
+3. Runs `mws_analytics.py` locally — produces momentum scores, sleeve status, breach flags,
+   and charts for local review
 
-- **ChatGPT (OpenAI):** Use Browse/search capability for Step 1 (news).
-- **Gemini (Google):** Use Grounding/search for Step 1 (news).
+**What it does NOT do:** price fetch, LLM call, news search, email, or execution gate output.
+Use Mode 1 or Mode 2 for a full run with recommendations.
 
 ---
 
-*End of MWS LLM Run Prompt — v1.7 — 2026-03-12*
+*End of MWS LLM Run Prompt — v1.8 — 2026-03-12*
 *Review status: CLEARED FOR PRODUCTION COMMIT.*
 *Gemini ✓ Round 1 (4 fixes) + Red-team PASS (all 4 tests). ChatGPT ✓ Round 1 (4 fixes) + Deep Research (3 fixes). v1.4 (3 runner fixes). v1.5: three-mode portability notes; price fetch made mandatory in all modes. v1.6: promoted to canonical protocol; Mode 2 self-sufficient. v1.7: Mode 2 Step 0 — ask for updated holdings, accept broker paste, reformat to mws_holdings.csv preserving Class, commit + push before run. All adversarial tests pass.*
 
