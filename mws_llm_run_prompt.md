@@ -1,8 +1,11 @@
-<!-- MWS_LLM_RUN_PROMPT v1.5 — 2026-03-12 -->
-<!-- FOR MANUAL USE (ChatGPT / Gemini) ONLY.                                        -->
-<!-- The automated runner (mws_runner.py) builds its own inline prompt in            -->
-<!-- build_prompt() and does NOT read this file. This file documents the same        -->
-<!-- protocol in a form that can be pasted into ChatGPT or Gemini with live data.   -->
+<!-- MWS_LLM_RUN_PROMPT v1.6 — 2026-03-12 -->
+<!-- CANONICAL MWS EXECUTION PROTOCOL — read by any LLM to run a full MWS cycle.   -->
+<!--                                                                                 -->
+<!-- The protocol never changes between runs. Only the live data changes.            -->
+<!-- Three execution modes — see "LLM Portability Notes" near the end of this file. -->
+<!--                                                                                 -->
+<!-- Note: mws_runner.py does NOT read this file. It builds its own inline prompt   -->
+<!-- via build_prompt(). This file is the human-readable / LLM-readable equivalent. -->
 <!-- REVIEW HISTORY:                                                                 -->
 <!--   Gemini Fix 1: Funding invariant — sells are target-weight-driven.            -->
 <!--   Gemini Fix 2: Allocatable denominator locked in Step 0.                      -->
@@ -528,17 +531,19 @@ This prompt is designed to be LLM-agnostic. Three execution modes exist:
 Sequence: `mws_fetch_history.py` → `mws_analytics.py` → `mws_runner.py` → Claude API → email.
 
 ### Mode 2 — Claude interactive session (Claude with Bash tool, no runner)
-Use when asking Claude directly in a chat session. Claude must use the Bash tool to run the
-scripts — do **not** paste data manually.
+The user says something like "run MWS" or "do a full run." Claude reads **this file** as its
+complete instruction set and executes the full protocol autonomously using the Bash tool.
+The protocol is identical every run — only the live data differs.
 
-**Mandatory pre-analysis steps (always, in this order):**
-1. **Fetch today's prices** — `python3 mws_fetch_history.py` — this is **never optional**;
-   running analytics on stale prices produces incorrect momentum scores.
+**Mandatory pre-analysis steps (always, in this order — Claude runs these via Bash):**
+1. **Fetch today's prices** — `python3 mws_fetch_history.py` — **never optional**;
+   stale prices produce incorrect momentum scores and invalid gate z-scores.
 2. **Run analytics** — `python3 mws_analytics.py` — produces momentum rankings, gate z-scores,
-   and sleeve status from the now-current history file.
-3. **Proceed with analysis** — read the output files and apply the steps in this prompt.
-   Use `web_search` for Step 1 (news). The `{{PLACEHOLDER}}` values are populated by reading
-   the output files directly (not pasted by user).
+   sleeve status, and drawdown state from the now-current history file.
+3. **Read output files** — populate all `{{PLACEHOLDER}}` values by reading the files directly
+   (mws_holdings.csv, mws_tracker.json, analytics output). Do not ask the user to paste data.
+4. **Proceed with Steps 1–8 of this protocol** — use `web_search` for Step 1 (news).
+   Produce both output blocks (market context + recommendation) per the OUTPUT FORMAT section.
 
 ### Mode 3 — Manual use with ChatGPT or Gemini
 No Bash tool available. Export and paste data manually.
@@ -555,9 +560,9 @@ No Bash tool available. Export and paste data manually.
 
 ---
 
-*End of MWS LLM Run Prompt — v1.5 — 2026-03-12*
+*End of MWS LLM Run Prompt — v1.6 — 2026-03-12*
 *Review status: CLEARED FOR PRODUCTION COMMIT.*
-*Gemini ✓ Round 1 (4 fixes) + Red-team PASS (all 4 tests). ChatGPT ✓ Round 1 (4 fixes) + Deep Research (3 fixes). v1.4 (3 runner fixes). v1.5: three-mode portability notes; price fetch made mandatory in all modes. All adversarial tests pass.*
+*Gemini ✓ Round 1 (4 fixes) + Red-team PASS (all 4 tests). ChatGPT ✓ Round 1 (4 fixes) + Deep Research (3 fixes). v1.4 (3 runner fixes). v1.5: three-mode portability notes; price fetch made mandatory in all modes. v1.6: promoted to canonical protocol for all LLM modes; Mode 2 (Claude interactive) clarified as self-sufficient — Claude reads this file and runs full protocol autonomously. All adversarial tests pass.*
 
 ---
 
