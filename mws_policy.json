@@ -1809,7 +1809,7 @@
         "cloud_runner": {
           "platform": "GitHub Actions",
           "workflow_file": ".github/workflows/mws_run.yml",
-          "orchestrator_script": "mws_github_runner.py",
+          "orchestrator_script": "mws_runner.py",
           "laptop_required": false,
           "schedule": "Every Monday 14:00 UTC (9am ET). Runner determines if full rebalance is warranted per policy calendar trigger.",
           "on_demand": "GitHub → Actions → MWS Portfolio Run → Run workflow (no laptop required)",

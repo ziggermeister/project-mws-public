@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-mws_github_runner.py — GitHub Actions orchestrator for MWS portfolio runs.
+mws_runner.py — MWS portfolio run orchestrator (GitHub Actions + local).
 
 Runs automatically on weekdays at market open +30 min (14:30 UTC) and
 market close +30 min (21:30 UTC) via GitHub Actions cron,
@@ -66,7 +66,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
-log = logging.getLogger("mws_github_runner")
+log = logging.getLogger("mws_runner")
 
 
 # ── Step 1: Run Python analytics ──────────────────────────────────────────────

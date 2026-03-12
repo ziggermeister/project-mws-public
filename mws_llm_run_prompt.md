@@ -1,6 +1,6 @@
 <!-- MWS_LLM_RUN_PROMPT v1.4 — 2026-03-11 -->
 <!-- This file IS the canonical LLM run prompt for the MWS portfolio system.        -->
-<!-- It is filled with runtime data by mws_github_runner.py and passed to the LLM.  -->
+<!-- It is filled with runtime data by mws_runner.py and passed to the LLM.  -->
 <!-- It may also be used directly with ChatGPT / Gemini by pasting with data filled. -->
 <!-- REVIEW HISTORY:                                                                 -->
 <!--   Gemini Fix 1: Funding invariant — sells are target-weight-driven.            -->

@@ -20,7 +20,7 @@ A systematic, rules-based portfolio management system for a personal investment 
 | **GitHub Actions — LLM run** | Auto: 14:30 UTC + 22:00 UTC weekdays | Calls Claude API → news fetch → momentum → rebalance reco → schema validation → HTML email → commits outputs |
 | **GitHub Actions — price fetch** | Auto: 21:30 UTC weekdays | Fetches latest prices, commits `mws_ticker_history.csv` |
 | **On-demand LLM run** | GitHub → Actions → "MWS Portfolio Run" → Run workflow | Same as scheduled LLM run |
-| **Local LLM run** | `python mws_github_runner.py` | Full LLM run locally (requires env vars: `ANTHROPIC_API_KEY`, `GMAIL_APP_PASSWORD`, `GMAIL_FROM`, `GMAIL_TO`) |
+| **Local LLM run** | `python mws_runner.py` | Full LLM run locally (requires env vars: `ANTHROPIC_API_KEY`, `GMAIL_APP_PASSWORD`, `GMAIL_FROM`, `GMAIL_TO`) |
 | **Local data sync** | `./commit_and_run.sh` | Commits changed data files, pushes to main, runs `mws_analytics.py` for local charts + diagnostics. No LLM call, no email. |
 
 > **Scheduling:** Price fetch runs at 21:30 UTC; evening LLM run is offset to 22:00 UTC to ensure fresh prices are committed before the LLM run checks out the repo.
@@ -48,7 +48,7 @@ A systematic, rules-based portfolio management system for a personal investment 
 ### Execution
 | File | Role |
 |------|------|
-| [`mws_github_runner.py`](mws_github_runner.py) | Main runner — price fetch, LLM call, schema validation, email |
+| [`mws_runner.py`](mws_runner.py) | Main runner — price fetch, LLM call, schema validation, email |
 | [`mws_analytics.py`](mws_analytics.py) | Local analytics engine — charts, breach flags, diagnostics |
 | [`mws_fetch_history.py`](mws_fetch_history.py) | Incremental price history fetcher (used by daily GitHub Action) |
 | [`mws_llm_run_prompt.md`](mws_llm_run_prompt.md) | Canonical LLM run prompt (injected at runtime; also usable manually with ChatGPT/Gemini) |
@@ -160,6 +160,6 @@ https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_tick
 https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_recent_performance.csv
 https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_macro.md
 https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_analytics.py
-https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_github_runner.py
+https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_runner.py
 https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_llm_run_prompt.md
 ```

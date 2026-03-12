@@ -11,7 +11,7 @@
 # To run a FULL LLM analysis locally (equivalent to GitHub Actions):
 #   export ANTHROPIC_API_KEY=...
 #   export GMAIL_APP_PASSWORD=... GMAIL_FROM=... GMAIL_TO=...
-#   python3 mws_github_runner.py
+#   python3 mws_runner.py
 #
 # Automated cloud runs (no laptop needed):
 #   • Daily price fetch:  GitHub Actions weekdays at 21:30 UTC
@@ -36,7 +36,7 @@ git add \
   mws_run_results.csv \
   mws_macro.md \
   mws_analytics.py \
-  mws_github_runner.py \
+  mws_runner.py \
   mws_fetch_history.py \
   mws_llm_run_prompt.md \
   requirements.txt \
@@ -66,5 +66,5 @@ echo "Done. Automated runs:"
 echo "  • Daily price fetch:  GitHub Actions weekdays at 21:30 UTC"
 echo "  • LLM run:            GitHub Actions weekdays at 14:30 UTC (open+30) and 22:00 UTC (after price fetch)"
 echo "  • On-demand LLM run:  GitHub → Actions → MWS Portfolio Run → Run workflow"
-echo "  • Local LLM run:      python3 mws_github_runner.py (requires env vars)"
+echo "  • Local LLM run:      python3 mws_runner.py (requires env vars)"
 echo "  • Interactive run:    Ask Claude directly in this session"

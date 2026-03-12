@@ -47,7 +47,7 @@ def _bench_display(ticker: str) -> str:
     return BENCH_DISPLAY_NAMES.get(ticker.upper(), ticker.upper())
 
 # ── File paths — single source of truth for all scripts ──────────────────────
-# mws_github_runner.py and any other scripts import these constants
+# mws_runner.py and any other scripts import these constants
 # rather than hardcoding filenames independently.
 POLICY_FILENAME  = "mws_policy.json"
 TRACKER_FILENAME = "mws_tracker.json"
