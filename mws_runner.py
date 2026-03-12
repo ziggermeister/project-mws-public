@@ -511,10 +511,14 @@ _EMAIL_CSS = """
 </style>
 """
 
+def _md_to_fragment(text: str) -> str:
+    """Convert markdown to an HTML fragment (no <html>/<body> wrapper)."""
+    return md.markdown(text, extensions=["tables", "nl2br", "fenced_code"])
+
+
 def _to_html(text: str) -> str:
-    """Convert markdown to styled HTML suitable for email."""
-    body_html = md.markdown(text, extensions=["tables", "nl2br", "fenced_code"])
-    return f"<html><head>{_EMAIL_CSS}</head><body>{body_html}</body></html>"
+    """Convert markdown to styled HTML suitable for email (full document)."""
+    return f"<html><head>{_EMAIL_CSS}</head><body>{_md_to_fragment(text)}</body></html>"
 
 
 def _df_to_md_table(df: pd.DataFrame) -> str:
@@ -533,13 +537,39 @@ def _df_to_md_table(df: pd.DataFrame) -> str:
 
 def _build_portfolio_tables(analytics: dict) -> str:
     """
-    Build markdown tables summarising live portfolio state for the email body:
-      - Sleeve allocation vs policy floor / cap
-      - Momentum rankings (df_scores)
-      - Execution gate status (df_gates, if non-empty)
+    Build a unified portfolio-state HTML table for the email body.
 
-    Returns a markdown string or a short error notice if construction fails.
+    One table, hierarchically grouped: Portfolio → L1 (sorted by $MV desc) →
+    L2 (sorted by $MV desc within L1) → Ticker (sorted by momentum rank desc).
+
+    Columns: L1 / L2 | Ticker | Rank% | α/VTI | Wt% | $MV | Action | Gate z
+
+    Action colour coding:
+      BUY        → green   (#c8e6c9)
+      DEFER-BUY  → amber   (#ffe082)
+      TRIM       → red     (#ffcdd2)
+      HOLD       → yellow  (#fff9c4)
+      SPIKE-TRIM → teal    (#b2ebf2)  – sell into strength
+
+    Action derivation (per ticker):
+      • Sleeve below floor            → BUY  (sleeve needs capital)
+      • Sleeve above cap              → TRIM (sleeve over-allocated)
+      • In-band, ticker Pct ≥ 0.65   → BUY  (strong momentum, within-sleeve add)
+      • In-band, ticker Pct ≤ 0.30   → TRIM (weak momentum, within-sleeve trim)
+      • Everything else               → HOLD
+      • gate_action == "defer"        → BUY → DEFER-BUY
+      • gate_action == "spike_trim"   → SPIKE-TRIM (overrides all)
+
+    Returns an HTML string (no <html>/<body> wrapper).
     """
+    # ── Inline style constants ────────────────────────────────────────────────
+    _TH = (
+        "background:#f0f4f8; border:1px solid #bcd; padding:6px 10px; "
+        "text-align:left; white-space:nowrap; font-size:12px;"
+    )
+    _TD  = "border:1px solid #ddd; padding:5px 8px; white-space:nowrap; font-size:12px;"
+    _TDR = "border:1px solid #ddd; padding:5px 8px; text-align:right; white-space:nowrap; font-size:12px;"
+
     try:
         policy    = analytics["policy"]
         hold      = analytics["holdings"].copy()
@@ -551,8 +581,8 @@ def _build_portfolio_tables(analytics: dict) -> str:
         df_gates  = analytics["df_gates"]
 
         # ── Per-ticker market value ───────────────────────────────────────────
-        fixed_raw  = (policy.get("governance", {}) or {}).get("fixed_asset_prices", {}) or {}
-        latest_px  = hist.sort_values("Date").groupby("Ticker")["AdjClose"].last()
+        fixed_raw = (policy.get("governance", {}) or {}).get("fixed_asset_prices", {}) or {}
+        latest_px = hist.sort_values("Date").groupby("Ticker")["AdjClose"].last()
 
         def _get_price(ticker: str) -> float:
             entry = fixed_raw.get(ticker)
@@ -571,93 +601,240 @@ def _build_portfolio_tables(analytics: dict) -> str:
 
         hold["Price"] = hold["Ticker"].map(_get_price)
         hold["MV"]    = hold["Shares"] * hold["Price"]
+        held_tickers  = set(hold["Ticker"].tolist())
 
         # ── Allocatable denominator ───────────────────────────────────────────
         overlay_mv  = hold.loc[hold["Class"] == "managed_futures", "MV"].sum()
         bucket_a_mv = hold.loc[hold["Class"] == "bucket_a",        "MV"].sum()
         alloc_denom = total_val - overlay_mv - bucket_a_mv
 
+        # ── Lookup dicts: momentum + gate ─────────────────────────────────────
+        scores_by_ticker: dict = {}
+        if not df_scores.empty:
+            for _, row in df_scores.iterrows():
+                scores_by_ticker[row["Ticker"]] = {
+                    "pct":   float(row["Pct"]) if pd.notna(row["Pct"]) else 0.0,
+                    "alpha": str(row.get("Alpha", "—")),
+                }
+
+        gates_by_ticker: dict = {}
+        if df_gates is not None and not df_gates.empty:
+            for _, row in df_gates.iterrows():
+                gates_by_ticker[str(row["ticker"])] = {
+                    "action":  str(row.get("gate_action", "proceed")),
+                    "z_score": row.get("z_score"),
+                }
+
         # ── Policy sleeve layout ──────────────────────────────────────────────
         sleeves_l1 = policy["sleeves"]["level1"]
         sleeves_l2 = policy["sleeves"]["level2"]
 
-        lines: list = []
+        # ── Per-sleeve $MV totals ─────────────────────────────────────────────
+        def _l2_mv(name: str) -> float:
+            return float(hold.loc[hold["Class"] == name, "MV"].sum())
 
-        # ── Portfolio status line ─────────────────────────────────────────────
-        dd_state = dd.get("state", "normal").upper()
-        dd_pct   = abs(dd.get("drawdown", 0)) * 100
-        peak_tpv = dd.get("peak_tpv", total_val)
-        lines += [
-            f"**TPV:** ${total_val:,.0f} (as of {val_asof}) &nbsp;|&nbsp; "
-            f"**Drawdown:** {dd_state} — {dd_pct:.1f}% from peak (${peak_tpv:,.0f})",
-            f"**Allocatable denominator:** ${alloc_denom:,.0f} (TPV − overlays − Bucket A)",
-            "",
-        ]
+        def _l1_mv(name: str) -> float:
+            children = sleeves_l1.get(name, {}).get("children", [])
+            return sum(_l2_mv(c) for c in children)
 
-        # ── Sleeve allocation table ───────────────────────────────────────────
-        lines.append("### Sleeve Allocation")
-        lines.append("")
-        lines.append("| L1 | L2 | Floor | Cap | Current | $MV | Status |")
-        lines.append("|:---|:---|---:|---:|---:|---:|:---|")
+        # ── Action label + background colour per ticker ───────────────────────
+        def _action(ticker: str, sleeve_cur_pct: float,
+                    floor_pct: float, cap_pct: float) -> tuple:
+            gate        = gates_by_ticker.get(ticker, {})
+            gate_action = gate.get("action", "proceed")
+            pct         = scores_by_ticker.get(ticker, {}).get("pct", 0.5)
 
-        L1_ORDER = ["growth", "real_assets", "monetary_hedges", "speculative", "stabilizers"]
-        for l1_name in L1_ORDER:
-            l1_data = sleeves_l1.get(l1_name, {})
-            children = l1_data.get("children", [])
-            for idx, l2_name in enumerate(children):
+            if gate_action == "spike_trim":
+                return "SPIKE-TRIM", "#b2ebf2"
+
+            # Base action from sleeve compliance + per-ticker momentum
+            if sleeve_cur_pct < floor_pct - 0.1:
+                base = "BUY"
+            elif sleeve_cur_pct > cap_pct + 0.1:
+                base = "TRIM"
+            elif pct >= 0.65:
+                base = "BUY"
+            elif pct <= 0.30:
+                base = "TRIM"
+            else:
+                base = "HOLD"
+
+            if base == "BUY" and gate_action == "defer":
+                return "DEFER-BUY", "#ffe082"
+            if base == "BUY":
+                return "BUY",  "#c8e6c9"
+            if base == "TRIM":
+                return "TRIM", "#ffcdd2"
+            return "HOLD", "#fff9c4"
+
+        # ── Sort L1: largest total $MV first; stabilizers (overlays) always last
+        def _l1_sort(name: str) -> float:
+            return -1.0 if name == "stabilizers" else _l1_mv(name)
+
+        l1_sorted = sorted(sleeves_l1.keys(), key=_l1_sort, reverse=True)
+
+        # ── Build table rows ──────────────────────────────────────────────────
+        tbody_rows: list[str] = []
+
+        for l1_name in l1_sorted:
+            l1_data    = sleeves_l1.get(l1_name, {})
+            l1_cap     = l1_data.get("cap")
+            children   = l1_data.get("children", [])
+            is_overlay = (l1_name == "stabilizers")
+            denom      = total_val if is_overlay else alloc_denom
+            l1_total   = _l1_mv(l1_name)
+            l1_cur_pct = (l1_total / denom * 100) if denom > 0 else 0.0
+            l1_cap_str = f"{l1_cap * 100:.0f}%" if l1_cap else "overlay"
+
+            # L1 header row (full-width, dark blue-grey)
+            tbody_rows.append(
+                f'<tr style="background:#d0dff0;">'
+                f'<td colspan="8" style="border:1px solid #aac; padding:7px 10px; '
+                f'font-weight:bold; font-size:12px;">'
+                f'▶&nbsp; {l1_name}'
+                f'&ensp;|&ensp;cap: {l1_cap_str}'
+                f'&ensp;|&ensp;current: {l1_cur_pct:.1f}%'
+                f'&ensp;(${l1_total:,.0f})'
+                f'</td></tr>'
+            )
+
+            # Sort L2 children by $MV desc
+            children_sorted = sorted(children, key=_l2_mv, reverse=True)
+
+            for l2_name in children_sorted:
                 l2_data   = sleeves_l2.get(l2_name, {})
                 floor_pct = (l2_data.get("floor") or 0) * 100
                 cap_pct   = (l2_data.get("cap")   or 0) * 100
-                mv        = hold.loc[hold["Class"] == l2_name, "MV"].sum()
-                is_overlay = (l1_name == "stabilizers")
-                denom      = total_val if is_overlay else alloc_denom
-                cur_pct    = (mv / denom * 100) if denom > 0 else 0.0
+                l2_total  = _l2_mv(l2_name)
+                cur_pct   = (l2_total / denom * 100) if denom > 0 else 0.0
+                tickers   = l2_data.get("tickers", [])
 
-                if   cur_pct < floor_pct - 0.1: status = "⚠️ BELOW FLOOR"
-                elif cur_pct > cap_pct   + 0.1: status = "⚠️ ABOVE CAP"
-                else:                           status = "✅"
+                if   cur_pct < floor_pct - 0.1: l2_status = "⚠️ BELOW FLOOR"
+                elif cur_pct > cap_pct   + 0.1: l2_status = "⚠️ ABOVE CAP"
+                else:                           l2_status = "✅"
 
-                # Only print L1 name on first child row
-                l1_label = l1_name if idx == 0 else ""
-                lines.append(
-                    f"| {l1_label} | {l2_name} | {floor_pct:.0f}% | {cap_pct:.0f}% "
-                    f"| **{cur_pct:.1f}%** | ${mv:,.0f} | {status} |"
+                # L2 subheader row (lighter blue-grey, indented)
+                tbody_rows.append(
+                    f'<tr style="background:#eef3f9;">'
+                    f'<td colspan="8" style="border:1px solid #ccd; padding:5px 10px 5px 26px; '
+                    f'font-style:italic; font-size:12px;">'
+                    f'&nbsp;&nbsp;{l2_name}'
+                    f'&ensp;floor {floor_pct:.0f}% – cap {cap_pct:.0f}%'
+                    f'&ensp;|&ensp;current: <strong>{cur_pct:.1f}%</strong>'
+                    f'&ensp;(${l2_total:,.0f})'
+                    f'&ensp;{l2_status}'
+                    f'</td></tr>'
                 )
 
-        # Bucket A / Cash rows (denominator is TPV for both)
+                # Ticker rows — held tickers only, sorted by momentum Pct desc
+                held_in_sleeve = [t for t in tickers if t in held_tickers]
+                held_in_sleeve.sort(
+                    key=lambda t: scores_by_ticker.get(t, {}).get("pct", 0.0),
+                    reverse=True,
+                )
+
+                for ticker in held_in_sleeve:
+                    t_mv  = float(hold.loc[hold["Ticker"] == ticker, "MV"].sum())
+                    t_wt  = (t_mv / denom * 100) if denom > 0 else 0.0
+                    s     = scores_by_ticker.get(ticker, {})
+                    pct   = s.get("pct", 0.0)
+                    alpha = s.get("alpha", "—")
+                    gate  = gates_by_ticker.get(ticker, {})
+                    z_val = gate.get("z_score")
+                    z_str = f"{z_val:+.2f}" if z_val is not None else "—"
+
+                    action_label, action_bg = _action(ticker, cur_pct, floor_pct, cap_pct)
+                    pct_str = f"{pct * 100:.0f}%" if pct else "—"
+
+                    tbody_rows.append(
+                        f'<tr>'
+                        f'<td style="{_TD}"></td>'
+                        f'<td style="{_TD}"><strong>{ticker}</strong></td>'
+                        f'<td style="{_TDR}">{pct_str}</td>'
+                        f'<td style="{_TDR}">{alpha}</td>'
+                        f'<td style="{_TDR}">{t_wt:.1f}%</td>'
+                        f'<td style="{_TDR}">${t_mv:,.0f}</td>'
+                        f'<td style="border:1px solid #ddd; padding:5px 8px; text-align:center; '
+                        f'font-weight:bold; font-size:12px; background:{action_bg};">'
+                        f'{action_label}</td>'
+                        f'<td style="{_TDR}">{z_str}</td>'
+                        f'</tr>'
+                    )
+
+        # ── Bucket A + Cash footer rows ───────────────────────────────────────
         bucket_a_pct = (bucket_a_mv / total_val * 100) if total_val > 0 else 0.0
-        cash_mv      = hold.loc[hold["Class"] == "bucket_b", "MV"].sum()
-        cash_pct     = (cash_mv     / total_val * 100) if total_val > 0 else 0.0
-        lines.append(
-            f"| — | bucket_a (protected) | — | — | {bucket_a_pct:.1f}% "
-            f"| ${bucket_a_mv:,.0f} | 🔒 |"
+        tbody_rows.append(
+            f'<tr style="background:#f5f5f5;">'
+            f'<td style="{_TD}" colspan="2"><em>Bucket A — protected liquidity</em></td>'
+            f'<td style="{_TD}">—</td>'
+            f'<td style="{_TD}">—</td>'
+            f'<td style="{_TDR}">{bucket_a_pct:.1f}%</td>'
+            f'<td style="{_TDR}">${bucket_a_mv:,.0f}</td>'
+            f'<td style="{_TD}">🔒</td>'
+            f'<td style="{_TD}">—</td>'
+            f'</tr>'
         )
+        cash_mv = float(hold.loc[hold["Class"] == "bucket_b", "MV"].sum())
         if cash_mv > 0:
-            lines.append(
-                f"| — | cash | — | — | {cash_pct:.1f}% | ${cash_mv:,.0f} | — |"
+            cash_pct = (cash_mv / total_val * 100)
+            tbody_rows.append(
+                f'<tr>'
+                f'<td style="{_TD}" colspan="2"><em>Cash (Bucket B)</em></td>'
+                f'<td style="{_TD}">—</td>'
+                f'<td style="{_TD}">—</td>'
+                f'<td style="{_TDR}">{cash_pct:.1f}%</td>'
+                f'<td style="{_TDR}">${cash_mv:,.0f}</td>'
+                f'<td style="{_TD}">—</td>'
+                f'<td style="{_TD}">—</td>'
+                f'</tr>'
             )
 
-        # ── Momentum Rankings ─────────────────────────────────────────────────
-        lines += ["", "### Momentum Rankings", ""]
-        if not df_scores.empty:
-            df_disp = df_scores.copy()
-            for col in ("Score", "Pct"):
-                if col in df_disp.columns:
-                    df_disp[col] = df_disp[col].round(3)
-            lines.append(_df_to_md_table(df_disp))
-        else:
-            lines.append("_No rankings generated._")
+        # ── Portfolio status header ───────────────────────────────────────────
+        dd_state = dd.get("state", "normal").upper()
+        dd_pct   = abs(dd.get("drawdown", 0)) * 100
+        peak_tpv = dd.get("peak_tpv", total_val)
+        status_html = (
+            f'<p style="font-size:13px; margin:4px 0;">'
+            f'<strong>TPV:</strong> ${total_val:,.0f} (as of {val_asof})'
+            f'&ensp;|&ensp;<strong>Drawdown:</strong> {dd_state} — {dd_pct:.1f}% from peak'
+            f' (${peak_tpv:,.0f})<br>'
+            f'<strong>Allocatable denominator:</strong> ${alloc_denom:,.0f}'
+            f' (TPV − overlays − Bucket A)</p>'
+        )
 
-        # ── Execution Gate ────────────────────────────────────────────────────
-        if df_gates is not None and not df_gates.empty:
-            lines += ["", "### Execution Gate", ""]
-            lines.append(_df_to_md_table(df_gates))
+        # ── Column headers ────────────────────────────────────────────────────
+        col_headers = ["L1 / L2 Sleeve", "Ticker", "Rank", "α / VTI", "Wt %", "$MV", "Action", "Gate z"]
+        thead = (
+            "<thead><tr>"
+            + "".join(f'<th style="{_TH}">{c}</th>' for c in col_headers)
+            + "</tr></thead>"
+        )
 
-        return "\n".join(lines)
+        table = (
+            f'<table style="border-collapse:collapse; width:100%; margin:8px 0 16px;">'
+            f'{thead}'
+            f'<tbody>{"".join(tbody_rows)}</tbody>'
+            f'</table>'
+        )
+
+        # ── Colour legend ─────────────────────────────────────────────────────
+        legend = (
+            '<p style="font-size:11px; color:#555; margin:0 0 12px;">'
+            '<span style="background:#c8e6c9; padding:1px 6px; border-radius:3px;">BUY</span>&ensp;'
+            '<span style="background:#ffe082; padding:1px 6px; border-radius:3px;">DEFER-BUY</span>&ensp;'
+            '<span style="background:#fff9c4; padding:1px 6px; border-radius:3px;">HOLD</span>&ensp;'
+            '<span style="background:#ffcdd2; padding:1px 6px; border-radius:3px;">TRIM</span>&ensp;'
+            '<span style="background:#b2ebf2; padding:1px 6px; border-radius:3px;">SPIKE-TRIM</span>'
+            '&ensp; | Action = sleeve floor/cap compliance + per-ticker momentum rank; '
+            'Gate z = EWMA vol-scaled 2-day z-score'
+            '</p>'
+        )
+
+        return status_html + table + legend
 
     except Exception as tbl_err:
-        log.warning("Portfolio table generation failed: %s", tbl_err)
-        return f"_Portfolio state table unavailable: {tbl_err}_"
+        log.warning("Portfolio table generation failed: %s", tbl_err, exc_info=True)
+        return f'<p><em>Portfolio state table unavailable: {tbl_err}</em></p>'
 
 
 def send_schema_alert(violation_summary: str) -> None:
@@ -730,24 +907,21 @@ def send_email(response_text: str, analytics: dict) -> None:
 
     # ── Build combined email body ─────────────────────────────────────────────
     # Layout (top → bottom):
-    #   1. <mws_recommendation>  — executive summary / actionable brief
-    #   2. Portfolio state tables — Python-computed sleeve allocation + rankings
-    #   3. <mws_market_context>  — full LLM market analysis
-    #   4. Chart                 — inline at bottom
+    #   1. <mws_recommendation>  — executive summary / actionable brief  (markdown → HTML)
+    #   2. Portfolio state table — Python-computed unified HTML table (HTML passthrough)
+    #   3. <mws_market_context>  — full LLM market analysis              (markdown → HTML)
+    #   4. Chart                 — inline CID image at bottom
 
-    portfolio_tables = _build_portfolio_tables(analytics)
+    rec_html = _md_to_fragment(recommendation)
+    portfolio_html = _build_portfolio_tables(analytics)
+    ctx_html = _md_to_fragment(market_context) if market_context else ""
 
-    sections = [recommendation]
+    body_content = rec_html
+    body_content += '<hr><h2>Portfolio State</h2>' + portfolio_html
+    if ctx_html:
+        body_content += '<hr>' + ctx_html
 
-    sections.append("\n\n---\n\n## Portfolio State\n\n" + portfolio_tables)
-
-    if market_context:
-        sections.append("\n\n---\n\n" + market_context)
-
-    combined_md = "\n".join(sections)
-
-    # Build HTML — inject inline chart before </body> if available
-    html_body = _to_html(combined_md)
+    html_body = f"<html><head>{_EMAIL_CSS}</head><body>{body_content}</body></html>"
     if has_chart:
         chart_tag = (
             f'<hr style="margin-top:24px">'
