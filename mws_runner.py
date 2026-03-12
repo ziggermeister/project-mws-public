@@ -50,6 +50,7 @@ TRIGGER_REASON = os.environ.get("TRIGGER_REASON", "scheduled")
 # claude-3-5-sonnet-20241022 is the default: widely available, supports web_search_20250305.
 MODEL          = os.environ.get("ANTHROPIC_MODEL") or "claude-sonnet-4-5-20250929"
 MAX_TOKENS     = 16000
+MAX_SCHEMA_RETRIES   = 3         # retry API call this many times on schema violation before fail-closed
 # Schema validation bounds — guard against model denial-of-service via huge outputs
 MAX_RESPONSE_CHARS   = 120_000   # ~30k tokens; alert if exceeded
 MAX_BLOCK_CHARS      = 60_000    # each XML block independently capped for parsing safety
@@ -563,9 +564,22 @@ def main() -> None:
         prompt = build_prompt(analytics)
         log.info("Prompt built (%d chars)", len(prompt))
 
-        response = call_claude(prompt)
+        for _attempt in range(1, MAX_SCHEMA_RETRIES + 1):
+            response = call_claude(prompt)
+            violations = validate_schema(response)
+            if not violations:
+                if _attempt > 1:
+                    log.info("Schema valid on retry %d/%d", _attempt, MAX_SCHEMA_RETRIES)
+                break
+            if _attempt < MAX_SCHEMA_RETRIES:
+                log.warning(
+                    "Schema violation on attempt %d/%d — retrying: %s",
+                    _attempt, MAX_SCHEMA_RETRIES, "; ".join(violations),
+                )
+            # If this was the last attempt, fall through to write_market_context
+            # which re-validates and raises SchemaViolationError for fail-closed handling.
 
-        write_market_context(response)   # raises SchemaViolationError if malformed
+        write_market_context(response)   # raises SchemaViolationError if all retries failed
         send_email(response)
 
         log.info("=== MWS GitHub Runner complete ===")
