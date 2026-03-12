@@ -1,17 +1,18 @@
 #!/bin/bash
 # ─────────────────────────────────────────────────────────────────────────────
-# commit_and_run.sh  —  LOCAL workflow only (laptop required)
+# commit_and_run.sh  —  LOCAL workflow (laptop required)
 #
 # Purpose:
-#   1. Commit any changed files (holdings, policy, ticker history, etc.)
-#   2. Push to main
-#   3. Run mws_analytics.py locally for charts + diagnostic output
-#      (No LLM call, no email — pure local math/diagnostics)
+#   1. Commit any changed files (holdings, policy, code, etc.) and push
+#   2. Fetch today's prices
+#   3. Run full LLM analysis + email  (if ANTHROPIC_API_KEY is set)
+#      OR run local analytics only    (if env vars are missing)
 #
-# To run a FULL LLM analysis locally (equivalent to GitHub Actions):
+# Full run requires:
 #   export ANTHROPIC_API_KEY=...
-#   export GMAIL_APP_PASSWORD=... GMAIL_FROM=... GMAIL_TO=...
-#   python3 mws_runner.py
+#   export GMAIL_APP_PASSWORD=...
+#   export GMAIL_FROM=...
+#   export GMAIL_TO=...
 #
 # Automated cloud runs (no laptop needed):
 #   • Daily price fetch:  GitHub Actions weekdays at 21:30 UTC
@@ -60,14 +61,27 @@ else
   git push
 fi
 
-# ── Run local analytics (charts + breach flags) ───────────────────────────────
-echo "Running mws_analytics.py (local diagnostics)..."
-python3 mws_analytics.py
+# ── Fetch today's prices (always) ─────────────────────────────────────────────
+echo ""
+echo "Fetching today's prices..."
+python3 mws_fetch_history.py
+
+# ── Full run or local diagnostics ─────────────────────────────────────────────
+if [ -n "$ANTHROPIC_API_KEY" ] && [ -n "$GMAIL_APP_PASSWORD" ] && \
+   [ -n "$GMAIL_FROM" ] && [ -n "$GMAIL_TO" ]; then
+  echo ""
+  echo "All env vars present — running full LLM analysis + email..."
+  python3 mws_runner.py
+else
+  echo ""
+  echo "ANTHROPIC_API_KEY / Gmail env vars not set — running local analytics only."
+  echo "To run a full LLM analysis, export the required env vars and re-run:"
+  echo "  export ANTHROPIC_API_KEY=..."
+  echo "  export GMAIL_APP_PASSWORD=..."
+  echo "  export GMAIL_FROM=..."
+  echo "  export GMAIL_TO=..."
+  python3 mws_analytics.py
+fi
 
 echo ""
-echo "Done. Automated runs:"
-echo "  • Daily price fetch:  GitHub Actions weekdays at 21:30 UTC"
-echo "  • LLM run:            GitHub Actions weekdays at 14:30 UTC (open+30) and 22:00 UTC (after price fetch)"
-echo "  • On-demand LLM run:  GitHub → Actions → MWS Portfolio Run → Run workflow"
-echo "  • Local LLM run:      python3 mws_runner.py (requires env vars)"
-echo "  • Interactive run:    Ask Claude directly in this session"
+echo "Done."
