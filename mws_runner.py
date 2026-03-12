@@ -556,10 +556,11 @@ def _build_portfolio_tables(analytics: dict) -> str:
       gate = defer + BUY  → DEFER-BUY
       gate = spike_trim   → SPIKE-TRIM (overrides all)
 
-    Trade size (compliance-driven only):
-      BUY:  (floor − current) × denom ÷ n_buy_tickers_in_sleeve
-      TRIM: (current − cap)   × denom × ticker_mv / total_trim_mv_in_sleeve
-      Within-band momentum trades: size shown as "—" (allocator decides)
+    Trade size:
+      Compliance BUY  (~): (floor − current) × denom ÷ n_buy_tickers_in_sleeve
+      Compliance TRIM (~): (current − cap)   × denom × ticker_mv / total_trim_mv_in_sleeve
+      Momentum BUY/TRIM (≈): abs(target_mv − current_mv) where target_mv is
+        ticker's momentum-pct share of l2 total; higher uncertainty, shown with ≈
     """
     _TH  = ("background:#f0f4f8; border:1px solid #bcd; padding:6px 10px; "
             "text-align:left; white-space:nowrap; font-size:12px;")
@@ -673,36 +674,61 @@ def _build_portfolio_tables(analytics: dict) -> str:
                 return "BUY",  "#c8e6c9", basis
             return "TRIM", "#ffcdd2", basis
 
-        # ── Trade size estimation (compliance-driven only) ────────────────────
+        # ── Trade size estimation ─────────────────────────────────────────────
         def _est_trade(ticker: str, basis: str, l2_name: str,
                        l2_data: dict, denom: float,
                        buy_in_sleeve: list, trim_in_sleeve: list) -> tuple:
-            """Returns (est_usd, est_shares) or (None, None) for momentum trades."""
+            """Returns (est_usd, est_shares, prefix) or (None, None, None).
+
+            prefix is "~" for compliance-precise estimates, "≈" for
+            momentum-proportional estimates (higher uncertainty).
+            """
             core_basis = basis.replace("defer|", "")
-            if core_basis not in ("compliance_buy", "compliance_trim"):
-                return None, None
-
-            floor_frac = l2_data.get("floor") or 0.0
-            cap_frac   = l2_data.get("cap")   or 0.0
-            l2_total   = _l2_mv(l2_name)
-            cur_frac   = l2_total / denom if denom > 0 else 0.0
-
-            if core_basis == "compliance_buy":
-                deficit = (floor_frac - cur_frac) * denom
-                n = max(1, len(buy_in_sleeve))
-                est_usd = deficit / n
-            else:  # compliance_trim
-                excess  = (cur_frac - cap_frac) * denom
-                t_mv    = float(hold.loc[hold["Ticker"] == ticker, "MV"].sum())
-                tot_mv  = sum(float(hold.loc[hold["Ticker"] == t, "MV"].sum())
-                              for t in trim_in_sleeve)
-                est_usd = excess * (t_mv / tot_mv) if tot_mv > 0 else excess / max(1, len(trim_in_sleeve))
-
-            est_usd = max(0.0, est_usd)
             t_price = float(hold.loc[hold["Ticker"] == ticker, "Price"].iloc[0]) \
                       if not hold.loc[hold["Ticker"] == ticker].empty else 0.0
-            est_sh  = round(est_usd / t_price) if t_price > 0 else None
-            return est_usd, est_sh
+
+            if core_basis in ("compliance_buy", "compliance_trim"):
+                floor_frac = l2_data.get("floor") or 0.0
+                cap_frac   = l2_data.get("cap")   or 0.0
+                l2_total   = _l2_mv(l2_name)
+                cur_frac   = l2_total / denom if denom > 0 else 0.0
+
+                if core_basis == "compliance_buy":
+                    deficit = (floor_frac - cur_frac) * denom
+                    n = max(1, len(buy_in_sleeve))
+                    est_usd = deficit / n
+                else:  # compliance_trim
+                    excess  = (cur_frac - cap_frac) * denom
+                    t_mv    = float(hold.loc[hold["Ticker"] == ticker, "MV"].sum())
+                    tot_mv  = sum(float(hold.loc[hold["Ticker"] == t, "MV"].sum())
+                                  for t in trim_in_sleeve)
+                    est_usd = excess * (t_mv / tot_mv) if tot_mv > 0 else excess / max(1, len(trim_in_sleeve))
+
+                est_usd = max(0.0, est_usd)
+                est_sh  = round(est_usd / t_price) if t_price > 0 else None
+                return est_usd, est_sh, "~"
+
+            if core_basis in ("momentum_buy", "momentum_trim"):
+                # Momentum-proportional target weight within the L2 sleeve:
+                # each ticker's fair share of l2_total is weighted by its
+                # momentum percentile relative to all held tickers in the sleeve.
+                held_in_l2 = [t for t in l2_data.get("tickers", [])
+                               if t in held_tickers]
+                total_pct = sum(scores_by_ticker.get(t, {}).get("pct", 0.0)
+                                for t in held_in_l2)
+                t_pct     = scores_by_ticker.get(ticker, {}).get("pct", 0.0)
+                l2_total  = _l2_mv(l2_name)
+                if total_pct > 0:
+                    target_mv = (t_pct / total_pct) * l2_total
+                else:
+                    target_mv = l2_total / max(1, len(held_in_l2))
+                t_mv    = float(hold.loc[hold["Ticker"] == ticker, "MV"].sum())
+                est_usd = abs(target_mv - t_mv)
+                est_usd = max(0.0, est_usd)
+                est_sh  = round(est_usd / t_price) if t_price > 0 else None
+                return est_usd, est_sh, "≈"
+
+            return None, None, None
 
         # ── First pass: collect all ticker data ───────────────────────────────
         # ticker_data[ticker] = {l1, l2, l2_data, action, label, color, basis, cur_pct, floor_pct, cap_pct, denom}
@@ -926,13 +952,13 @@ def _build_portfolio_tables(analytics: dict) -> str:
                 else:
                     basis_str = basis_raw
 
-                est_usd, est_sh = _est_trade(
+                est_usd, est_sh, est_pfx = _est_trade(
                     ticker, d["basis"], d["l2"], d["l2_data"], d["denom"],
                     sleeve_buy.get(d["l2"], []),
                     sleeve_trim.get(d["l2"], []),
                 )
-                est_usd_str = f"~${est_usd:,.0f}" if est_usd is not None and est_usd > 0 else "—"
-                est_sh_str  = f"~{est_sh:,} sh"   if est_sh  is not None and est_sh  > 0 else "—"
+                est_usd_str = f"{est_pfx}${est_usd:,.0f}" if est_usd is not None and est_usd > 0 else "—"
+                est_sh_str  = f"{est_pfx}{est_sh:,} sh"   if est_sh  is not None and est_sh  > 0 else "—"
 
                 t2_rows.append(
                     f'<tr>'

@@ -46,6 +46,7 @@ git add \
   commit_and_run.sh \
   README.md \
   test_mws.py \
+  trigger_run.py \
   .github/workflows/mws_run.yml \
   .github/workflows/mws_daily.yml
 
