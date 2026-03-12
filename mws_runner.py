@@ -50,7 +50,6 @@ TRIGGER_REASON = os.environ.get("TRIGGER_REASON", "scheduled")
 # claude-3-5-sonnet-20241022 is the default: widely available, supports web_search_20250305.
 MODEL          = os.environ.get("ANTHROPIC_MODEL") or "claude-sonnet-4-5-20250929"
 MAX_TOKENS     = 16000
-MAX_SCHEMA_RETRIES   = 3         # retry API call this many times on schema violation before fail-closed
 # Schema validation bounds — guard against model denial-of-service via huge outputs
 MAX_RESPONSE_CHARS   = 120_000   # ~30k tokens; alert if exceeded
 MAX_BLOCK_CHARS      = 60_000    # each XML block independently capped for parsing safety
@@ -122,6 +121,7 @@ def run_analytics() -> dict:
         "policy":          policy,
         "state":           state,
         "holdings":        hold,
+        "hist":            hist,       # kept for portfolio table MV calculations
         "drawdown":        dd,
         "total_val":       total_val,
         "val_asof":        asof,
@@ -353,6 +353,94 @@ def validate_schema(text: str) -> list[str]:
     return violations
 
 
+def repair_schema(text: str) -> tuple:
+    """
+    Attempt surgical repairs of common LLM schema violations before failing closed.
+    Returns (repaired_text, list_of_repairs_applied).
+
+    Repair sequence (order matters — aliases must be normalized first):
+      1. Tag alias normalization  (<market_context> → <mws_market_context>, etc.)
+      2. Missing closing tag insertion (open tag present, close absent)
+      3. Preamble stripping  (text before the first required opening tag)
+      4. Postamble stripping (text after the last required closing tag)
+    """
+    REQUIRED_TAGS: list = ["mws_market_context", "mws_recommendation"]
+    # Map of known alias → canonical tag name.  Only applied when the canonical
+    # tag is *absent* — prevents double-rename if both are somehow present.
+    ALIASES: dict = {
+        "market_context": "mws_market_context",
+        "mws_context":    "mws_market_context",
+        "recommendation": "mws_recommendation",
+        "mws_rec":        "mws_recommendation",
+    }
+
+    repairs: list = []
+    result: str = text
+
+    # ── 1. Normalize tag aliases ───────────────────────────────────────────────
+    for alias, canonical in ALIASES.items():
+        if not re.search(rf"<{re.escape(canonical)}\b", result, re.IGNORECASE):
+            if re.search(rf"<{re.escape(alias)}\b", result, re.IGNORECASE):
+                before = result
+                result = re.sub(
+                    rf"<({re.escape(alias)})(\s*/?)\s*>",
+                    f"<{canonical}\\2>",
+                    result,
+                    flags=re.IGNORECASE,
+                )
+                result = re.sub(
+                    rf"</{re.escape(alias)}\s*>",
+                    f"</{canonical}>",
+                    result,
+                    flags=re.IGNORECASE,
+                )
+                if result != before:
+                    repairs.append(f"<{alias}> → <{canonical}>")
+
+    # ── 2. Append missing closing tags ────────────────────────────────────────
+    for tag in REQUIRED_TAGS:
+        has_open  = bool(re.search(rf"<{re.escape(tag)}\b[^>]*>",  result, re.IGNORECASE))
+        has_close = bool(re.search(rf"</{re.escape(tag)}\s*>",     result, re.IGNORECASE))
+        if has_open and not has_close:
+            result += f"\n</{tag}>"
+            repairs.append(f"Appended missing </{tag}>")
+
+    # ── 3. Strip preamble (text before first required opening tag) ────────────
+    open_positions = []
+    for tag in REQUIRED_TAGS:
+        m = re.search(rf"<{re.escape(tag)}\b[^>]*>", result, re.IGNORECASE)
+        if m:
+            open_positions.append(m.start())
+    if open_positions:
+        first_open = min(open_positions)
+        if first_open > 0:
+            preamble = result[:first_open].strip()
+            if preamble:
+                preview = preamble[:80].replace("\n", " ")
+                repairs.append(
+                    f"Stripped {len(preamble)}-char preamble: '{preview}...'"
+                )
+                result = result[first_open:]
+
+    # ── 4. Strip postamble (text after last required closing tag) ─────────────
+    close_positions = []
+    for tag in REQUIRED_TAGS:
+        for m in re.finditer(rf"</{re.escape(tag)}\s*>", result, re.IGNORECASE):
+            close_positions.append(m.end())
+    if close_positions:
+        last_close = max(close_positions)
+        if last_close < len(result):
+            postamble = result[last_close:].strip()
+            if postamble:
+                preview = postamble[:80].replace("\n", " ")
+                repairs.append(
+                    f"Stripped {len(postamble)}-char postamble: '{preview}...'"
+                )
+                result = result[:last_close]
+
+    return result, repairs
+
+
 def extract_section(text: str, tag: str) -> str:
     """Extract content between <tag> ... </tag> XML-style markers (case-insensitive, dotall)."""
     pattern = rf"<{tag}>(.*?)</{tag}>"
@@ -429,6 +517,149 @@ def _to_html(text: str) -> str:
     return f"<html><head>{_EMAIL_CSS}</head><body>{body_html}</body></html>"
 
 
+def _df_to_md_table(df: pd.DataFrame) -> str:
+    """Convert a DataFrame to a markdown table without requiring tabulate."""
+    if df.empty:
+        return "_No data._"
+    cols = list(df.columns)
+    header = "| " + " | ".join(str(c) for c in cols) + " |"
+    sep    = "|" + "|".join([":---"] * len(cols)) + "|"
+    rows   = [
+        "| " + " | ".join(str(v) for v in row) + " |"
+        for _, row in df.iterrows()
+    ]
+    return "\n".join([header, sep] + rows)
+
+
+def _build_portfolio_tables(analytics: dict) -> str:
+    """
+    Build markdown tables summarising live portfolio state for the email body:
+      - Sleeve allocation vs policy floor / cap
+      - Momentum rankings (df_scores)
+      - Execution gate status (df_gates, if non-empty)
+
+    Returns a markdown string or a short error notice if construction fails.
+    """
+    try:
+        policy    = analytics["policy"]
+        hold      = analytics["holdings"].copy()
+        hist      = analytics["hist"]
+        total_val = analytics["total_val"]
+        val_asof  = analytics["val_asof"]
+        dd        = analytics["drawdown"]
+        df_scores = analytics["df_scores"]
+        df_gates  = analytics["df_gates"]
+
+        # ── Per-ticker market value ───────────────────────────────────────────
+        fixed_raw  = (policy.get("governance", {}) or {}).get("fixed_asset_prices", {}) or {}
+        latest_px  = hist.sort_values("Date").groupby("Ticker")["AdjClose"].last()
+
+        def _get_price(ticker: str) -> float:
+            entry = fixed_raw.get(ticker)
+            if entry is not None:
+                if isinstance(entry, dict):
+                    lp = latest_px.get(ticker)
+                    if lp is not None and float(lp) > 0:
+                        return float(lp)
+                    return float(entry.get("fallback_price", 0))
+                try:
+                    return float(entry)
+                except (TypeError, ValueError):
+                    return 0.0
+            lp = latest_px.get(ticker)
+            return float(lp) if lp is not None else 0.0
+
+        hold["Price"] = hold["Ticker"].map(_get_price)
+        hold["MV"]    = hold["Shares"] * hold["Price"]
+
+        # ── Allocatable denominator ───────────────────────────────────────────
+        overlay_mv  = hold.loc[hold["Class"] == "managed_futures", "MV"].sum()
+        bucket_a_mv = hold.loc[hold["Class"] == "bucket_a",        "MV"].sum()
+        alloc_denom = total_val - overlay_mv - bucket_a_mv
+
+        # ── Policy sleeve layout ──────────────────────────────────────────────
+        sleeves_l1 = policy["sleeves"]["level1"]
+        sleeves_l2 = policy["sleeves"]["level2"]
+
+        lines: list = []
+
+        # ── Portfolio status line ─────────────────────────────────────────────
+        dd_state = dd.get("state", "normal").upper()
+        dd_pct   = abs(dd.get("drawdown", 0)) * 100
+        peak_tpv = dd.get("peak_tpv", total_val)
+        lines += [
+            f"**TPV:** ${total_val:,.0f} (as of {val_asof}) &nbsp;|&nbsp; "
+            f"**Drawdown:** {dd_state} — {dd_pct:.1f}% from peak (${peak_tpv:,.0f})",
+            f"**Allocatable denominator:** ${alloc_denom:,.0f} (TPV − overlays − Bucket A)",
+            "",
+        ]
+
+        # ── Sleeve allocation table ───────────────────────────────────────────
+        lines.append("### Sleeve Allocation")
+        lines.append("")
+        lines.append("| L1 | L2 | Floor | Cap | Current | $MV | Status |")
+        lines.append("|:---|:---|---:|---:|---:|---:|:---|")
+
+        L1_ORDER = ["growth", "real_assets", "monetary_hedges", "speculative", "stabilizers"]
+        for l1_name in L1_ORDER:
+            l1_data = sleeves_l1.get(l1_name, {})
+            children = l1_data.get("children", [])
+            for idx, l2_name in enumerate(children):
+                l2_data   = sleeves_l2.get(l2_name, {})
+                floor_pct = (l2_data.get("floor") or 0) * 100
+                cap_pct   = (l2_data.get("cap")   or 0) * 100
+                mv        = hold.loc[hold["Class"] == l2_name, "MV"].sum()
+                is_overlay = (l1_name == "stabilizers")
+                denom      = total_val if is_overlay else alloc_denom
+                cur_pct    = (mv / denom * 100) if denom > 0 else 0.0
+
+                if   cur_pct < floor_pct - 0.1: status = "⚠️ BELOW FLOOR"
+                elif cur_pct > cap_pct   + 0.1: status = "⚠️ ABOVE CAP"
+                else:                           status = "✅"
+
+                # Only print L1 name on first child row
+                l1_label = l1_name if idx == 0 else ""
+                lines.append(
+                    f"| {l1_label} | {l2_name} | {floor_pct:.0f}% | {cap_pct:.0f}% "
+                    f"| **{cur_pct:.1f}%** | ${mv:,.0f} | {status} |"
+                )
+
+        # Bucket A / Cash rows (denominator is TPV for both)
+        bucket_a_pct = (bucket_a_mv / total_val * 100) if total_val > 0 else 0.0
+        cash_mv      = hold.loc[hold["Class"] == "bucket_b", "MV"].sum()
+        cash_pct     = (cash_mv     / total_val * 100) if total_val > 0 else 0.0
+        lines.append(
+            f"| — | bucket_a (protected) | — | — | {bucket_a_pct:.1f}% "
+            f"| ${bucket_a_mv:,.0f} | 🔒 |"
+        )
+        if cash_mv > 0:
+            lines.append(
+                f"| — | cash | — | — | {cash_pct:.1f}% | ${cash_mv:,.0f} | — |"
+            )
+
+        # ── Momentum Rankings ─────────────────────────────────────────────────
+        lines += ["", "### Momentum Rankings", ""]
+        if not df_scores.empty:
+            df_disp = df_scores.copy()
+            for col in ("Score", "Pct"):
+                if col in df_disp.columns:
+                    df_disp[col] = df_disp[col].round(3)
+            lines.append(_df_to_md_table(df_disp))
+        else:
+            lines.append("_No rankings generated._")
+
+        # ── Execution Gate ────────────────────────────────────────────────────
+        if df_gates is not None and not df_gates.empty:
+            lines += ["", "### Execution Gate", ""]
+            lines.append(_df_to_md_table(df_gates))
+
+        return "\n".join(lines)
+
+    except Exception as tbl_err:
+        log.warning("Portfolio table generation failed: %s", tbl_err)
+        return f"_Portfolio state table unavailable: {tbl_err}_"
+
+
 def send_schema_alert(violation_summary: str) -> None:
     """Send a schema-violation alert email. Called instead of send_email() on fail-closed path."""
     password  = os.environ.get("GMAIL_APP_PASSWORD")
@@ -469,7 +700,7 @@ def send_schema_alert(violation_summary: str) -> None:
     log.info("Schema alert email sent to %s", to_addr)
 
 
-def send_email(response_text: str) -> None:
+def send_email(response_text: str, analytics: dict) -> None:
     password  = os.environ.get("GMAIL_APP_PASSWORD")
     from_addr = os.environ.get("GMAIL_FROM", "bhatnagar.vivek@gmail.com")
     to_addr   = os.environ.get("GMAIL_TO",   "bhatnagar.vivek@gmail.com")
@@ -489,14 +720,34 @@ def send_email(response_text: str) -> None:
         )
         log.warning("SCHEMA VIOLATION: <mws_recommendation> block missing — sending alert email.")
 
+    market_context = extract_section(response_text, "mws_market_context")
+
     subject = f"MWS Run — {TODAY} — {TRIGGER_REASON}"
 
     chart_path = mws_analytics.CHART_FILENAME
     has_chart  = os.path.exists(chart_path)
     chart_cid  = "mws_equity_curve"
 
+    # ── Build combined email body ─────────────────────────────────────────────
+    # Layout (top → bottom):
+    #   1. <mws_recommendation>  — executive summary / actionable brief
+    #   2. Portfolio state tables — Python-computed sleeve allocation + rankings
+    #   3. <mws_market_context>  — full LLM market analysis
+    #   4. Chart                 — inline at bottom
+
+    portfolio_tables = _build_portfolio_tables(analytics)
+
+    sections = [recommendation]
+
+    sections.append("\n\n---\n\n## Portfolio State\n\n" + portfolio_tables)
+
+    if market_context:
+        sections.append("\n\n---\n\n" + market_context)
+
+    combined_md = "\n".join(sections)
+
     # Build HTML — inject inline chart before </body> if available
-    html_body = _to_html(recommendation)
+    html_body = _to_html(combined_md)
     if has_chart:
         chart_tag = (
             f'<hr style="margin-top:24px">'
@@ -564,23 +815,31 @@ def main() -> None:
         prompt = build_prompt(analytics)
         log.info("Prompt built (%d chars)", len(prompt))
 
-        for _attempt in range(1, MAX_SCHEMA_RETRIES + 1):
-            response = call_claude(prompt)
-            violations = validate_schema(response)
-            if not violations:
-                if _attempt > 1:
-                    log.info("Schema valid on retry %d/%d", _attempt, MAX_SCHEMA_RETRIES)
-                break
-            if _attempt < MAX_SCHEMA_RETRIES:
-                log.warning(
-                    "Schema violation on attempt %d/%d — retrying: %s",
-                    _attempt, MAX_SCHEMA_RETRIES, "; ".join(violations),
-                )
-            # If this was the last attempt, fall through to write_market_context
-            # which re-validates and raises SchemaViolationError for fail-closed handling.
+        response = call_claude(prompt)
 
-        write_market_context(response)   # raises SchemaViolationError if all retries failed
-        send_email(response)
+        violations = validate_schema(response)
+        if violations:
+            log.warning(
+                "Schema violations (%d) — attempting repair before fail-closed: %s",
+                len(violations), "; ".join(violations),
+            )
+            response, repairs = repair_schema(response)
+            if repairs:
+                log.info("Repairs applied (%d): %s", len(repairs), "; ".join(repairs))
+            else:
+                log.info("No repairs applicable.")
+            # Re-validate after repair; write_market_context() will raise if still bad.
+            post_violations = validate_schema(response)
+            if post_violations:
+                log.error(
+                    "Schema violations persist after repair (%d): %s",
+                    len(post_violations), "; ".join(post_violations),
+                )
+            else:
+                log.info("Schema valid after repair.")
+
+        write_market_context(response)   # raises SchemaViolationError if still invalid
+        send_email(response, analytics)
 
         log.info("=== MWS GitHub Runner complete ===")
 
