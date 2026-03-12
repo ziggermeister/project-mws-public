@@ -569,17 +569,21 @@ Fires the same GitHub Actions workflow as Mode 1, on demand from the command lin
 Identical output to Mode 1 (full LLM + email). No local env vars required.
 
 ```
-python3 trigger_run.py           # trigger + tail logs
-python3 trigger_run.py --no-tail # trigger only, don't wait
+python3 trigger_run.py             # full run (LLM + email) — trigger + tail logs
+python3 trigger_run.py --no-tail   # full run — trigger only, don't wait
+python3 trigger_run.py --no-llm    # analytics + chart only — skip LLM and email (saves tokens)
+python3 trigger_run.py --local     # run locally instead of GH Actions (requires env vars)
+python3 trigger_run.py --local --no-llm  # local analytics only — no env vars needed
 ```
 
 Requires `gh` CLI authenticated: `brew install gh && gh auth login`
 
 **Workflow for committing local changes then running:**
 ```
-./commit_and_run.sh && python3 trigger_run.py
+git add <files> && git commit -m "..." && git push
+python3 trigger_run.py
 ```
-`commit_and_run.sh` is a separate utility that only stages, commits, and pushes
+Or use `commit_and_run.sh` as a convenience wrapper — it only stages, commits, and pushes
 local file changes (holdings, policy, code). It does not run the pipeline itself.
 
 ---
