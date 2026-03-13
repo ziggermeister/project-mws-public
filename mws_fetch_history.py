@@ -41,7 +41,7 @@ _parser.add_argument(
     help="Incremental mode: fetch only the last N days and merge with existing CSV",
 )
 _args = _parser.parse_args()
-INCREMENTAL_DAYS: int | None = _args.days
+INCREMENTAL_DAYS: Optional[int] = _args.days
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PORTFOLIO = [
