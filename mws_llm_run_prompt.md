@@ -555,6 +555,22 @@ Ask: "Do you have an updated portfolio/holdings to paste in before I run?"
 **Step 1 — Fetch today's prices** — `python3 mws_fetch_history.py` — **never optional**;
 stale prices produce incorrect momentum scores and invalid gate z-scores.
 
+**Step 1b — Inject brokerage prices if newer (Mode 2 only):**
+After the price fetch, compare the latest date in `mws_ticker_history.csv` with the date
+of the brokerage paste (from Step 0). Apply this priority per ticker:
+1. **`mws_ticker_history.csv` latest row** — highest authority (automated fetch, most current)
+2. **Brokerage paste** — use if paste date > CSV latest date for that ticker
+3. **Stooq** — already incorporated into #1; not a separate consideration
+
+If the brokerage paste is newer than the CSV for any held tickers:
+- Append a row `<paste_date>,<TICKER>,<price>` to `mws_ticker_history.csv` for each such ticker
+- Use the brokerage account total value directly as TPV (most accurate)
+- Reference tickers not in the paste (SPY, QQQ, VIX, etc.) stay at CSV latest — reference-only
+- Brokerage prices are raw market prices, not dividend-adjusted; the difference vs. Stooq
+  adjusted close is immaterial (<0.1%) for momentum calculations over 3m/6m/12m horizons
+- Do NOT commit injected rows to git — Stooq will provide official adjusted closes in the
+  next automated fetch, which will overwrite these rows
+
 **Step 2 — Run analytics** — `python3 mws_analytics.py` — produces momentum rankings,
 gate z-scores, sleeve status, and drawdown state from the now-current history file.
 
@@ -588,9 +604,9 @@ local file changes (holdings, policy, code). It does not run the pipeline itself
 
 ---
 
-*End of MWS LLM Run Prompt — v2.0 — 2026-03-12*
+*End of MWS LLM Run Prompt — v2.1 — 2026-03-12*
 *Review status: CLEARED FOR PRODUCTION COMMIT.*
-*Gemini ✓ Round 1 (4 fixes) + Red-team PASS (all 4 tests). ChatGPT ✓ Round 1 (4 fixes) + Deep Research (3 fixes). v1.4 (3 runner fixes). v1.5: three-mode portability notes; price fetch made mandatory in all modes. v1.6: promoted to canonical protocol; Mode 2 self-sufficient. v1.7: Mode 2 Step 0 — ask for updated holdings, accept broker paste, reformat to mws_holdings.csv preserving Class, commit + push before run. All adversarial tests pass.*
+*Gemini ✓ Round 1 (4 fixes) + Red-team PASS (all 4 tests). ChatGPT ✓ Round 1 (4 fixes) + Deep Research (3 fixes). v1.4 (3 runner fixes). v1.5: three-mode portability notes; price fetch made mandatory in all modes. v1.6: promoted to canonical protocol; Mode 2 self-sufficient. v1.7: Mode 2 Step 0 — ask for updated holdings, accept broker paste, reformat to mws_holdings.csv preserving Class, commit + push before run. All adversarial tests pass. v2.1: Mode 2 Step 1b — inject brokerage prices when paste date > CSV latest date; price priority: CSV > paste > Stooq.*
 
 ---
 
