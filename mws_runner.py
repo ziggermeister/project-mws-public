@@ -89,6 +89,14 @@ def run_analytics() -> dict:
     log.info("Calculating portfolio value...")
     total_val, asof = mws_analytics.calculate_portfolio_value(policy, hold, hist)
 
+    log.info("Updating performance log...")
+    try:
+        mws_analytics.update_performance_log(policy, hist, hold, today_total_val=total_val)
+        # Re-read drawdown state now that the log is fresh
+        dd = mws_analytics.check_drawdown_state(policy)
+    except Exception as perf_err:
+        log.warning("Performance log update failed (non-fatal): %s", perf_err)
+
     log.info("Generating momentum rankings...")
     df_scores = mws_analytics.generate_rankings(policy, hist, candidates, hold)
 

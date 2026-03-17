@@ -632,6 +632,292 @@ def _compute_max_drawdown(series: pd.Series) -> float:
 
 
 # ==============================================================================
+# 5b) Performance log updater  (replaces GAS upsertAndRecomputePerformanceLog_)
+# ==============================================================================
+
+def _get_scheduled_cash_flow(date_str: str, policy: dict) -> float:
+    """
+    Return the total scheduled cash flow for a given date (YYYY-MM-DD).
+    Negative = withdrawal (e.g. SEPP), positive = contribution.
+    Supports recurrence "annual" (same month/day every year) and "once" (exact date).
+    Replicates GAS getScheduledCashFlow_.
+    """
+    flows = policy.get("scheduled_cash_flows") or []
+    if not flows:
+        return 0.0
+    try:
+        month = int(date_str[5:7])
+        day   = int(date_str[8:10])
+    except (ValueError, IndexError):
+        return 0.0
+    total = 0.0
+    for flow in flows:
+        amount = float(flow.get("amount", 0) or 0)
+        if not amount:
+            continue
+        rec = str(flow.get("recurrence", "once")).strip().lower()
+        if rec == "annual":
+            if int(flow.get("month", 0)) == month and int(flow.get("day", 0)) == day:
+                total += amount
+        else:
+            if str(flow.get("date", "")).strip() == date_str:
+                total += amount
+    return total
+
+
+def update_performance_log(
+    policy: dict,
+    hist: pd.DataFrame,
+    hold: pd.DataFrame,
+    today_total_val: Optional[float] = None,
+    perf_log: str = PERF_LOG_CSV,
+) -> None:
+    """
+    Update mws_recent_performance.csv with all trading days not yet logged.
+    Replicates GAS upsertAndRecomputePerformanceLog_.
+
+    Strategy (mirrors GAS rolling-recompute approach):
+      - Rows already in the log outside the 5-day recompute window:
+        PortfolioValue and PortfolioPct are preserved as-is.
+      - Rows in the last 5 calendar days + today: recomputed (handles price
+        revisions and today's fresh portfolio value).
+      - New dates not yet in the log: appended and computed fresh.
+
+    Portfolio value for backfill dates is approximated using current holdings
+    x hist prices — accurate when no trades occurred between the last log date
+    and today. For today, today_total_val (from calculate_portfolio_value) is
+    preferred as it correctly handles TREASURY_NOTE via policy fallback price.
+    """
+    bl = (policy.get("governance", {}).get("reporting_baselines", {}) or {})
+    chart_start = str(bl.get("chart_start_date", "") or "").strip()
+    benches = [str(b).strip().upper() for b in (bl.get("active_benchmarks") or [])]
+
+    if not benches:
+        logger.warning("update_performance_log: no active_benchmarks in policy — skipping")
+        return
+    if not chart_start:
+        logger.warning("update_performance_log: no chart_start_date in policy — skipping")
+        return
+
+    # ── Fast price lookup: (date_str, TICKER) → float ────────────────────────
+    price_map: Dict[Tuple[str, str], float] = {}
+    for row in hist.itertuples(index=False):
+        price_map[(str(row.Date)[:10], str(row.Ticker).upper())] = float(row.AdjClose)
+
+    # ── Holdings snapshot for portfolio value approximation ───────────────────
+    fixed_prices = (policy.get("governance", {}).get("fixed_asset_prices", {}) or {})
+    hold_rows: List[Tuple[str, float]] = []
+    for _, r in hold.iterrows():
+        t = str(r.get("Ticker", "")).strip().upper()
+        try:
+            shares = float(r.get("Shares", 0) or 0)
+        except (ValueError, TypeError):
+            shares = 0.0
+        if t and shares:
+            hold_rows.append((t, shares))
+
+    def _compute_pv(date_str: str, override: Optional[float] = None) -> Optional[float]:
+        if override is not None:
+            return override
+        total = 0.0
+        for t, shares in hold_rows:
+            fe = fixed_prices.get(t)
+            if fe is not None:
+                if isinstance(fe, dict):
+                    if str(fe.get("price_type", "")).lower() == "market":
+                        px = price_map.get((date_str, t)) or float(fe.get("fallback_price") or 0)
+                    else:
+                        px = float(fe.get("fallback_price") or 0)
+                else:
+                    px = float(fe)
+            else:
+                px = price_map.get((date_str, t), 0.0)
+            total += shares * px
+        return total if total > 0 else None
+
+    # ── Column header (must match GAS buildPerfLogHeader_) ───────────────────
+    header = (
+        ["Date", "PortfolioValue", "CashFlow"]
+        + [f"Price_{b}" for b in benches]
+        + ["PortfolioPct"]
+        + [f"Pct_{b}" for b in benches]
+        + [f"Diff_{b}" for b in benches]
+        + ["EventLabel"]
+    )
+
+    # ── Load existing log ─────────────────────────────────────────────────────
+    if os.path.exists(perf_log):
+        try:
+            existing_df = pd.read_csv(perf_log, dtype=str)
+            existing_df.columns = [c.strip() for c in existing_df.columns]
+        except Exception as e:
+            logger.warning("update_performance_log: cannot read existing log (%s); starting fresh", e)
+            existing_df = pd.DataFrame(columns=header)
+    else:
+        existing_df = pd.DataFrame(columns=header)
+
+    for col in header:
+        if col not in existing_df.columns:
+            existing_df[col] = ""
+
+    existing_by_date: Dict[str, Dict[str, str]] = {
+        str(r["Date"]).strip(): dict(r)
+        for _, r in existing_df.iterrows()
+        if str(r.get("Date", "")).strip()
+    }
+
+    # ── Date universe: all trading days in hist >= chart_start ───────────────
+    today_str = datetime.today().strftime("%Y-%m-%d")
+    recompute_cutoff = (datetime.today() - timedelta(days=5)).strftime("%Y-%m-%d")
+
+    all_trade_dates = sorted({
+        str(d)[:10]
+        for d in hist["Date"].unique()
+        if str(d)[:10] >= chart_start
+    })
+    if not all_trade_dates:
+        logger.warning("update_performance_log: no hist dates >= chart_start %s — skipping", chart_start)
+        return
+
+    # ── Build merged row list ─────────────────────────────────────────────────
+    rows: List[Dict[str, str]] = []
+    for date_str in all_trade_dates:
+        ex = existing_by_date.get(date_str, {})
+        in_window = date_str >= recompute_cutoff
+        is_today  = (date_str == today_str)
+
+        # Portfolio value
+        if is_today and today_total_val is not None:
+            pv_str = f"{today_total_val:.2f}"
+        elif ex.get("PortfolioValue", "") and not in_window:
+            pv_str = ex["PortfolioValue"]
+        else:
+            pv = _compute_pv(date_str, today_total_val if is_today else None)
+            pv_str = f"{pv:.2f}" if pv is not None else ex.get("PortfolioValue", "")
+
+        # Benchmark prices (refresh from hist; fall back to existing)
+        bench_px: Dict[str, str] = {}
+        for b in benches:
+            bp = price_map.get((date_str, b))
+            bench_px[b] = f"{bp:.2f}" if bp is not None else ex.get(f"Price_{b}", "")
+
+        # Cash flow: preserve non-zero manual entries; else derive from policy
+        existing_cf_str = ex.get("CashFlow", "").strip()
+        try:
+            cf_existing = float(existing_cf_str) if existing_cf_str else None
+        except (ValueError, TypeError):
+            cf_existing = None
+        cf_val = cf_existing if (cf_existing is not None and cf_existing != 0.0) \
+                 else _get_scheduled_cash_flow(date_str, policy)
+
+        # EventLabel: preserve existing; auto-fill for known scheduled flows
+        event_label = str(ex.get("EventLabel", "")).strip()
+        if not event_label and cf_val != 0.0:
+            for flow in (policy.get("scheduled_cash_flows") or []):
+                if _get_scheduled_cash_flow(date_str, {"scheduled_cash_flows": [flow]}) != 0.0:
+                    lbl = str(flow.get("label", "Scheduled flow")).strip()
+                    amt = abs(int(flow.get("amount", 0)))
+                    event_label = f"{lbl} {amt}"
+                    break
+
+        row: Dict[str, str] = {
+            "Date":           date_str,
+            "PortfolioValue": pv_str,
+            "CashFlow":       f"{cf_val:.2f}",
+            "PortfolioPct":   ex.get("PortfolioPct", "") if not in_window else "",
+            "EventLabel":     event_label,
+        }
+        for b in benches:
+            row[f"Price_{b}"] = bench_px.get(b, "")
+            row[f"Pct_{b}"]   = ex.get(f"Pct_{b}", "")  if not in_window else ""
+            row[f"Diff_{b}"]  = ex.get(f"Diff_{b}", "") if not in_window else ""
+        rows.append(row)
+
+    result_df = pd.DataFrame(rows, columns=header)
+
+    # ── Baseline index and benchmark base prices ──────────────────────────────
+    base_idx_list = result_df.index[result_df["Date"] == chart_start].tolist()
+    base_idx = base_idx_list[0] if base_idx_list else 0
+
+    base_bench: Dict[str, Optional[float]] = {}
+    for b in benches:
+        try:
+            base_bench[b] = float(result_df.at[base_idx, f"Price_{b}"])
+        except (ValueError, TypeError):
+            base_bench[b] = None
+
+    # ── TWR chain recompute ───────────────────────────────────────────────────
+    # Outside the window: carry forward prev_pv / prev_cum as anchor for the chain.
+    # Inside the window: full recompute using the preserved anchor.
+    prev_pv:  Optional[float] = None
+    prev_cum: Optional[float] = None
+
+    for i in result_df.index:
+        date_str = result_df.at[i, "Date"]
+        in_window = date_str >= recompute_cutoff
+
+        # Refresh benchmark pct inside window (price revisions may have changed prices)
+        if in_window:
+            for b in benches:
+                if base_bench.get(b):
+                    try:
+                        bp = float(result_df.at[i, f"Price_{b}"])
+                        result_df.at[i, f"Pct_{b}"] = f"{(bp / base_bench[b]) - 1:.4f}"
+                    except (ValueError, TypeError):
+                        pass
+
+        try:
+            pv = float(result_df.at[i, "PortfolioValue"])
+        except (ValueError, TypeError):
+            continue
+
+        if not in_window:
+            # Outside window — update anchor and move on
+            try:
+                prev_cum = float(result_df.at[i, "PortfolioPct"])
+                prev_pv  = pv
+            except (ValueError, TypeError):
+                pass
+            continue
+
+        # Inside window — compute TWR
+        if i == base_idx:
+            cum = 0.0
+        elif prev_pv is not None and prev_cum is not None:
+            try:
+                cf = float(result_df.at[i, "CashFlow"])
+            except (ValueError, TypeError):
+                cf = 0.0
+            adj_prev = prev_pv + cf
+            if adj_prev > 0:
+                cum = (1.0 + prev_cum) * (1.0 + (pv / adj_prev) - 1.0) - 1.0
+            else:
+                cum = prev_cum
+        else:
+            # No anchor yet (row is before first computable point)
+            prev_pv  = pv
+            prev_cum = 0.0
+            continue
+
+        result_df.at[i, "PortfolioPct"] = f"{cum:.4f}"
+        for b in benches:
+            try:
+                pct_b = float(result_df.at[i, f"Pct_{b}"])
+                result_df.at[i, f"Diff_{b}"] = f"{cum - pct_b:.4f}"
+            except (ValueError, TypeError):
+                pass
+
+        prev_pv  = pv
+        prev_cum = cum
+
+    result_df.to_csv(perf_log, index=False)
+    logger.info(
+        "Performance log updated → %s  (%d rows, through %s)",
+        perf_log, len(result_df), all_trade_dates[-1],
+    )
+
+
+# ==============================================================================
 # 6) Drawdown enforcement gate
 # ==============================================================================
 
