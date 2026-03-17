@@ -45,6 +45,46 @@ IAUM (gold) EWMA/empirical gap at 1.58pp buy-side (emp_p97.5 = 3.86%, EWMA 2σ =
 
 ---
 
+## vix_floor_in_execution_gate
+**Status:** `logged_for_future_review`
+**Source:** ChatGPT peer review 2026-03-17 (confirmed concern by Gemini; Gemini considers vol_clamp sufficient)
+**Priority:** Medium
+**Scope:** Execution gate — vol input
+
+During rapid VIX compression (e.g., 27→23 in a single session, as observed 2026-03-17), EWMA vol may lag reality, causing the 2-day z-score to appear artificially low and the gate to be over-permissive on large intraday moves. Gemini notes the existing vol_clamp (0.75×RV1y floor) partially mitigates this. ChatGPT argues the clamp floor should be augmented with an explicit VIX-derived minimum: `effective_vol = max(EWMA_vol_clamped, VIX/sqrt(252) * sqrt(2))` (approx VIX/11.2%). This would bind during fast vol-crush sessions and preserve gate sensitivity.
+
+**Action:** Backtest vol_clamp + VIX floor vs vol_clamp alone across 2020 COVID crash/recovery, 2022 rate-shock, and 2026 Iran-shock events. Gate should fire ~10–15% more during vol-crush windows. Evaluate F1 (false positive rate on deferred good trades) before adding. Do not implement until backtested.
+
+---
+
+## vxus_core_equity_downside_floor
+**Status:** `logged_for_future_review`
+**Source:** ChatGPT peer review 2026-03-17 (Gemini says execute as-is; split verdict)
+**Priority:** Medium
+**Scope:** Allocation engine — core_equity sleeve, VXUS specifically
+
+With a 0–15% TPV band and 22nd-percentile momentum, VXUS targets only 3.3% TPV — a 60% cut from 8.4% current. ChatGPT argues this is over-convex at low percentiles for a structural core holding: the sell is driven by USD translation drag, not by structural equity underperformance (VXUS alpha is +4.3% vs VTI). Proposed fix: introduce a `min_total_soft` = 5.0% for VXUS (or all core_equity tickers) that prevents the momentum mapping from dropping below ~5% TPV except in floor-exit conditions.
+
+Gemini counter: the 0–15% band width is the design decision at fault; if 3.3% feels wrong, narrow the band (e.g., 4–12%), don't add a soft floor override.
+
+**Action:** Run allocation sensitivity analysis — compare 0–15% band vs 4–12% band for VXUS over 2019–2026 using realized momentum series. Measure tracking error vs VTI and rebalance frequency. Choose between band-narrowing vs soft-floor approach. Decision in next policy review.
+
+---
+
+## ai_tech_dispersion_aware_floor
+**Status:** `logged_for_future_review`
+**Source:** ChatGPT peer review 2026-03-17 (Gemini disagrees — says floor is functioning correctly)
+**Priority:** Low
+**Scope:** Allocation engine — ai_tech sleeve floor behavior
+
+ChatGPT observes that forcing ai_tech to exactly 22% floor ignores intra-sleeve dispersion: in the 2026-03-17 run, GRID was at 83rd percentile while DTCR/BOTZ were at 28th/33rd. The 22% floor treats them as a monolith. Proposed: if ≥1 ai_tech ticker is above 80th percentile, allow sleeve to sit at 24–26% rather than the hard 22% floor.
+
+Gemini counter: the floor prevents total de-allocation during AI rotation; GRID's strength is already expressed through its intra-sleeve weight being maximized at its per-ticker cap. Sleeve-level floor should not expand based on individual ticker signals — that conflates L2 sleeve behavior with L1 momentum policy.
+
+**Action:** Logged as design tension. Do not implement without regime-transition backtest showing the dispersion-aware floor would have improved risk-adjusted return at sector inflection points. Low priority — current floor behavior is consistent with policy intent.
+
+---
+
 ## urnm_buy_gate_monitoring
 **Status:** `logged_for_future_review`
 **Source:** Portfolio-wide gate calibration audit 2026-03-11

@@ -2,9 +2,11 @@ import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import tempfile
 import warnings
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple, Dict, List, Set, Any
 
 import numpy as np
@@ -41,7 +43,6 @@ def _bench_display(ticker: str) -> str:
 # mws_runner.py and any other scripts import these constants
 # rather than hardcoding filenames independently.
 POLICY_FILENAME  = "mws_policy.json"
-TRACKER_FILENAME = "mws_tracker.json"
 HOLDINGS_CSV     = "mws_holdings.csv"
 HISTORY_CSV      = "mws_ticker_history.csv"
 PERF_LOG_CSV     = "mws_recent_performance.csv"
@@ -49,6 +50,51 @@ RESULTS_CSV      = "mws_run_results.csv"
 MACRO_MD         = "mws_governance.md"
 MARKET_CTX_MD    = "mws_market_context.md"
 CHART_FILENAME   = "mws_equity_curve.png"
+
+
+# ==============================================================================
+# 0) Price freshness — auto-refresh history before any analysis
+# ==============================================================================
+
+def _todays_trading_date() -> str:
+    """Most recent weekday (Mon–Fri) in UTC. Not holiday-aware."""
+    d = datetime.now(timezone.utc).date()
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d.strftime("%Y-%m-%d")
+
+
+def _history_is_stale(history_csv: str) -> bool:
+    """
+    Return True if the latest date in history_csv is older than today's
+    expected trading date, meaning prices need to be refreshed.
+    """
+    try:
+        df = pd.read_csv(history_csv, usecols=["Date"], parse_dates=["Date"])
+        latest = df["Date"].max().strftime("%Y-%m-%d")
+        return latest < _todays_trading_date()
+    except Exception:
+        return False  # if we can't read the file, let load_system_files handle it
+
+
+def _refresh_prices() -> None:
+    """
+    Run mws_fetch_history.py --days 3 to pull the latest prices into
+    mws_ticker_history.csv. Called automatically when history is stale.
+    """
+    fetch_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mws_fetch_history.py")
+    if not os.path.exists(fetch_script):
+        logger.warning("mws_fetch_history.py not found — skipping price refresh")
+        return
+
+    logger.info("📡  History stale — running mws_fetch_history.py --days 3 ...")
+    result = subprocess.run(
+        [sys.executable, fetch_script, "--days", "3"],
+        capture_output=False,   # stream output so user can see progress
+        text=True,
+    )
+    if result.returncode != 0:
+        logger.warning("Price refresh exited with non-zero status — proceeding with existing data")
 
 
 # ==============================================================================
@@ -147,13 +193,18 @@ def _fatal(msg: str, code: int = 1) -> None:
     logger.critical(msg)
     raise SystemExit(code)
 
-def load_system_files() -> Tuple[dict, dict, pd.DataFrame, pd.DataFrame]:
-    required = [POLICY_FILENAME, TRACKER_FILENAME, HOLDINGS_CSV, HISTORY_CSV]
+def load_system_files() -> Tuple[dict, pd.DataFrame, pd.DataFrame]:
+    required = [POLICY_FILENAME, HOLDINGS_CSV, HISTORY_CSV]
     missing = [f for f in required if not os.path.exists(f)]
     if missing:
         _fatal(f"[FATAL] System halted. Missing files: {missing}")
 
     logger.info("Phase 0: Loading System Files...")
+
+    # Auto-refresh prices if history is stale before loading anything
+    if os.path.exists(HISTORY_CSV) and _history_is_stale(HISTORY_CSV):
+        _refresh_prices()
+
     def _load_json(path: str) -> dict:
         with open(path, "r", encoding="utf-8") as f:
             raw = f.read()
@@ -166,7 +217,6 @@ def load_system_files() -> Tuple[dict, dict, pd.DataFrame, pd.DataFrame]:
         return obj
 
     policy = _load_json(POLICY_FILENAME)
-    state  = _load_json(TRACKER_FILENAME)
 
     try:
         hist = pd.read_csv(HISTORY_CSV)
@@ -201,7 +251,7 @@ def load_system_files() -> Tuple[dict, dict, pd.DataFrame, pd.DataFrame]:
     if hist.empty:
         _fatal("[FATAL] HISTORY_CSV has no valid rows after parsing.")
 
-    return policy, state, hist, hold
+    return policy, hist, hold
 
 
 # ==============================================================================
@@ -281,7 +331,7 @@ def get_ticker_sleeve(policy: dict, ticker: str) -> str:
 # ==============================================================================
 # 3) Audit + valuation
 # ==============================================================================
-def run_mws_audit(policy: dict, state: dict, hist: pd.DataFrame, hold: pd.DataFrame):
+def run_mws_audit(policy: dict, hist: pd.DataFrame, hold: pd.DataFrame):
     logger.info("Phase 1: Starting Titanium Hard-Stop Audit...")
 
     policy_required = get_policy_required_tickers(policy)
@@ -1195,7 +1245,7 @@ def check_execution_gate(
 
 # ==============================================================================
 def main() -> None:
-    policy, state, hist, hold = load_system_files()
+    policy, hist, hold = load_system_files()
 
     # ── Drawdown gate — enforced before any ranking or rebalance logic ────────
     dd = check_drawdown_state(policy)
@@ -1214,7 +1264,7 @@ def main() -> None:
     else:
         logger.info("Drawdown status: normal (current %.1f%%)", abs(dd["drawdown"]) * 100)
 
-    candidates, _, _ = run_mws_audit(policy, state, hist, hold)
+    candidates, _, _ = run_mws_audit(policy, hist, hold)
     _ = calculate_portfolio_value(policy, hold, hist)
 
     df_scores = generate_rankings(policy, hist, candidates, hold)
