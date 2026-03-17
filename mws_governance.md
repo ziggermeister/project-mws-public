@@ -1,6 +1,6 @@
-# Momentum-Weighted Scaling (MWS) v2.9.2
+# Momentum-Weighted Scaling (MWS) v2.9.5
 ## Governance Document
-**As-of:** 2026-03-11
+**As-of:** 2026-03-17
 **Role:** Authoritative governance rationale. Read by `mws_runner.py` and injected into every LLM run as governance context.
 
 ---
@@ -114,12 +114,12 @@ All ticker caps and floors are expressed as a percentage of **TPV** (not allocat
 | Ticker | Min % TPV | Max % TPV | Notes |
 |--------|-----------|-----------|-------|
 | VTI | 10% | 25% | Core anchor; min_total enforced |
-| VXUS | — | 15% | |
+| VXUS | 4% | 12% | Floor ensures international diversification is structurally enforced |
 | SOXQ | — | 10% | |
 | CHAT | — | 8% | |
 | DTCR | — | 6% | |
 | BOTZ | — | 2% | Tight cap — low conviction position |
-| GRID | — | 3% | |
+| GRID | — | 5% | Raised from 3% — allows momentum to express modest conviction bet |
 | IAUM | — | 8% | |
 | SIVR | 3% | 6% | Min and max enforced |
 | XBI | — | 6% | |
@@ -184,6 +184,15 @@ cash_used = min(cash_available, total_buys)
 - If cash fully funds all buys, total_sells must be zero
 - "Sells-first" refers to execution ordering only, not funding priority
 
+### Residual Allocation Rule (v2.9.5)
+When sell proceeds or cash exceed compliance-required and floor-restoration buys, the residual deploys in this order:
+
+1. **Underweight high-momentum inducted tickers** — sorted by momentum score descending. A ticker qualifies if current weight < percentile_in_band target AND momentum_score > 0, subject to per-ticker and sleeve caps.
+2. **VTI** — receives any residual not absorbed by step 1, up to its max_total cap.
+3. **Cash** — residual stays as cash if VTI is also fully capped.
+
+**Rationale:** MWS is a barbell system. Sell proceeds should reinforce high-conviction momentum positions before flowing to the index anchor. Defaulting directly to VTI when strong momentum signals exist suppresses the system's alpha-generating mechanism. VTI is the last resort within Bucket B, not the default.
+
 ---
 
 ## 8. Constraint Precedence & Drawdown Rules
@@ -198,9 +207,9 @@ cash_used = min(cash_available, total_buys)
 ### Drawdown Thresholds
 | Level | Threshold | Action |
 |-------|-----------|--------|
-| Soft limit | 20% peak-to-trough | Freeze new buys; manual review required; min_total remains in force |
-| Hard limit | 28% peak-to-trough | Reduce all positions toward sleeve floors; min_total may be overridden if floor reduction insufficient; override logged as compliance exception |
-| Recovery | <12% for 10 consecutive days | Resume normal rebalancing |
+| Soft limit | 22% peak-to-trough | Freeze new buys; manual review required; min_total remains in force |
+| Hard limit | 30% peak-to-trough | Reduce all positions toward sleeve floors; min_total may be overridden if floor reduction insufficient; override logged as compliance exception. Hard-limit compliance trades are **exempt from the 20% turnover cap** — they execute in full. |
+| Recovery | <15% for 10 consecutive days, **OR** VTI positive momentum for 5 consecutive days | Resume normal rebalancing (whichever condition is met first) |
 
 ### Floor Conflict Resolution
 If the optimization target set is **infeasible** — defined as: cannot simultaneously satisfy all hard constraints (Bucket A minimum, per-ticker caps, per-ticker min_total floors, overlay bands, turnover cap) given current TPV and allocatable denominator — then:
@@ -221,9 +230,10 @@ If the optimization target set is **infeasible** — defined as: cannot simultan
 | Stress override | soft_limit breached | Freezes calendar and signal_drift triggers; band_breach enforcement continues |
 
 ### Turnover Caps
-- Per-rebalance event: **20%** (22% under soft_limit stress)
+- Per-rebalance event: **20%** (22% under soft_limit stress) — applies to **momentum-driven signal trades only**
 - Annualized ceiling: **60%** (~2 major rotations per year)
 - When turnover cap binds, partial rebalance executed in order of violation severity
+- **Exception:** Hard-limit compliance trades (cap/floor enforcement, Bucket A protection, hard-limit position reduction) are exempt from all turnover caps and execute in full
 
 ---
 

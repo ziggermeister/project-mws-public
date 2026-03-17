@@ -1,10 +1,10 @@
 {
   "meta": {
-    "policy_name": "MWS v2.9.4",
-    "policy_version": "v2.9.4",
+    "policy_name": "MWS v2.9.5",
+    "policy_version": "v2.9.5",
     "policy_family": "Titanium MWS",
-    "last_updated": "2026-03-11",
-    "notes": "v2.9.4: Vol clamp (Fix 1b) implemented in execution gate. effective_vol = clamp(ewma_vol, 0.75×RV1y, 1.50×RV1y). RV1y = 252-day rolling std of daily log returns, annualised. Bounds validated against 2019–2026 history including 2020 COVID and 2022 rate shock onsets. Bank of Canada calm-window concern not empirically confirmed. All existing gate parameters (sigma thresholds, defer windows, per-ticker overrides) unchanged. No changes to signal engine, allocation targets, sleeve structure, or turnover rules. v2.9.3: Fat-tail gate fix for SIVR and IBIT. Per-ticker gate_sigma overrides added to per_ticker_thresholds — replaces EWMA 2.0/2.5σ global defaults for these two tickers only. SIVR: gate_sigma_buy=1.25, gate_sigma_sell=1.25. IBIT: gate_sigma_buy=1.5, gate_sigma_sell=1.5. Reviewed by ChatGPT + Gemini (1 round). Unanimous: reject 1.0σ sell for SIVR (too sensitive, ~16% fire rate), adopt 1.25σ. GPT: defer vol clamp (Fix 1b) and IAUM to separate review. Gemini: include both now. Reconciliation: Fix 1 only in v2.9.3; vol clamp and IAUM logged as future_review_items. No changes to signal engine, allocation targets, sleeve structure, turnover rules, or any other gate parameters. v2.9.2: Round 4 consensus — spike_trim_cap_interaction investigation closed. Path A (monitor-only) adopted by both reviewers. Automatic 90-day rolling event counter; escalation at >5% of spike_trim events activates contingent spike_trim_reentry_buffer (0.75% weight gap, momentum buys only, does not override compliance enforcement). No hard cooldown rule added. Execution gate declared production-ready by both reviewers (ChatGPT + Gemini, 4 rounds). No changes to signal engine, allocation targets, sleeve structure, or ticker constraints."
+    "last_updated": "2026-03-17",
+    "notes": "v2.9.5: Five policy changes from peer review synthesis (Gemini + ChatGPT, 2026-03-17). (1) VXUS band narrowed: min_total 0% → 4%, max_total 15% → 12%. Rationale: VXUS at 0% is incoherent with core_equity floor intent; 4% floor ensures international diversification floor is structurally enforced. (2) GRID max_total raised 3% → 5%. Rationale: current 3% cap binds before momentum can express a modest conviction bet; 5% remains well within ai_tech sleeve ceiling. (3) Drawdown thresholds raised: soft_limit 20% → 22%, hard_limit 28% → 30%. Rationale: prior thresholds fired too close to routine bear-market volatility; wider gap reduces whipsaw events. Recovery condition updated: drawdown < 15% OR VTI positive momentum for 5 consecutive days, whichever comes first. (4) Turnover cap override: hard_limit compliance trades (cap/floor enforcement, Bucket A protection) explicitly supersede the 20% per-event turnover cap. Only momentum-driven signal trades are subject to the cap; compliance sells are uncapped. (5) Residual allocation rule: sell proceeds deploy first to underweight high-momentum tickers (by momentum score, highest first) before any remainder flows to VTI. Ensures the barbell system fills conviction positions before the index anchor. VTI receives residual only if no underweight high-momentum ticker has capacity. v2.9.4: Vol clamp (Fix 1b) implemented in execution gate. effective_vol = clamp(ewma_vol, 0.75×RV1y, 1.50×RV1y). RV1y = 252-day rolling std of daily log returns, annualised. Bounds validated against 2019–2026 history including 2020 COVID and 2022 rate shock onsets. Bank of Canada calm-window concern not empirically confirmed. All existing gate parameters (sigma thresholds, defer windows, per-ticker overrides) unchanged. No changes to signal engine, allocation targets, sleeve structure, or turnover rules. v2.9.3: Fat-tail gate fix for SIVR and IBIT. Per-ticker gate_sigma overrides added to per_ticker_thresholds — replaces EWMA 2.0/2.5σ global defaults for these two tickers only. SIVR: gate_sigma_buy=1.25, gate_sigma_sell=1.25. IBIT: gate_sigma_buy=1.5, gate_sigma_sell=1.5. Reviewed by ChatGPT + Gemini (1 round). Unanimous: reject 1.0σ sell for SIVR (too sensitive, ~16% fire rate), adopt 1.25σ. GPT: defer vol clamp (Fix 1b) and IAUM to separate review. Gemini: include both now. Reconciliation: Fix 1 only in v2.9.3; vol clamp and IAUM logged as future_review_items. No changes to signal engine, allocation targets, sleeve structure, turnover rules, or any other gate parameters. v2.9.2: Round 4 consensus — spike_trim_cap_interaction investigation closed. Path A (monitor-only) adopted by both reviewers. Automatic 90-day rolling event counter; escalation at >5% of spike_trim events activates contingent spike_trim_reentry_buffer (0.75% weight gap, momentum buys only, does not override compliance enforcement). No hard cooldown rule added. Execution gate declared production-ready by both reviewers (ChatGPT + Gemini, 4 rounds). No changes to signal engine, allocation targets, sleeve structure, or ticker constraints."
   },
   "governance": {
     "reporting_baselines": {
@@ -43,6 +43,16 @@
         ],
         "funding_invariant": "total_sells + cash_used == total_buys",
         "cash_used_rule": "cash_used = min(cash_available, total_buys)",
+        "residual_allocation_rule": {
+          "description": "When sell proceeds (or cash) exceed the sum of compliance-required buys and floor-restoration buys, the residual is deployed as follows:",
+          "priority_order": [
+            "1. Underweight high-momentum inducted tickers — sorted by momentum score descending, up to each ticker's max_total cap. A ticker qualifies if: (a) current weight < target weight computed from percentile_in_band mapping, AND (b) momentum_score > 0.",
+            "2. VTI — receives any residual not absorbed by step 1, up to its max_total cap.",
+            "3. Cash — if step 2 is also fully capped, residual stays as cash."
+          ],
+          "rationale": "MWS is a barbell system. Sell proceeds should reinforce high-conviction momentum positions before flowing to the index anchor. Defaulting directly to VTI when strong momentum signals exist suppresses the system's alpha-generating mechanism. VTI is the last resort within Bucket B, not the first.",
+          "constraint": "Residual allocation must still satisfy all per-ticker caps, sleeve caps, and L1 caps. If a high-momentum ticker is at its max_total, it is skipped in step 1."
+        },
         "notes": [
           "Use residual cash to fund buys before generating any sells.",
           "Sells-first refers to execution ordering only, after cash funding is applied.",
@@ -52,7 +62,7 @@
       },
       "max_turnover_window": "per_rebalance_event",
       "max_turnover_annualized": 0.6,
-      "notes": "max_turnover (0.20) applies per rebalance event. max_turnover_stress (0.22) applies during soft_limit drawdown breach. max_turnover_annualized (0.60) is the binding annual ceiling — sufficient for two major portfolio rotations per year. turnover_reporting flags provide visibility when either cap is the operative constraint.",
+      "notes": "max_turnover (0.20) applies per rebalance event to momentum-driven signal trades only. max_turnover_stress (0.22) applies during soft_limit drawdown breach. max_turnover_annualized (0.60) is the binding annual ceiling — sufficient for two major portfolio rotations per year. EXCEPTION: hard_limit compliance trades (hard-limit position reduction, cap/floor enforcement, Bucket A protection) are exempt from all turnover caps and execute in full. turnover_reporting flags provide visibility when either cap is the operative constraint.",
       "turnover_reporting": {
         "turnover_clipped_by_annual_cap": false,
         "turnover_clipped_by_event_cap": false,
@@ -66,7 +76,8 @@
             "trigger": "drawdown_rules.hard_limit",
             "action": "reduce_all_positions_toward_sleeve_floors_subject_to_min_total_with_hard_limit_override_if_insufficient",
             "overrides": "all_lower_priority_triggers",
-            "notes": "Survival mode. Portfolio protection overrides all optimization."
+            "turnover_cap_exemption": true,
+            "notes": "Survival mode. Portfolio protection overrides all optimization. Hard-limit compliance trades are explicitly exempt from the 20% per-event turnover cap — cap applies only to momentum-driven signal trades (priority 5). Compliance sells execute in full regardless of turnover consumed."
           },
           {
             "priority": 2,
@@ -459,7 +470,8 @@
       }
     },
     "VXUS": {
-      "max_total": 0.15,
+      "min_total": 0.04,
+      "max_total": 0.12,
       "lifecycle": {
         "stage": "inducted"
       }
@@ -489,7 +501,7 @@
       }
     },
     "GRID": {
-      "max_total": 0.03,
+      "max_total": 0.05,
       "lifecycle": {
         "stage": "inducted"
       }
@@ -1215,14 +1227,17 @@
   "drawdown_rules": {
     "enabled": true,
     "measurement": "peak_to_trough_rolling_252d",
-    "soft_limit": 0.2,
+    "soft_limit": 0.22,
     "soft_limit_action": "freeze_new_buys_review_required. Per-ticker min_total constraints remain in force during soft limit. No forced selling triggered at soft limit.",
-    "hard_limit": 0.28,
-    "hard_limit_action": "reduce_all_positions toward sleeve floors, subject to per-ticker min_total constraints. Exception: if reducing to sleeve floors is insufficient to exit hard_limit breach, per-ticker min_total may be overridden. In all cases Bucket A minimum is preserved. Hard limit override of min_total must be logged as a compliance exception.",
+    "hard_limit": 0.30,
+    "hard_limit_action": "reduce_all_positions toward sleeve floors, subject to per-ticker min_total constraints. Exception: if reducing to sleeve floors is insufficient to exit hard_limit breach, per-ticker min_total may be overridden. In all cases Bucket A minimum is preserved. Hard limit override of min_total must be logged as a compliance exception. Hard-limit compliance trades (cap/floor enforcement, Bucket A protection, hard-limit position reduction) are explicitly exempt from the 20% per-event turnover cap — they execute in full regardless of turnover consumed by momentum-driven trades.",
     "recovery_condition": {
-      "drawdown_below": 0.12,
+      "drawdown_below": 0.15,
       "consecutive_days": 10,
-      "action": "resume_normal_rebalancing"
+      "alternative_condition": "VTI_positive_momentum_5_consecutive_days",
+      "operator": "OR",
+      "action": "resume_normal_rebalancing",
+      "notes": "Recovery triggers on whichever condition is met first: drawdown falls below 15% for 10 consecutive days, OR VTI shows positive momentum for 5 consecutive days. The momentum-based condition provides an earlier, signal-driven exit from stress regime when broad market trend reasserts."
     },
     "scheduled_cash_flows": [
       {
@@ -1234,7 +1249,7 @@
       }
     ],
     "stress_turnover_cap": "max_turnover_stress",
-    "notes": "Soft limit (20%): freeze new buys, require manual review. Hard limit (28%): force reduction of all positions to sleeve floors. Recovery: resume normal rebalancing once drawdown < 12% for 10 consecutive days. 20% soft aligns with conventional bear market definition. 8pp gap (20→28) provides managed response window before hard limit fires.",
+    "notes": "Soft limit (22%): freeze new buys, require manual review. Hard limit (30%): force reduction of all positions to sleeve floors. Recovery: resume normal rebalancing once drawdown < 15% for 10 consecutive days, OR VTI shows positive momentum for 5 consecutive days (whichever first). 22% soft aligns with deeper bear market definition to reduce whipsaw events. 8pp gap (22→30) preserved. Hard-limit compliance trades are uncapped by the turnover cap — they execute in full.",
     "constraint_precedence_during_drawdown": {
       "priority_1_always": "Bucket A minimum (protected liquidity — never touched)",
       "priority_2_normal": "per_ticker_min_total (holds unless hard_limit active)",
