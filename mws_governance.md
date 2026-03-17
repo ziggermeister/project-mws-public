@@ -1,4 +1,4 @@
-# Momentum-Weighted Scaling (MWS) v2.9.5
+# Momentum-Weighted Scaling (MWS) v2.9.6
 ## Governance Document
 **As-of:** 2026-03-17
 **Role:** Authoritative governance rationale. Read by `mws_runner.py` and injected into every LLM run as governance context.
@@ -89,7 +89,7 @@ The portfolio is organized as a two-level hierarchy. All L1 and L2 caps are expr
 
 | L2 Sleeve | L1 Parent | Floor | Cap | Tickers |
 |-----------|-----------|-------|-----|---------|
-| `ai_tech` | growth | 22% | 32% | SOXQ, CHAT, BOTZ, DTCR, GRID |
+| `ai_tech` | growth | 22% (breadth-conditioned — see §3a) | 32% | SOXQ, CHAT, BOTZ, DTCR, GRID |
 | `biotech` | growth | 4% | 12% | XBI |
 | `core_equity` | growth | 18% | 38% | VTI, VXUS |
 | `strategic_materials` | real_assets | 4% | 10% | URNM, REMX, COPX |
@@ -97,6 +97,26 @@ The portfolio is organized as a two-level hierarchy. All L1 and L2 caps are expr
 | `precious_metals` | monetary_hedges | 8% | 15% | IAUM, SIVR |
 | `crypto` | speculative | 0% | 5% | IBIT |
 | `managed_futures` | stabilizers | 6% | 12% TPV | DBMF, KMLM |
+
+### §3a — ai_tech Breadth-Conditioned Floor (v2.9.6)
+
+The ai_tech sleeve floor is not a static value. It scales with sector breadth:
+
+| Breadth State | Condition | Floor |
+|---|---|---|
+| Strong | ≥3 of 5 tickers with `blend_score > 0`, sustained ≥5 trading days | **22%** |
+| Weak | <3 tickers positive, sustained ≥5 trading days | **12%** |
+| Infeasible | 0 positive tickers OR ≥4 tickers in `floor_exit` state | **0%** (auto-released) |
+
+**Rationale:** The 22% floor reflects a long-term structural conviction in AI/semiconductors as the portfolio's primary alpha source. The floor is intentional and is not a diversification artifact — it prevents premature abandonment of the thesis during normal corrections. However, a static 22% floor forced capital into weak ai_tech sub-components during mixed-signal regimes (when only 1–2 names were genuinely strong), diluting alpha by allocating to mediocre tickers to satisfy sleeve arithmetic.
+
+The breadth-conditioned floor preserves full conviction when the sector is broadly healthy and reduces the forced dilution problem when it is not.
+
+**5-day hysteresis:** The floor state does not change on the first day breadth crosses a threshold. The new state must persist for 5 consecutive trading days before the floor transitions. This prevents oscillation from marginal tickers hovering near zero momentum.
+
+**Priority:** A breadth-triggered floor reduction (22% → 12%) is classified as Priority 3 (cap/floor compliance) in the execution hierarchy. It executes before signal-driven momentum trades, preventing the transition from being blocked by turnover budget already consumed by normal rebalancing.
+
+**Monitoring:** Track (a) % of ai_tech sleeve weight allocated to sub-50th-percentile tickers (false breadth indicator) and (b) floor transition frequency (oscillation indicator).
 
 ### Design Rationale — v2.8.0 Restructure
 Prior to v2.8.0, a single `defensive` L1 sleeve grouped gold, silver, uranium, copper, energy, and defense together under one cap. This created incoherent behavior: gold buys forced uranium sells; copper momentum was blocked by a "defensive" cap. The v2.8.0 restructure separates:

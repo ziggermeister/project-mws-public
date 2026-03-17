@@ -219,7 +219,7 @@ Apply the sleeve hierarchy below to the momentum rankings to determine target we
 
 | L2 Sleeve | L1 | Floor | Cap | Tickers |
 |-----------|-----|-------|-----|---------|
-| `ai_tech` | growth | 22% | 32% | SOXQ, CHAT, BOTZ, DTCR, GRID |
+| `ai_tech` | growth | 22% if ≥3 tickers blend>0 / 12% if <3 / 0% if infeasible (breadth-conditioned, v2.9.6) | 32% | SOXQ, CHAT, BOTZ, DTCR, GRID |
 | `biotech` | growth | 4% | 12% | XBI |
 | `core_equity` | growth | 18% | 38% | VTI, VXUS |
 | `strategic_materials` | real_assets | 4% | 10% | URNM, REMX, COPX |

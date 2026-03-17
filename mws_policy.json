@@ -1,10 +1,10 @@
 {
   "meta": {
-    "policy_name": "MWS v2.9.5",
-    "policy_version": "v2.9.5",
+    "policy_name": "MWS v2.9.6",
+    "policy_version": "v2.9.6",
     "policy_family": "Titanium MWS",
     "last_updated": "2026-03-17",
-    "notes": "v2.9.5: Five policy changes from peer review synthesis (Gemini + ChatGPT, 2026-03-17). (1) VXUS band narrowed: min_total 0% → 4%, max_total 15% → 12%. Rationale: VXUS at 0% is incoherent with core_equity floor intent; 4% floor ensures international diversification floor is structurally enforced. (2) GRID max_total raised 3% → 5%. Rationale: current 3% cap binds before momentum can express a modest conviction bet; 5% remains well within ai_tech sleeve ceiling. (3) Drawdown thresholds raised: soft_limit 20% → 22%, hard_limit 28% → 30%. Rationale: prior thresholds fired too close to routine bear-market volatility; wider gap reduces whipsaw events. Recovery condition updated: drawdown < 15% OR VTI positive momentum for 5 consecutive days, whichever comes first. (4) Turnover cap override: hard_limit compliance trades (cap/floor enforcement, Bucket A protection) explicitly supersede the 20% per-event turnover cap. Only momentum-driven signal trades are subject to the cap; compliance sells are uncapped. (5) Residual allocation rule: sell proceeds deploy first to underweight high-momentum tickers (by momentum score, highest first) before any remainder flows to VTI. Ensures the barbell system fills conviction positions before the index anchor. VTI receives residual only if no underweight high-momentum ticker has capacity. v2.9.4: Vol clamp (Fix 1b) implemented in execution gate. effective_vol = clamp(ewma_vol, 0.75×RV1y, 1.50×RV1y). RV1y = 252-day rolling std of daily log returns, annualised. Bounds validated against 2019–2026 history including 2020 COVID and 2022 rate shock onsets. Bank of Canada calm-window concern not empirically confirmed. All existing gate parameters (sigma thresholds, defer windows, per-ticker overrides) unchanged. No changes to signal engine, allocation targets, sleeve structure, or turnover rules. v2.9.3: Fat-tail gate fix for SIVR and IBIT. Per-ticker gate_sigma overrides added to per_ticker_thresholds — replaces EWMA 2.0/2.5σ global defaults for these two tickers only. SIVR: gate_sigma_buy=1.25, gate_sigma_sell=1.25. IBIT: gate_sigma_buy=1.5, gate_sigma_sell=1.5. Reviewed by ChatGPT + Gemini (1 round). Unanimous: reject 1.0σ sell for SIVR (too sensitive, ~16% fire rate), adopt 1.25σ. GPT: defer vol clamp (Fix 1b) and IAUM to separate review. Gemini: include both now. Reconciliation: Fix 1 only in v2.9.3; vol clamp and IAUM logged as future_review_items. No changes to signal engine, allocation targets, sleeve structure, turnover rules, or any other gate parameters. v2.9.2: Round 4 consensus — spike_trim_cap_interaction investigation closed. Path A (monitor-only) adopted by both reviewers. Automatic 90-day rolling event counter; escalation at >5% of spike_trim events activates contingent spike_trim_reentry_buffer (0.75% weight gap, momentum buys only, does not override compliance enforcement). No hard cooldown rule added. Execution gate declared production-ready by both reviewers (ChatGPT + Gemini, 4 rounds). No changes to signal engine, allocation targets, sleeve structure, or ticker constraints."
+    "notes": "v2.9.6: Breadth-conditioned ai_tech floor (peer review synthesis, Gemini + ChatGPT, 2026-03-17). Replaces static 22% floor with a two-state breadth-conditioned floor. Strong breadth (>=3 of 5 ai_tech tickers with blend_score > 0, sustained for >=5 consecutive trading days): floor = 22%. Weak breadth (<3 positive, sustained for >=5 days): floor = 12%. Infeasible state (0 positive OR >=4 tickers in floor_exit state): floor = 0%, auto-released per existing soft-floor mechanic. Rationale: static 22% floor forced capital into weak ai_tech sub-components during mixed-signal regimes when only 1-2 names were genuinely strong. Breadth-conditioned floor preserves full AI conviction when sector is broadly healthy while reducing intra-sleeve dilution when it is not. 5-day hysteresis prevents floor oscillation from marginal tickers hovering near zero. Breadth-triggered floor reductions classified as Priority 3 (cap/floor compliance), executing before signal-driven trades. Monitoring flag added: track % of ai_tech sleeve weight in sub-50th-percentile tickers. v2.9.5: Five policy changes from peer review synthesis (Gemini + ChatGPT, 2026-03-17). (1) VXUS band narrowed: min_total 0% → 4%, max_total 15% → 12%. Rationale: VXUS at 0% is incoherent with core_equity floor intent; 4% floor ensures international diversification floor is structurally enforced. (2) GRID max_total raised 3% → 5%. Rationale: current 3% cap binds before momentum can express a modest conviction bet; 5% remains well within ai_tech sleeve ceiling. (3) Drawdown thresholds raised: soft_limit 20% → 22%, hard_limit 28% → 30%. Rationale: prior thresholds fired too close to routine bear-market volatility; wider gap reduces whipsaw events. Recovery condition updated: drawdown < 15% OR VTI positive momentum for 5 consecutive days, whichever comes first. (4) Turnover cap override: hard_limit compliance trades (cap/floor enforcement, Bucket A protection) explicitly supersede the 20% per-event turnover cap. Only momentum-driven signal trades are subject to the cap; compliance sells are uncapped. (5) Residual allocation rule: sell proceeds deploy first to underweight high-momentum tickers (by momentum score, highest first) before any remainder flows to VTI. Ensures the barbell system fills conviction positions before the index anchor. VTI receives residual only if no underweight high-momentum ticker has capacity. v2.9.4: Vol clamp (Fix 1b) implemented in execution gate. effective_vol = clamp(ewma_vol, 0.75×RV1y, 1.50×RV1y). RV1y = 252-day rolling std of daily log returns, annualised. Bounds validated against 2019–2026 history including 2020 COVID and 2022 rate shock onsets. Bank of Canada calm-window concern not empirically confirmed. All existing gate parameters (sigma thresholds, defer windows, per-ticker overrides) unchanged. No changes to signal engine, allocation targets, sleeve structure, or turnover rules. v2.9.3: Fat-tail gate fix for SIVR and IBIT. Per-ticker gate_sigma overrides added to per_ticker_thresholds — replaces EWMA 2.0/2.5σ global defaults for these two tickers only. SIVR: gate_sigma_buy=1.25, gate_sigma_sell=1.25. IBIT: gate_sigma_buy=1.5, gate_sigma_sell=1.5. Reviewed by ChatGPT + Gemini (1 round). Unanimous: reject 1.0σ sell for SIVR (too sensitive, ~16% fire rate), adopt 1.25σ. GPT: defer vol clamp (Fix 1b) and IAUM to separate review. Gemini: include both now. Reconciliation: Fix 1 only in v2.9.3; vol clamp and IAUM logged as future_review_items. No changes to signal engine, allocation targets, sleeve structure, turnover rules, or any other gate parameters. v2.9.2: Round 4 consensus — spike_trim_cap_interaction investigation closed. Path A (monitor-only) adopted by both reviewers. Automatic 90-day rolling event counter; escalation at >5% of spike_trim events activates contingent spike_trim_reentry_buffer (0.75% weight gap, momentum buys only, does not override compliance enforcement). No hard cooldown rule added. Execution gate declared production-ready by both reviewers (ChatGPT + Gemini, 4 rounds). No changes to signal engine, allocation targets, sleeve structure, or ticker constraints."
   },
   "governance": {
     "reporting_baselines": {
@@ -88,10 +88,10 @@
           },
           {
             "priority": 3,
-            "trigger": "validators.l1_sleeve_caps OR validators.l2_sleeve_caps OR validators.l2_sleeve_floors OR validators.per_ticker_caps OR validators.per_ticker_floors",
+            "trigger": "validators.l1_sleeve_caps OR validators.l2_sleeve_caps OR validators.l2_sleeve_floors OR validators.per_ticker_caps OR validators.per_ticker_floors OR validators.ai_tech_breadth_floor_transition",
             "action": "enforce_cap_floor_compliance_sells_first",
             "overrides": "priorities_4_through_5",
-            "notes": "Structural compliance. Caps and floors enforced before signal-driven trades."
+            "notes": "Structural compliance. Caps and floors enforced before signal-driven trades. Includes breadth-triggered ai_tech floor reductions (v2.9.6): a transition from 22% to 12% floor executes at this priority, before turnover cap clipping, to prevent the floor reduction from being blocked by momentum-trade turnover consumption."
           },
           {
             "priority": 4,
@@ -309,7 +309,25 @@
     "level2": {
       "ai_tech": {
         "l1_parent": "growth",
-        "floor": 0.22,
+        "floor": {
+          "type": "breadth_conditioned",
+          "strong_breadth_floor": 0.22,
+          "weak_breadth_floor": 0.12,
+          "infeasible_floor": 0.0,
+          "breadth_condition": {
+            "strong_breadth_threshold": 3,
+            "ticker_count": 5,
+            "positive_definition": "blend_score > 0",
+            "hysteresis_days": 5
+          },
+          "infeasible_condition": "positive_count == 0 OR floor_exit_count >= 4",
+          "priority_on_floor_reduction": 3,
+          "monitoring": {
+            "track_sub_50th_percentile_sleeve_weight": true,
+            "track_floor_transition_frequency": true
+          },
+          "notes": "Floor scales with sector breadth. Strong breadth (>=3 of 5 tickers with blend_score > 0 for >=5 consecutive trading days): floor = 22%. Weak breadth (<3 positive, sustained >=5 days): floor = 12%. Infeasible (0 positive OR >=4 in floor_exit state): floor = 0%, auto-released per soft-floor mechanic. Hysteresis prevents oscillation from marginal tickers near zero. A breadth-triggered floor reduction is treated as Priority 3 (cap/floor compliance) in the execution hierarchy — executes before signal-driven trades. Does not create a forced rebuy obligation; floor behavior is hold_at_floor_if_positive_momentum, consistent with all other L2 sleeves."
+        },
         "cap": 0.32,
         "cap_basis": "allocatable_denominator",
         "tickers": [
@@ -319,7 +337,7 @@
           "DTCR",
           "GRID"
         ],
-        "notes": "AI hardware, infrastructure, and software ETFs."
+        "notes": "AI hardware, infrastructure, and software ETFs. Long-term structural conviction sleeve — floor reflects investor conviction in AI/semiconductor megatrend, not pure momentum diversification. Floor is breadth-conditioned (v2.9.6) to prevent intra-sleeve dilution into weak sub-components during mixed-signal regimes."
       },
       "biotech": {
         "l1_parent": "growth",

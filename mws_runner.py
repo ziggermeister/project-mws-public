@@ -618,6 +618,7 @@ def _build_portfolio_tables(analytics: dict) -> str:
                     "rank":  i + 1,
                     "pct":   float(row["Pct"]) if pd.notna(row["Pct"]) else 0.0,
                     "alpha": str(row.get("Alpha", "—")),
+                    "blend": float(row["Score"]) if pd.notna(row.get("Score")) else 0.0,
                 }
 
         # ── Gate lookup ───────────────────────────────────────────────────────
@@ -643,6 +644,36 @@ def _build_portfolio_tables(analytics: dict) -> str:
             return -1.0 if name == "stabilizers" else _l1_mv(name)
 
         l1_sorted = sorted(sleeves_l1.keys(), key=_l1_sort, reverse=True)
+
+        # ── Breadth-conditioned floor resolver ───────────────────────────────
+        def _resolve_floor(l2_data: dict) -> float:
+            """Return the effective floor fraction for an L2 sleeve.
+            Handles both static float floors and breadth_conditioned floor objects (v2.9.6).
+            For breadth_conditioned floors, uses current-day blend scores as an approximation
+            of breadth state (hysteresis tracking requires multi-day state, handled by analytics).
+            """
+            floor_val = l2_data.get("floor", 0.0)
+            if not isinstance(floor_val, dict):
+                return float(floor_val or 0.0)
+            # Breadth-conditioned floor
+            cond    = floor_val.get("breadth_condition", {})
+            tickers = l2_data.get("tickers", [])
+            threshold = int(cond.get("strong_breadth_threshold", 3))
+            positive_count = sum(
+                1 for t in tickers
+                if scores_by_ticker.get(t, {}).get("blend", 0.0) > 0
+            )
+            floor_exit_count = sum(
+                1 for t in tickers
+                if scores_by_ticker.get(t, {}).get("blend", 0.0) <= 0
+                and t not in held_tickers  # exited
+            )
+            infeasible = (positive_count == 0 or floor_exit_count >= 4)
+            if infeasible:
+                return float(floor_val.get("infeasible_floor", 0.0))
+            if positive_count >= threshold:
+                return float(floor_val.get("strong_breadth_floor", 0.22))
+            return float(floor_val.get("weak_breadth_floor", 0.12))
 
         # ── Action + basis per ticker ─────────────────────────────────────────
         def _action(ticker: str, cur_pct: float,
@@ -687,7 +718,7 @@ def _build_portfolio_tables(analytics: dict) -> str:
                       if not hold.loc[hold["Ticker"] == ticker].empty else 0.0
 
             if core_basis in ("compliance_buy", "compliance_trim"):
-                floor_frac = l2_data.get("floor") or 0.0
+                floor_frac = _resolve_floor(l2_data)
                 cap_frac   = l2_data.get("cap")   or 0.0
                 l2_total   = _l2_mv(l2_name)
                 cur_frac   = l2_total / denom if denom > 0 else 0.0
@@ -738,7 +769,7 @@ def _build_portfolio_tables(analytics: dict) -> str:
             denom      = total_val if is_overlay else alloc_denom
             for l2_name in l1_data.get("children", []):
                 l2_data   = sleeves_l2.get(l2_name, {})
-                floor_pct = (l2_data.get("floor") or 0) * 100
+                floor_pct = _resolve_floor(l2_data) * 100
                 cap_pct   = (l2_data.get("cap")   or 0) * 100
                 l2_total  = _l2_mv(l2_name)
                 cur_pct   = (l2_total / denom * 100) if denom > 0 else 0.0
@@ -808,7 +839,7 @@ def _build_portfolio_tables(analytics: dict) -> str:
 
             for l2_name in sorted(children, key=_l2_mv, reverse=True):
                 l2_data   = sleeves_l2.get(l2_name, {})
-                floor_pct = (l2_data.get("floor") or 0) * 100
+                floor_pct = _resolve_floor(l2_data) * 100
                 cap_pct   = (l2_data.get("cap")   or 0) * 100
                 l2_total  = _l2_mv(l2_name)
                 cur_pct   = (l2_total / denom * 100) if denom > 0 else 0.0
