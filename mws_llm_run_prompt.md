@@ -148,10 +148,10 @@ As of:                         {{VALUE_AS_OF_DATE}}
 
 Drawdown State:                {{DRAWDOWN_STATE}}   (NORMAL | SOFT_LIMIT | HARD_LIMIT)
 Current Peak-to-Trough:        {{DRAWDOWN_PCT}}%
-Peak TPV (from tracker):       ${{PEAK_TPV}}
+Peak TPV:                      ${{PEAK_TPV}}
 
 Days since peak:               {{DAYS_SINCE_PEAK}}
-Recovery condition met:        {{RECOVERY_MET}}   (<12% for 10 consecutive days)
+Recovery condition met:        {{RECOVERY_MET}}   (<15% for 10 consecutive days OR VTI positive momentum 5 consecutive days)
 ```
 
 ### 2c. Momentum Rankings
