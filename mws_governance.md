@@ -1,4 +1,4 @@
-# Momentum-Weighted Scaling (MWS) v2.9.8
+# Momentum-Weighted Scaling (MWS) v2.9.9
 ## Governance Document
 **As-of:** 2026-03-17
 **Role:** Authoritative governance rationale. Read by `mws_runner.py` and injected into every LLM run as governance context.
@@ -296,10 +296,13 @@ If the optimization target set is **infeasible** — defined as: cannot simultan
 | Stress override | soft_limit breached | Freezes calendar and signal_drift triggers; band_breach enforcement continues |
 
 ### Turnover Caps
-- Per-rebalance event: **20%** (22% under soft_limit stress) — applies to **momentum-driven signal trades only**
+- Per-rebalance event: **20%** (22% under soft_limit stress)
 - Annualized ceiling: **60%** (~2 major rotations per year)
 - When turnover cap binds, partial rebalance executed in order of violation severity
-- **Exception:** Hard-limit compliance trades (cap/floor enforcement, Bucket A protection, hard-limit position reduction) are exempt from all turnover caps and execute in full
+- **Exception:** Hard-limit compliance trades (Priority 1 — Bucket A protection, hard-limit position reduction) are **exempt** from the turnover cap and execute in full
+
+#### Compliance Buy Cap (v2.9.9)
+Regular L2 floor/cap compliance buys (Priority 3) are subject to the 20% per-event turnover cap. This prevents the compliance_denom snap-back at the end of a tactical-cash period from forcing an oversized multi-sleeve re-entry in a single cycle. Any unfilled compliance deficit is automatically queued to the next rebalance cycle when the floor check re-fires. Display note distinguishes "turnover cap (deficit queued)" from "cash limited" when compliance buys are scaled.
 
 ---
 

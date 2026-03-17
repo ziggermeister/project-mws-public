@@ -1025,8 +1025,18 @@ def _build_portfolio_tables(analytics: dict) -> str:
         mom_buy_need       = sum(raw_trades[t][0] for t in mom_buy_t)
         total_available    = cash_mv + comp_sell_proceeds + mom_sell_proceeds
 
-        # Phase 1: compliance buys — first claim on all available cash
-        comp_buy_scale  = min(1.0, total_available / comp_buy_need) if comp_buy_need > 0 else 1.0
+        # Phase 1: compliance buys — first claim on all available cash, capped at
+        # per-event turnover limit (v2.9.9). Hard-limit compliance trades (Priority 1)
+        # remain turnover-cap-exempt; regular L2 floor/cap compliance buys (Priority 3)
+        # are subject to the 20% per-event cap. Any unfilled deficit is picked up
+        # naturally in the next rebalance cycle when the compliance check re-fires.
+        _exec_policy         = policy.get("governance", {}).get("execution", {})
+        _max_turnover_pct    = float(_exec_policy.get("max_turnover", 0.20))
+        _turnover_cap_usd    = total_val * _max_turnover_pct
+        _cash_lim_scale      = (total_available   / comp_buy_need) if comp_buy_need > 0 else 1.0
+        _turnover_lim_scale  = (_turnover_cap_usd / comp_buy_need) if comp_buy_need > 0 else 1.0
+        comp_buy_scale       = min(1.0, _cash_lim_scale, _turnover_lim_scale)
+        _comp_turnover_bound = (_turnover_lim_scale < _cash_lim_scale and comp_buy_scale < 0.999)
         cash_after_comp = total_available - comp_buy_need * comp_buy_scale
 
         # Ring-fence reserves from post-compliance cash
@@ -1086,7 +1096,12 @@ def _build_portfolio_tables(analytics: dict) -> str:
             elif ticker in comp_buy_t:
                 s_usd = raw_usd * comp_buy_scale
                 s_sh  = round(s_usd / t_price) if t_price > 0 and s_usd > 0 else None
-                note  = f"⚠ scaled {comp_buy_scale:.0%}" if comp_buy_scale < 0.999 else ""
+                if comp_buy_scale < 0.999:
+                    note = (f"⚠ scaled {comp_buy_scale:.0%} — turnover cap (deficit queued)"
+                            if _comp_turnover_bound else
+                            f"⚠ scaled {comp_buy_scale:.0%} — cash limited")
+                else:
+                    note = ""
                 scaled_trades[ticker] = (s_usd, s_sh, pfx, note)
             elif ticker in mom_buy_t:
                 s_usd = raw_usd * mom_buy_scale
