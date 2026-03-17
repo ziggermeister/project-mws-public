@@ -1,4 +1,4 @@
-# Momentum-Weighted Scaling (MWS) v2.9.7
+# Momentum-Weighted Scaling (MWS) v2.9.8
 ## Governance Document
 **As-of:** 2026-03-17
 **Role:** Authoritative governance rationale. Read by `mws_runner.py` and injected into every LLM run as governance context.
@@ -208,9 +208,37 @@ The stabilizers sleeve provides negative correlation to equities during drawdown
 
 ## 7. Cash Governance & Funding
 
-- Cash is **included** in the allocatable denominator
+- Cash is **included** in the sizing denominator (see Bifurcated Denominators below)
 - Cash does **not** satisfy sleeve floors or prevent hard cap enforcement
 - Floors and caps determine target weights regardless of cash level
+
+### Bifurcated Denominators & Tactical Cash (v2.9.8)
+
+The absolute momentum filter (v2.9.7) can cause cash to accumulate when buys are blocked across the universe. If that cash remains in the denominator used for floor compliance checks, sleeve weights compress artificially — triggering forced compliance buys into the exact negative-momentum assets the filter was blocking. To prevent this, MWS uses **two distinct denominators** serving two distinct roles:
+
+| Denominator | Formula | Used For |
+|---|---|---|
+| `sizing_denom` | TPV − overlays − Bucket A | Target $ calculations for all trades. Cash stays visible; recovery buys scale correctly when filter lifts. |
+| `compliance_denom` | `sizing_denom` − tactical cash | L1/L2 floor and cap breach detection **only**. Shrinks the ruler so the portfolio can sit in cash without triggering fake compliance breaches. |
+
+**Tactical cash** is classified as:
+```
+cash_reserve_buffer  = 1% of TPV  (normal settlement float)
+raw_tactical_cash    = max(0, cash_balance − cash_reserve_buffer)
+
+tactical_cash =
+    if (filter_blocking == TRUE                     # abs filter actively suppressing would-be buys
+        AND raw_tactical_cash persists ≥ 2 trading days):
+        min(raw_tactical_cash, 30% of TPV)         # 30% cap prevents pathological compression
+    else:
+        0
+```
+
+**Causal test:** `filter_blocking` is true when any ticker has `Pct ≥ 0.65` AND `RawScore ≤ 0` — a would-be momentum buy actively suppressed by the absolute momentum filter. This ensures only filter-caused cash buildup qualifies, not routine settlement float or dividend proceeds.
+
+**Recovery:** When momentum recovers and the filter lifts, `filter_blocking` → false, `tactical_cash` → 0, and `compliance_denom` = `sizing_denom`. The full pie is restored in one rebalance cycle. Cash fully redeploys because it was never excluded from `sizing_denom`.
+
+**Reviewed by:** Gemini + ChatGPT (2026-03-17). Both confirmed bifurcated-denominator approach solves the roach-motel trap (single-denominator exclusion permanently traps cash). ChatGPT added persistence guard and 30% cap.
 
 ### Funding Invariant
 ```

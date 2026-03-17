@@ -50,7 +50,8 @@ RESULTS_CSV        = "mws_run_results.csv"
 MACRO_MD           = "mws_governance.md"
 MARKET_CTX_MD      = "mws_market_context.md"
 CHART_FILENAME     = "mws_equity_curve.png"
-BREADTH_STATE_JSON = "mws_breadth_state.json"
+BREADTH_STATE_JSON        = "mws_breadth_state.json"
+TACTICAL_CASH_STATE_JSON  = "mws_tactical_cash_state.json"
 
 
 # ==============================================================================
@@ -1387,6 +1388,82 @@ def compute_and_persist_breadth_states(
     return effective_floors
 
 
+# ==============================================================================
+def compute_and_persist_tactical_cash_state(
+    df_scores: pd.DataFrame,
+    state_path: str = TACTICAL_CASH_STATE_JSON,
+) -> dict:
+    """Track consecutive days the absolute momentum filter is blocking buys.
+
+    The absolute momentum filter (v2.9.7) blocks momentum buys for any ticker
+    with RawScore <= 0, even when its percentile rank >= 0.65 (strong relative
+    signal).  This function detects when the filter is actively blocking and
+    tracks how many consecutive trading days this has held.
+
+    The runner reads this state to decide whether excess cash qualifies as
+    "tactical cash" and should be excluded from the compliance denominator
+    (v2.9.8 bifurcated-denominator rule).
+
+    A ticker is treated as "would-be momentum buy, blocked" when:
+      - Pct  >= 0.65  (strong enough for a momentum_buy action)
+      - RawScore <= 0 (absolute momentum filter suppresses the buy)
+
+    Returns: dict with keys: date, filter_blocking, consecutive_blocked_days.
+    """
+    today_str = _todays_trading_date()
+
+    # Load existing state
+    existing: dict = {}
+    if os.path.exists(state_path):
+        try:
+            with open(state_path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except Exception as exc:
+            logger.warning("tactical_cash_state: could not load %s (%s)", state_path, exc)
+
+    # Don't double-update on the same trading day
+    if existing.get("date") == today_str:
+        return existing
+
+    # Determine whether the filter is actively blocking any would-be momentum buy
+    filter_blocking = False
+    if (not df_scores.empty
+            and "Pct" in df_scores.columns
+            and "RawScore" in df_scores.columns):
+        for _, row in df_scores.iterrows():
+            pct = float(row["Pct"])      if pd.notna(row.get("Pct"))      else 0.0
+            raw = float(row["RawScore"]) if pd.notna(row.get("RawScore")) else 0.0
+            if pct >= 0.65 and raw <= 0:
+                filter_blocking = True
+                break
+
+    # Advance the consecutive-day counter
+    prior_blocking = existing.get("filter_blocking", False)
+    prior_count    = int(existing.get("consecutive_blocked_days", 0))
+    if filter_blocking:
+        consecutive_blocked_days = prior_count + 1 if prior_blocking else 1
+    else:
+        consecutive_blocked_days = 0
+
+    state = {
+        "date":                     today_str,
+        "filter_blocking":          filter_blocking,
+        "consecutive_blocked_days": consecutive_blocked_days,
+    }
+
+    try:
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+        logger.info(
+            "tactical_cash_state: filter_blocking=%s, consecutive_blocked_days=%d",
+            filter_blocking, consecutive_blocked_days,
+        )
+    except Exception as exc:
+        logger.warning("tactical_cash_state: could not write %s (%s)", state_path, exc)
+
+    return state
+
+
 def main() -> None:
     policy, hist, hold = load_system_files()
 
@@ -1412,6 +1489,7 @@ def main() -> None:
 
     df_scores = generate_rankings(policy, hist, candidates, hold)
     compute_and_persist_breadth_states(policy, df_scores)
+    compute_and_persist_tactical_cash_state(df_scores)
     from mws_charts import rotate_and_chart   # local import — keeps matplotlib out of CI
     rotate_and_chart(df_scores, policy)
 

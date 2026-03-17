@@ -607,6 +607,37 @@ def _build_portfolio_tables(analytics: dict) -> str:
         bucket_a_mv = hold.loc[hold["Class"] == "bucket_a",        "MV"].sum()
         alloc_denom = total_val - overlay_mv - bucket_a_mv
 
+        # ── Bifurcated denominators — tactical cash management (v2.9.8) ──────
+        # sizing_denom    = full deployable pie; cash stays visible so recovery
+        #                   buys scale correctly when the abs-momentum filter lifts.
+        # compliance_denom = sizing_denom minus tactical cash; used ONLY for
+        #                   L1/L2 floor/cap breach detection so blocked-filter
+        #                   cash doesn't trigger spurious compliance buys.
+        _cash_val = float(hold.loc[hold["Ticker"] == "CASH", "MV"].sum()) \
+                    if "CASH" in held_tickers else 0.0
+        sizing_denom     = alloc_denom
+        compliance_denom = alloc_denom
+        _tactical_cash   = 0.0
+        _tcm = policy.get("tactical_cash_management", {})
+        if _tcm.get("enabled", False):
+            _buf    = total_val * float(_tcm.get("cash_reserve_buffer_pct", 0.01))
+            _raw_tc = max(0.0, _cash_val - _buf)
+            _tcs: dict = {}
+            _tcs_path = mws_analytics.TACTICAL_CASH_STATE_JSON
+            if os.path.exists(_tcs_path):
+                try:
+                    with open(_tcs_path, "r", encoding="utf-8") as _f:
+                        _tcs = json.load(_f)
+                except Exception:
+                    pass
+            _blocking = _tcs.get("filter_blocking", False)
+            _consec   = int(_tcs.get("consecutive_blocked_days", 0))
+            _persist  = int(_tcm.get("persistence_required_days", 2))
+            if _blocking and _consec >= _persist and _raw_tc > 0:
+                _cap           = total_val * float(_tcm.get("tactical_cash_cap_pct", 0.30))
+                _tactical_cash = min(_raw_tc, _cap)
+                compliance_denom = sizing_denom - _tactical_cash
+
         # ── Momentum lookup: rank (#1 = strongest), pct, alpha ───────────────
         scores_by_ticker: dict = {}
         n_ranked = 0
@@ -788,17 +819,20 @@ def _build_portfolio_tables(analytics: dict) -> str:
 
         # ── First pass: collect all ticker data ───────────────────────────────
         # ticker_data[ticker] = {l1, l2, l2_data, action, label, color, basis, cur_pct, floor_pct, cap_pct, denom}
+        # cur_pct uses compliance_denom (floor/cap breach detection).
+        # denom stored in ticker_data uses sizing_denom (trade $ sizing).
         ticker_data: dict = {}
         for l1_name in l1_sorted:
             l1_data    = sleeves_l1[l1_name]
             is_overlay = (l1_name == "stabilizers")
-            denom      = total_val if is_overlay else alloc_denom
+            sizing_d   = total_val if is_overlay else sizing_denom      # trade sizing
+            comp_d     = total_val if is_overlay else compliance_denom  # floor/cap checks
             for l2_name in l1_data.get("children", []):
                 l2_data   = sleeves_l2.get(l2_name, {})
                 floor_pct = _resolve_floor(l2_data, l2_name) * 100
                 cap_pct   = (l2_data.get("cap")   or 0) * 100
                 l2_total  = _l2_mv(l2_name)
-                cur_pct   = (l2_total / denom * 100) if denom > 0 else 0.0
+                cur_pct   = (l2_total / comp_d * 100) if comp_d > 0 else 0.0
                 for ticker in l2_data.get("tickers", []):
                     if ticker not in held_tickers:
                         continue
@@ -807,7 +841,7 @@ def _build_portfolio_tables(analytics: dict) -> str:
                         l1=l1_name, l2=l2_name, l2_data=l2_data,
                         label=label, color=color, basis=basis,
                         cur_pct=cur_pct, floor_pct=floor_pct, cap_pct=cap_pct,
-                        denom=denom,
+                        denom=sizing_d,  # sizing_denom for _est_trade dollar calculations
                     )
 
         # Per-sleeve BUY/TRIM ticker lists for trade-size splitting
@@ -847,9 +881,9 @@ def _build_portfolio_tables(analytics: dict) -> str:
             l1_cap     = l1_data.get("cap")
             children   = l1_data.get("children", [])
             is_overlay = (l1_name == "stabilizers")
-            denom      = total_val if is_overlay else alloc_denom
+            comp_d     = total_val if is_overlay else compliance_denom  # floor/cap display
             l1_total   = _l1_mv(l1_name)
-            l1_cur_pct = (l1_total / denom * 100) if denom > 0 else 0.0
+            l1_cur_pct = (l1_total / comp_d * 100) if comp_d > 0 else 0.0
             l1_cap_str = f"{l1_cap * 100:.0f}%" if l1_cap else "overlay"
 
             t1_rows.append(
@@ -868,7 +902,7 @@ def _build_portfolio_tables(analytics: dict) -> str:
                 floor_pct = _resolve_floor(l2_data, l2_name) * 100
                 cap_pct   = (l2_data.get("cap")   or 0) * 100
                 l2_total  = _l2_mv(l2_name)
-                cur_pct   = (l2_total / denom * 100) if denom > 0 else 0.0
+                cur_pct   = (l2_total / comp_d * 100) if comp_d > 0 else 0.0  # compliance_denom
 
                 if   cur_pct < floor_pct - 0.1: l2_status = "&#9888; BELOW FLOOR"
                 elif cur_pct > cap_pct   + 0.1: l2_status = "&#9888; ABOVE CAP"
@@ -1246,8 +1280,12 @@ def _build_portfolio_tables(analytics: dict) -> str:
             f'<strong>TPV:</strong> ${total_val:,.0f} (as of {val_asof})'
             f'&ensp;|&ensp;<strong>Drawdown:</strong> {dd_state} &mdash; {dd_pct:.1f}% from peak'
             f' (${peak_tpv:,.0f})<br>'
-            f'<strong>Allocatable denominator:</strong> ${alloc_denom:,.0f}'
-            f' (TPV &minus; overlays &minus; Bucket A)</p>'
+            f'<strong>Sizing denominator:</strong> ${sizing_denom:,.0f}'
+            f' (TPV &minus; overlays &minus; Bucket A)'
+            + (f'&ensp;|&ensp;<strong>Compliance denominator:</strong> ${compliance_denom:,.0f}'
+               f' (excl. ${_tactical_cash:,.0f} tactical cash &mdash; abs-filter blocked)'
+               if _tactical_cash > 0 else '')
+            + f'</p>'
         )
 
         # ── Colour legend ─────────────────────────────────────────────────────
