@@ -2,13 +2,18 @@
 """
 mws_fetch_history.py
 ────────────────────
-Fetches/extends mws_ticker_history.csv using Stooq (free, no auth).
+Fetches/extends mws_ticker_history.csv using Stooq.
 
-Ticker universe is built dynamically from mws_policy.json + mws_tracker.json,
-replicating the GAS script's behaviour:
+Price source priority (per day):
+  1. Stooq historical  — primary; split+dividend-adjusted EOD closes
+                         (lags by ~1 trading day while market is open)
+  2. Stooq real-time   — same-day fallback; automatically fetched when the
+                         historical endpoint hasn't published today's date yet
+                         (returns the latest traded price; no auth required)
+
+Ticker universe is built dynamically from mws_policy.json:
   - All tickers in policy.ticker_constraints (excluding synthetic fixed-price assets)
   - All reporting baselines (active_benchmarks, corr_anchor_ticker)
-  - All tickers in mws_tracker.json positions[] / tickers[]
   - Purges history rows for tickers no longer in the required set
 
 Modes:
@@ -24,6 +29,10 @@ Modes:
 NOTE: Stooq provides split-adjusted + dividend-adjusted closing prices
 for US ETFs and stocks. The "Close" column is the total-return adjusted
 price, equivalent to Yahoo Finance's "Adj Close".
+
+NOTE: Stooq RT prices are not split+dividend-adjusted (same as historical
+for same-day use — no corporate action occurs mid-day). The next Stooq
+historical fetch will overwrite these rows with official adjusted closes.
 """
 
 import argparse
@@ -31,7 +40,7 @@ import json
 import sys
 import time
 import io
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional, Set
 
@@ -54,7 +63,6 @@ INCREMENTAL_DAYS: Optional[int] = _args.days
 # ── Paths ─────────────────────────────────────────────────────────────────────
 BASE_DIR     = Path(__file__).parent
 POLICY_FILE  = BASE_DIR / "mws_policy.json"
-TRACKER_FILE = BASE_DIR / "mws_tracker.json"
 OUT_FILE     = BASE_DIR / "mws_ticker_history.csv"
 
 START_DATE = "2019-01-01"
@@ -101,23 +109,18 @@ SHORT_HISTORY_EXPECTED = {
 
 # ── Dynamic ticker universe ───────────────────────────────────────────────────
 
-def build_ticker_universe(policy: dict, tracker: dict) -> List[str]:
+def build_ticker_universe(policy: dict) -> List[str]:
     """
-    Build the required ticker universe from mws_policy.json + mws_tracker.json,
-    replicating the GAS script's getPolicyRequiredTickers_ + normalizeInventory_.
+    Build the required ticker universe from mws_policy.json alone.
 
     Sources (union of all):
       1. policy.ticker_constraints keys — every ticker the policy mentions
       2. policy.governance.reporting_baselines (active_benchmarks + corr_anchor_ticker)
-      3. tracker.positions[].ticker  (or tracker.tickers[] for older format)
 
     Exclusions:
       - policy.governance.fixed_asset_prices keys (CASH, TREASURY_NOTE, etc.) —
         these are synthetic assets with no Stooq market data.
       - Anything that fails basic ticker validation (spaces, empty strings, etc.)
-
-    The returned list preserves a stable order: policy tickers first (sorted),
-    then any tracker-only tickers appended (sorted), for reproducible output.
     """
     # Synthetic assets that have no market price feed
     fixed_prices = (
@@ -148,30 +151,8 @@ def build_ticker_universe(policy: dict, tracker: dict) -> List[str]:
         if T and T not in synthetic:
             required.add(T)
 
-    # 3. Tracker positions (supports both list-of-objects and list-of-strings)
-    raw_positions = tracker.get("positions") or tracker.get("tickers") or []
-    for item in raw_positions:
-        if isinstance(item, dict):
-            T = str(item.get("ticker", "")).strip().upper()
-            cls = str(item.get("classification", "")).strip().lower()
-            # Skip reference-only tickers that are already captured via baselines
-            # (keep them if they appear in policy ticker_constraints)
-            if not T or T in synthetic:
-                continue
-            # Always include; reference tickers are still needed for analytics
-            required.add(T)
-        elif isinstance(item, str):
-            T = item.strip().upper()
-            if T and T not in synthetic:
-                required.add(T)
-
     # Basic validation: reject anything that can't be a real ticker
     valid = {t for t in required if t and len(t) <= 30 and " " not in t}
-
-    # Normalize display names back to fetch names
-    # e.g. tracker stores "INDEXCBOE:VIX" (display) → we need "^VIX" (fetch name)
-    inv_display = {v.upper(): k for k, v in DISPLAY_OVERRIDE.items()}
-    valid = {inv_display.get(t, t) for t in valid}
 
     # Stable ordering: sort the full set
     return sorted(valid)
@@ -179,34 +160,20 @@ def build_ticker_universe(policy: dict, tracker: dict) -> List[str]:
 
 def load_universe() -> List[str]:
     """
-    Load policy + tracker and return the dynamic ticker universe.
-    Falls back to the hardcoded lists with a warning if files are missing/corrupt.
+    Load mws_policy.json and return the dynamic ticker universe.
+    Falls back to the hardcoded lists with a warning if the file is missing/corrupt.
     """
-    errors = []
-
-    policy = None
-    if POLICY_FILE.exists():
-        try:
-            policy = json.loads(POLICY_FILE.read_text(encoding="utf-8"))
-        except Exception as e:
-            errors.append(f"mws_policy.json: {e}")
-    else:
-        errors.append("mws_policy.json not found")
-
-    tracker = None
-    if TRACKER_FILE.exists():
-        try:
-            tracker = json.loads(TRACKER_FILE.read_text(encoding="utf-8"))
-        except Exception as e:
-            errors.append(f"mws_tracker.json: {e}")
-    else:
-        errors.append("mws_tracker.json not found")
-
-    if errors:
-        print(f"⚠️  Falling back to hardcoded ticker lists — could not load: {'; '.join(errors)}")
+    if not POLICY_FILE.exists():
+        print("⚠️  Falling back to hardcoded ticker lists — mws_policy.json not found")
         return sorted(set(_FALLBACK_PORTFOLIO + _FALLBACK_REFERENCE))
 
-    universe = build_ticker_universe(policy, tracker)
+    try:
+        policy = json.loads(POLICY_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"⚠️  Falling back to hardcoded ticker lists — mws_policy.json: {e}")
+        return sorted(set(_FALLBACK_PORTFOLIO + _FALLBACK_REFERENCE))
+
+    universe = build_ticker_universe(policy)
     if not universe:
         print("⚠️  Dynamic universe is empty — falling back to hardcoded lists")
         return sorted(set(_FALLBACK_PORTFOLIO + _FALLBACK_REFERENCE))
@@ -269,6 +236,78 @@ def fetch_ticker(ticker: str, start: str) -> Optional[pd.DataFrame]:
     except Exception as e:
         print(f"    ↳ Unexpected error for {ticker}: {type(e).__name__}: {e}")
         return None
+
+
+# ── Stooq same-day fallback ────────────────────────────────────────────────────
+# Stooq's daily history endpoint lags by ~1 trading day. When today's date is
+# missing, we hit Stooq's real-time quote endpoint:
+#   https://stooq.com/q/l/?s={symbol}&f=sd2t2ohlcv&e=csv
+# which returns the latest traded price (intraday during hours, official close
+# after ~9 PM UTC). Same source as history — no auth, no rate limits.
+
+STOOQ_RT_URL = "https://stooq.com/q/l/"
+
+
+def todays_trading_date() -> str:
+    """
+    Return today's date string (YYYY-MM-DD) if today is a weekday (Mon–Fri),
+    otherwise the most recent weekday. Not holiday-aware.
+    """
+    candidate = datetime.now(timezone.utc).date()
+    while candidate.weekday() >= 5:  # 5=Sat, 6=Sun
+        candidate -= timedelta(days=1)
+    return candidate.strftime("%Y-%m-%d")
+
+
+def fetch_today_stooq_rt(tickers: List[str], target_date: str) -> pd.DataFrame:
+    """
+    Fetch today's latest price for each ticker from Stooq's real-time quote
+    endpoint. Returns a DataFrame with [Date, Ticker, AdjClose] for rows where
+    the returned date matches target_date.
+
+    CSV format returned by Stooq RT: Symbol,Date,Time,Open,High,Low,Close,Volume
+    We use Close as AdjClose (same-day: no dividend adjustment needed; the next
+    Stooq historical fetch will overwrite with official adjusted closes).
+    """
+    rows = []
+    print(f"\n📡  Stooq daily history lagged — fetching {target_date} quotes from Stooq RT ...")
+
+    for ticker in tickers:
+        display = DISPLAY_OVERRIDE.get(ticker, ticker)
+        symbol  = stooq_symbol(ticker)
+        params  = {"s": symbol, "f": "sd2t2ohlcv", "e": "csv"}
+
+        try:
+            resp = requests.get(STOOQ_RT_URL, params=params, headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+            text = resp.text.strip()
+            if not text or "No data" in text or len(text) < 10:
+                print(f"    {display:<14} — Stooq RT: no data")
+                continue
+
+            # Parse single-row CSV: Symbol,Date,Time,Open,High,Low,Close,Volume
+            line = text.splitlines()[-1]  # skip header if present
+            parts = line.split(",")
+            if len(parts) < 7:
+                print(f"    {display:<14} — Stooq RT: unexpected format: {text[:60]}")
+                continue
+
+            row_date = parts[1].strip()
+            close_str = parts[6].strip()  # Close column
+            if row_date != target_date:
+                print(f"    {display:<14} — Stooq RT: returned {row_date}, expected {target_date}")
+                continue
+
+            price = round(float(close_str), 6)
+            rows.append({"Date": pd.Timestamp(target_date), "Ticker": display, "AdjClose": price})
+            print(f"    {display:<14} — Stooq RT: ${price:.4f} @ {parts[2].strip()}")
+
+        except Exception as e:
+            print(f"    {display:<14} — Stooq RT error: {type(e).__name__}: {e}")
+
+        time.sleep(0.2)
+
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["Date", "Ticker", "AdjClose"])
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -337,6 +376,24 @@ for i, ticker in enumerate(ALL_TICKERS, 1):
 
 if not frames:
     sys.exit("\nERROR: No data fetched. Check: curl -s 'https://stooq.com/q/d/l/?s=spy.us&d1=20240101&d2=20240110&i=d'")
+
+# ── Same-day fallback: Yahoo Finance when Stooq is lagged ─────────────────────
+# Check if Stooq's latest date is behind the expected last market close.
+# If so, fetch today's closes from Yahoo Finance and append them.
+_fresh_latest = pd.concat(frames)["Date"].max().date().strftime("%Y-%m-%d")
+_expected_date = todays_trading_date()
+
+if _fresh_latest < _expected_date:
+    print(f"\n⚠️  Stooq latest: {_fresh_latest}  |  Expected: {_expected_date}")
+    rt_rows = fetch_today_stooq_rt(ALL_TICKERS, _expected_date)
+    if not rt_rows.empty:
+        frames.append(rt_rows)
+        print(f"    ✅ Injected {len(rt_rows)} Stooq RT rows for {_expected_date}")
+    else:
+        print(f"    ⚠️  Stooq RT returned no prices for {_expected_date} "
+              f"(market may not have traded today)")
+else:
+    print(f"\n✅  Stooq up-to-date through {_fresh_latest}")
 
 # ── Merge incremental data with existing history ──────────────────────────────
 fresh = pd.concat(frames, ignore_index=True)

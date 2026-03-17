@@ -29,7 +29,6 @@ git add \
   mws_policy.json \
   mws_ticker_history.csv \
   mws_recent_performance.csv \
-  mws_tracker.json \
   mws_market_context.md \
   mws_run_results.csv \
   mws_governance.md \

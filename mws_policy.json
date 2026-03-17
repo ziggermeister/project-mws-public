@@ -1380,7 +1380,7 @@
       "novel_not_yet_priced": {
         "definition": "Breaking news within 2 trading days that has not yet been reflected in momentum signals",
         "llm_action": "Highest scrutiny. Explicitly state 'signal may not yet reflect this news.' Consider deferring the affected trade by 2–5 trading days to allow price discovery, OR invoke discretionary override with documented rationale.",
-        "governance": "Any trade deferred or overridden due to novel news must be logged in mws_tracker.json with news_override flag."
+        "governance": "Any trade deferred or overridden due to novel news must be documented in the mws_recommendation output with explicit rationale."
       }
     },
     "required_recommendation_output": {
@@ -1479,7 +1479,7 @@
         ],
         "footer_sections": [
           "## Override Candidates — list HIGH-materiality contradictions with affected ticker, direction, rationale",
-          "## Market Regime Snapshot — VIX level + 5d trend, TPV drawdown from mws_tracker.json, risk regime"
+          "## Market Regime Snapshot — VIX level + 5d trend, TPV drawdown from mws_recent_performance.csv, risk regime"
         ]
       },
       "search_failure_handling": "If web search is unavailable or returns no results for a category, write 'NO DATA — web search unavailable' in that category block. Do not fabricate news. Proceed with systematic signal only for that sleeve."
@@ -1519,10 +1519,6 @@
             "role": "Current positions after user uploads latest from Chase. LLM must not run without a fresh copy."
           },
           {
-            "file": "mws_tracker.json",
-            "role": "System state — peak TPV, current drawdown, active signals, deferred trades."
-          },
-          {
             "file": "python_output",
             "role": "Momentum scores, breach flags, vol diagnostics, charts. Produced by mws_analytics.py immediately before LLM run."
           },
@@ -1533,8 +1529,7 @@
         ],
         "staleness_rules": {
           "mws_holdings.csv": "Must reflect current positions. User uploads from Chase before initiating run.",
-          "mws_ticker_history.csv": "Must be current to today (GAS responsibility). LLM should note if latest date is >1 trading day stale.",
-          "mws_tracker.json": "Updated by Python script after each run."
+          "mws_ticker_history.csv": "Must be current to today. LLM should note if latest date is >1 trading day stale."
         }
       },
       "llm_run_sequence": [

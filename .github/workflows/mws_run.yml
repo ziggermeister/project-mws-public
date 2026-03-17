@@ -63,7 +63,6 @@ jobs:
           commit_message: "auto: MWS run output ${{ env.TODAY }} [skip ci]"
           file_pattern: |
             mws_market_context.md
-            mws_tracker.json
             mws_run_results.csv
           commit_user_name: "MWS GitHub Runner"
           commit_user_email: "github-actions[bot]@users.noreply.github.com"

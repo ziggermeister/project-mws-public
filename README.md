@@ -40,7 +40,6 @@ A systematic, rules-based portfolio management system for a personal investment 
 | File | Role |
 |------|------|
 | [`mws_holdings.csv`](mws_holdings.csv) | Current holdings (Ticker, Shares, Class) |
-| [`mws_tracker.json`](mws_tracker.json) | State tracker — inducted universe, signals, peak TPV, deferred trades |
 | [`mws_ticker_history.csv`](mws_ticker_history.csv) | Historical price data (Date, Ticker, AdjClose) |
 | [`mws_recent_performance.csv`](mws_recent_performance.csv) | Daily performance log with TWR and benchmark comparison |
 | [`mws_run_results.csv`](mws_run_results.csv) | Run output log |
@@ -55,7 +54,6 @@ A systematic, rules-based portfolio management system for a personal investment 
 | [`mws_fetch_history.py`](mws_fetch_history.py) | Incremental price history fetcher (used by daily GitHub Action) |
 | [`mws_llm_run_prompt.md`](mws_llm_run_prompt.md) | LLM run prompt for **manual use** with ChatGPT / Gemini (runner builds its own prompt inline) |
 | [`commit_and_run.sh`](commit_and_run.sh) | Local workflow: commit data files, push, run local analytics |
-| [`convert.py`](convert.py) | One-off utility: converts Chase positions.csv export → `mws_holdings.csv` |
 
 ### CI / Automation
 | File | Role |
@@ -157,7 +155,6 @@ This repo is public. Raw file URLs for direct LLM ingestion:
 ```
 https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_policy.json
 https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_holdings.csv
-https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_tracker.json
 https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_ticker_history.csv
 https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_recent_performance.csv
 https://raw.githubusercontent.com/ziggermeister/project-mws-public/main/mws_governance.md

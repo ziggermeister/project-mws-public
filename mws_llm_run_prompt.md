@@ -176,13 +176,7 @@ Pre-computed. EWMA vol-scaled z-score, 126-day span, 2-day lookback. Vol clamped
 
 `gate_action` values: `PROCEED` | `DEFER_BUY` | `DEFER_SELL` | `SPIKE_TRIM`
 
-### 2e. System State (mws_tracker.json)
-
-```json
-{{SYSTEM_STATE_JSON}}
-```
-
-### 2f. Staleness Check
+### 2e. Staleness Check
 
 Flag any of the following and adjust confidence accordingly:
 - `mws_ticker_history.csv` last date is >2 trading days before today → data stale
@@ -575,7 +569,7 @@ If the brokerage paste is newer than the CSV for any held tickers:
 gate z-scores, sleeve status, and drawdown state from the now-current history file.
 
 **Step 3 — Read output files** — populate all `{{PLACEHOLDER}}` values by reading the files
-directly (mws_holdings.csv, mws_tracker.json, analytics output). Do not ask the user to paste.
+directly (mws_holdings.csv, analytics output). Do not ask the user to paste.
 
 **Step 4 — Execute protocol Steps 1–8** — use `web_search` for Step 1 (news).
 Produce both output blocks (market context + recommendation) per the OUTPUT FORMAT section.
