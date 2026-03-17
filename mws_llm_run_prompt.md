@@ -276,6 +276,17 @@ Apply the sleeve hierarchy below to the momentum rankings to determine target we
 4. Normalize so each L1 sleeve sum is ≤ its cap (per Alloc).
 5. Apply overlay bands independently using TPV — do not include DBMF/KMLM in the L1/L2 normalization.
 
+### Absolute Momentum Filter (v2.9.7)
+
+Before generating any momentum buy or residual cash deployment, check the ticker's `RawScore` (raw blend value, not percentile rank):
+
+- If `RawScore > 0`: proceed with momentum buy / residual deployment as normal
+- If `RawScore ≤ 0`: **block the buy — return HOLD**. Do not deploy capital to this ticker via the momentum path, even if it ranks at the 90th percentile within its sleeve.
+
+**Exempt from filter:** compliance buys (floor enforcement), compliance trims, momentum trims, spike trims. The filter governs new capital deployment only — structural enforcement and selling are unaffected.
+
+**In a broad risk-off environment** where all tickers have negative RawScore: zero momentum buys are generated. Residual cash stays in cash. Compliance rules and drawdown controls continue to operate normally.
+
 ### Momentum Floor Exit / Re-Entry Rules
 
 - **Floor exit:** if a ticker has had negative momentum for ≥20 consecutive days → reduce to zero weight. Do not wait for normal rebalance cycle.

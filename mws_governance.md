@@ -1,4 +1,4 @@
-# Momentum-Weighted Scaling (MWS) v2.9.6
+# Momentum-Weighted Scaling (MWS) v2.9.7
 ## Governance Document
 **As-of:** 2026-03-17
 **Role:** Authoritative governance rationale. Read by `mws_runner.py` and injected into every LLM run as governance context.
@@ -155,6 +155,24 @@ All ticker caps and floors are expressed as a percentage of **TPV** (not allocat
 ---
 
 ## 5. Momentum Engine
+
+### Absolute Momentum Filter (v2.9.7)
+
+New capital is only deployed to tickers with **positive absolute momentum** (`blend_score > 0`). A ticker can rank at the 90th percentile within its sleeve and still be blocked from receiving a momentum buy if its raw blend score is negative.
+
+| Action type | Filter applies? |
+|---|---|
+| Momentum buy (percentile ≥ 65th) | **Yes** — blocked if blend_score ≤ 0 |
+| Residual cash deployment (Phase 3) | **Yes** — blocked if blend_score ≤ 0 |
+| Compliance buy (floor enforcement) | **No** — structural, executes regardless |
+| Momentum trim | **No** — selling is unaffected |
+| Spike trim | **No** — execution gate overrides |
+
+**Rationale:** Purely relative ranking always produces a buy candidate — the top-ranked ticker gets capital even if the entire universe has negative momentum. In a broad risk-off environment this forces new investment into the least-bad assets rather than preserving capital. The absolute filter ensures the system can go quiet (no momentum buys) when opportunity quality is broadly poor, while compliance enforcement and risk controls continue to operate normally.
+
+**What this means in practice:** In a broad market downturn where all inducted tickers have negative blend scores, the system will execute compliance and drawdown rules but generate zero momentum buys. Residual cash stays in cash until at least one ticker crosses into positive absolute momentum territory.
+
+
 
 Momentum is computed **only on inducted tickers** using a blend of three signals:
 

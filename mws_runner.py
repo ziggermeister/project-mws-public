@@ -715,6 +715,9 @@ def _build_portfolio_tables(analytics: dict) -> str:
             elif cur_pct > cap_pct + 0.1:
                 base, basis = "TRIM", "compliance_trim"
             elif pct >= 0.65:
+                # Absolute momentum filter (v2.9.7): block momentum buy if blend <= 0
+                if scores_by_ticker.get(ticker, {}).get("blend", 0.0) <= 0:
+                    return "HOLD", "#fff9c4", "hold|abs_filter"
                 base, basis = "BUY",  "momentum_buy"
             elif pct <= 0.30:
                 base, basis = "TRIM", "momentum_trim"
@@ -1010,7 +1013,12 @@ def _build_portfolio_tables(analytics: dict) -> str:
         residual = cash_after_mom
         if residual > 500:
             hold_candidates = sorted(
-                [(t, d) for t, d in ticker_data.items() if d["label"] == "HOLD"],
+                [
+                    (t, d) for t, d in ticker_data.items()
+                    if d["label"] in ("HOLD", "hold|abs_filter")
+                    # Absolute momentum filter (v2.9.7): residual only flows to positive-blend tickers
+                    and scores_by_ticker.get(t, {}).get("blend", 0.0) > 0
+                ],
                 key=lambda x: scores_by_ticker.get(x[0], {}).get("pct", 0.0),
                 reverse=True,
             )
