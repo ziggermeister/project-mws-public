@@ -4,6 +4,13 @@ mws_fetch_history.py
 ────────────────────
 Fetches/extends mws_ticker_history.csv using Stooq (free, no auth).
 
+Ticker universe is built dynamically from mws_policy.json + mws_tracker.json,
+replicating the GAS script's behaviour:
+  - All tickers in policy.ticker_constraints (excluding synthetic fixed-price assets)
+  - All reporting baselines (active_benchmarks, corr_anchor_ticker)
+  - All tickers in mws_tracker.json positions[] / tickers[]
+  - Purges history rows for tickers no longer in the required set
+
 Modes:
     Full (default):
         python3 mws_fetch_history.py
@@ -20,12 +27,13 @@ price, equivalent to Yahoo Finance's "Adj Close".
 """
 
 import argparse
+import json
 import sys
 import time
 import io
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Set
 
 import pandas as pd
 
@@ -43,8 +51,16 @@ _parser.add_argument(
 _args = _parser.parse_args()
 INCREMENTAL_DAYS: Optional[int] = _args.days
 
-# ── Config ────────────────────────────────────────────────────────────────────
-PORTFOLIO = [
+# ── Paths ─────────────────────────────────────────────────────────────────────
+BASE_DIR     = Path(__file__).parent
+POLICY_FILE  = BASE_DIR / "mws_policy.json"
+TRACKER_FILE = BASE_DIR / "mws_tracker.json"
+OUT_FILE     = BASE_DIR / "mws_ticker_history.csv"
+
+START_DATE = "2019-01-01"
+
+# ── Fallback hardcoded lists (used only if policy/tracker cannot be loaded) ───
+_FALLBACK_PORTFOLIO = [
     "VTI", "VXUS",
     "SOXQ", "CHAT", "BOTZ", "DTCR", "GRID",
     "IAUM", "SIVR",
@@ -54,30 +70,13 @@ PORTFOLIO = [
     "IBIT",
     "DBMF", "KMLM",
 ]
-
-REFERENCE = [
+_FALLBACK_REFERENCE = [
     "SPY", "QQQ", "GLD", "SLV", "AGG",
     "IBB", "SOXX", "PICK", "SRVR",
     "^VIX",
 ]
 
-ALL_TICKERS = PORTFOLIO + REFERENCE
-
-SHORT_HISTORY_EXPECTED = {
-    "CHAT", "DTCR", "GRID", "SOXQ", "DBMF", "KMLM", "IBIT", "IAUM"
-}
-
-START_DATE = "2019-01-01"
-OUT_FILE   = Path(__file__).parent / "mws_ticker_history.csv"
-
 # ── Stooq ─────────────────────────────────────────────────────────────────────
-# Stooq ticker format:
-#   US ETFs/stocks → lowercase + ".us"  (e.g. vti.us, spy.us)
-#   VIX index      → "^vix"
-#
-# Stooq returns CSV: Date,Open,High,Low,Close,Volume  (newest row first)
-# Close = total-return adjusted price
-
 STOOQ_URL = "https://stooq.com/q/d/l/"
 
 HEADERS = {
@@ -94,6 +93,128 @@ DISPLAY_OVERRIDE = {
     "^VIX": "INDEXCBOE:VIX",
 }
 
+# Tickers whose short history is expected (suppress the <1000-row warning)
+SHORT_HISTORY_EXPECTED = {
+    "CHAT", "DTCR", "GRID", "SOXQ", "DBMF", "KMLM", "IBIT", "IAUM"
+}
+
+
+# ── Dynamic ticker universe ───────────────────────────────────────────────────
+
+def build_ticker_universe(policy: dict, tracker: dict) -> List[str]:
+    """
+    Build the required ticker universe from mws_policy.json + mws_tracker.json,
+    replicating the GAS script's getPolicyRequiredTickers_ + normalizeInventory_.
+
+    Sources (union of all):
+      1. policy.ticker_constraints keys — every ticker the policy mentions
+      2. policy.governance.reporting_baselines (active_benchmarks + corr_anchor_ticker)
+      3. tracker.positions[].ticker  (or tracker.tickers[] for older format)
+
+    Exclusions:
+      - policy.governance.fixed_asset_prices keys (CASH, TREASURY_NOTE, etc.) —
+        these are synthetic assets with no Stooq market data.
+      - Anything that fails basic ticker validation (spaces, empty strings, etc.)
+
+    The returned list preserves a stable order: policy tickers first (sorted),
+    then any tracker-only tickers appended (sorted), for reproducible output.
+    """
+    # Synthetic assets that have no market price feed
+    fixed_prices = (
+        policy.get("governance", {})
+              .get("fixed_asset_prices", {}) or {}
+    )
+    synthetic: Set[str] = {str(t).strip().upper() for t in fixed_prices}
+
+    required: Set[str] = set()
+
+    # 1. All tickers in ticker_constraints (any lifecycle stage)
+    for t in (policy.get("ticker_constraints", {}) or {}):
+        T = str(t).strip().upper()
+        if T and T not in synthetic:
+            required.add(T)
+
+    # 2. Reporting baselines
+    bl = (
+        policy.get("governance", {})
+              .get("reporting_baselines", {}) or {}
+    )
+    for t in (bl.get("active_benchmarks") or []):
+        T = str(t).strip().upper()
+        if T and T not in synthetic:
+            required.add(T)
+    if bl.get("corr_anchor_ticker"):
+        T = str(bl["corr_anchor_ticker"]).strip().upper()
+        if T and T not in synthetic:
+            required.add(T)
+
+    # 3. Tracker positions (supports both list-of-objects and list-of-strings)
+    raw_positions = tracker.get("positions") or tracker.get("tickers") or []
+    for item in raw_positions:
+        if isinstance(item, dict):
+            T = str(item.get("ticker", "")).strip().upper()
+            cls = str(item.get("classification", "")).strip().lower()
+            # Skip reference-only tickers that are already captured via baselines
+            # (keep them if they appear in policy ticker_constraints)
+            if not T or T in synthetic:
+                continue
+            # Always include; reference tickers are still needed for analytics
+            required.add(T)
+        elif isinstance(item, str):
+            T = item.strip().upper()
+            if T and T not in synthetic:
+                required.add(T)
+
+    # Basic validation: reject anything that can't be a real ticker
+    valid = {t for t in required if t and len(t) <= 30 and " " not in t}
+
+    # Normalize display names back to fetch names
+    # e.g. tracker stores "INDEXCBOE:VIX" (display) → we need "^VIX" (fetch name)
+    inv_display = {v.upper(): k for k, v in DISPLAY_OVERRIDE.items()}
+    valid = {inv_display.get(t, t) for t in valid}
+
+    # Stable ordering: sort the full set
+    return sorted(valid)
+
+
+def load_universe() -> List[str]:
+    """
+    Load policy + tracker and return the dynamic ticker universe.
+    Falls back to the hardcoded lists with a warning if files are missing/corrupt.
+    """
+    errors = []
+
+    policy = None
+    if POLICY_FILE.exists():
+        try:
+            policy = json.loads(POLICY_FILE.read_text(encoding="utf-8"))
+        except Exception as e:
+            errors.append(f"mws_policy.json: {e}")
+    else:
+        errors.append("mws_policy.json not found")
+
+    tracker = None
+    if TRACKER_FILE.exists():
+        try:
+            tracker = json.loads(TRACKER_FILE.read_text(encoding="utf-8"))
+        except Exception as e:
+            errors.append(f"mws_tracker.json: {e}")
+    else:
+        errors.append("mws_tracker.json not found")
+
+    if errors:
+        print(f"⚠️  Falling back to hardcoded ticker lists — could not load: {'; '.join(errors)}")
+        return sorted(set(_FALLBACK_PORTFOLIO + _FALLBACK_REFERENCE))
+
+    universe = build_ticker_universe(policy, tracker)
+    if not universe:
+        print("⚠️  Dynamic universe is empty — falling back to hardcoded lists")
+        return sorted(set(_FALLBACK_PORTFOLIO + _FALLBACK_REFERENCE))
+
+    return universe
+
+
+# ── Stooq fetch ───────────────────────────────────────────────────────────────
 
 def stooq_symbol(ticker: str) -> str:
     """Convert standard ticker to Stooq symbol."""
@@ -152,9 +273,18 @@ def fetch_ticker(ticker: str, start: str) -> Optional[pd.DataFrame]:
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-# Determine fetch start date
+# Build ticker universe from policy + tracker
+ALL_TICKERS = load_universe()
+# Map display names back to fetch names for the required set
+# (DISPLAY_OVERRIDE maps fetch name → display name; invert for the purge check)
+DISPLAY_TO_FETCH = {v: k for k, v in DISPLAY_OVERRIDE.items()}
+# The set of display names that are required (used for purge)
+REQUIRED_DISPLAY: Set[str] = {
+    DISPLAY_OVERRIDE.get(t, t) for t in ALL_TICKERS
+}
+
+# Determine fetch start date and load existing history
 if INCREMENTAL_DAYS is not None:
-    # Incremental: find last date in existing CSV, fetch from (last - 5 days) as overlap buffer
     if OUT_FILE.exists():
         try:
             existing = pd.read_csv(OUT_FILE, parse_dates=["Date"])
@@ -174,7 +304,19 @@ else:
     existing = pd.DataFrame()
     fetch_start = START_DATE
 
-print(f"Fetching {len(ALL_TICKERS)} tickers from {fetch_start} to today ...")
+# ── Purge tickers no longer in the required set ───────────────────────────────
+if not existing.empty:
+    existing_tickers = set(existing["Ticker"].str.strip().str.upper().unique())
+    purge = existing_tickers - {t.upper() for t in REQUIRED_DISPLAY}
+    if purge:
+        print(f"\n🗑️  Purging {len(purge)} retired ticker(s) from history: {sorted(purge)}")
+        existing = existing[~existing["Ticker"].str.strip().str.upper().isin(purge)]
+    # Report any tickers newly added to the universe (not yet in history)
+    new_tickers = {t.upper() for t in REQUIRED_DISPLAY} - existing_tickers
+    if new_tickers:
+        print(f"✨  New ticker(s) detected (will be backfilled): {sorted(new_tickers)}")
+
+print(f"\nFetching {len(ALL_TICKERS)} tickers from {fetch_start} to today ...")
 print("(Source: Stooq.com — no auth required)\n")
 
 frames = []
@@ -196,12 +338,12 @@ for i, ticker in enumerate(ALL_TICKERS, 1):
 if not frames:
     sys.exit("\nERROR: No data fetched. Check: curl -s 'https://stooq.com/q/d/l/?s=spy.us&d1=20240101&d2=20240110&i=d'")
 
-# ── Merge incremental data with existing history ────────────────────────────
+# ── Merge incremental data with existing history ──────────────────────────────
 fresh = pd.concat(frames, ignore_index=True)
 fresh["Date"] = pd.to_datetime(fresh["Date"])
 
 if not existing.empty and INCREMENTAL_DAYS is not None:
-    # Drop overlap window from existing, then concat fresh on top
+    # Drop overlap window from existing (already purged above), then concat fresh
     cutoff = fresh["Date"].min()
     base = existing[existing["Date"] < cutoff]
     long = pd.concat([base, fresh], ignore_index=True)
