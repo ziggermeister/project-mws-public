@@ -3,7 +3,7 @@ VTI,286.72109,core_equity
 VXUS,834.29764,core_equity
 SOXQ,1026.68783,ai_tech
 CHAT,877.96020,ai_tech
-BOTZ,421.32757,ai_tech
+BOTZ,422.32757,ai_tech
 DTCR,1776.00000,ai_tech
 GRID,137.00000,ai_tech
 IAUM,1047.24099,precious_metals
@@ -14,8 +14,8 @@ COPX,279.82534,strategic_materials
 ITA,188.54988,defense_energy
 XLE,849.67720,defense_energy
 XBI,315.03533,biotech
-IBIT,167.00000,crypto
+IBIT,231.00000,crypto
 DBMF,1144.00000,managed_futures
 KMLM,1281.00000,managed_futures
-TREASURY_NOTE,1.00000,bucket_a
-CASH,2724.43,bucket_b
+TREASURY_NOTE,45000.00000,bucket_a
+CASH,0.89,bucket_b
