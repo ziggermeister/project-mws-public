@@ -42,14 +42,15 @@ def _bench_display(ticker: str) -> str:
 # ── File paths — single source of truth for all scripts ──────────────────────
 # mws_runner.py and any other scripts import these constants
 # rather than hardcoding filenames independently.
-POLICY_FILENAME  = "mws_policy.json"
-HOLDINGS_CSV     = "mws_holdings.csv"
-HISTORY_CSV      = "mws_ticker_history.csv"
-PERF_LOG_CSV     = "mws_recent_performance.csv"
-RESULTS_CSV      = "mws_run_results.csv"
-MACRO_MD         = "mws_governance.md"
-MARKET_CTX_MD    = "mws_market_context.md"
-CHART_FILENAME   = "mws_equity_curve.png"
+POLICY_FILENAME    = "mws_policy.json"
+HOLDINGS_CSV       = "mws_holdings.csv"
+HISTORY_CSV        = "mws_ticker_history.csv"
+PERF_LOG_CSV       = "mws_recent_performance.csv"
+RESULTS_CSV        = "mws_run_results.csv"
+MACRO_MD           = "mws_governance.md"
+MARKET_CTX_MD      = "mws_market_context.md"
+CHART_FILENAME     = "mws_equity_curve.png"
+BREADTH_STATE_JSON = "mws_breadth_state.json"
 
 
 # ==============================================================================
@@ -515,7 +516,7 @@ def compute_alpha_vs_proxy(hist: pd.DataFrame, ticker: str, proxy: str, start_da
 def generate_rankings(policy: dict, hist: pd.DataFrame, candidates: List[str], hold: pd.DataFrame) -> pd.DataFrame:
     logger.info("Phase 3: Generating Rankings...")
     if not candidates or hist.empty:
-        return pd.DataFrame(columns=["Ticker", "Score", "Pct", "Alpha", "AlphaVs", "Sleeve", "Status"])
+        return pd.DataFrame(columns=["Ticker", "Score", "Pct", "RawScore", "Alpha", "AlphaVs", "Sleeve", "Status"])
 
     held_set = get_held_tickers(hold)
 
@@ -579,7 +580,7 @@ def generate_rankings(policy: dict, hist: pd.DataFrame, candidates: List[str], h
         })
 
     if not rows:
-        return pd.DataFrame(columns=["Ticker", "Score", "Pct", "Alpha", "AlphaVs", "Sleeve", "Status"])
+        return pd.DataFrame(columns=["Ticker", "Score", "Pct", "RawScore", "Alpha", "AlphaVs", "Sleeve", "Status"])
 
     df = pd.DataFrame(rows)
 
@@ -607,7 +608,7 @@ def generate_rankings(policy: dict, hist: pd.DataFrame, candidates: List[str], h
                     r["Ticker"], pct_str, raw_str, r["Alpha"], r["AlphaVs"],
                     sleeve_disp, r["Status"])
 
-    return df[["Ticker", "Score", "Pct", "Alpha", "AlphaVs", "Sleeve", "Status"]]
+    return df[["Ticker", "Score", "Pct", "RawScore", "Alpha", "AlphaVs", "Sleeve", "Status"]]
 
 
 # ==============================================================================
@@ -1244,6 +1245,148 @@ def check_execution_gate(
 
 
 # ==============================================================================
+def compute_and_persist_breadth_states(
+    policy: dict,
+    df_scores: pd.DataFrame,
+    state_path: str = BREADTH_STATE_JSON,
+) -> dict:
+    """Compute per-sleeve breadth state with hysteresis and persist to JSON.
+
+    For every L2 sleeve whose floor is a breadth_conditioned object (v2.9.6),
+    this function:
+      1. Counts tickers with RawScore > 0 today.
+      2. Loads the existing state (consecutive-day counters) from state_path.
+      3. Applies hysteresis: the floor state only transitions after the new
+         breadth condition has held for `hysteresis_days` consecutive trading days.
+      4. Writes the updated state back to state_path.
+      5. Returns a dict mapping sleeve_name → effective_floor (float).
+
+    Called from main() after generate_rankings().  The runner reads state_path
+    at report time so it uses the fully hysteresis-resolved floor value.
+    """
+    today_str = _todays_trading_date()
+    sleeves_l2 = (policy.get("sleeves", {}) or {}).get("level2", {})
+
+    # Load existing state (keyed by sleeve name)
+    existing: dict = {}
+    if os.path.exists(state_path):
+        try:
+            with open(state_path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except Exception as exc:
+            logger.warning("breadth_state: could not load %s (%s); starting fresh", state_path, exc)
+
+    # Build RawScore lookup
+    raw_by_ticker: dict = {}
+    if not df_scores.empty and "RawScore" in df_scores.columns:
+        for _, row in df_scores.iterrows():
+            t = str(row["Ticker"])
+            raw = row["RawScore"]
+            raw_by_ticker[t] = float(raw) if pd.notna(raw) else None
+
+    effective_floors: dict = {}
+
+    for sleeve_name, l2_data in sleeves_l2.items():
+        floor_def = l2_data.get("floor")
+        if not isinstance(floor_def, dict) or floor_def.get("type") != "breadth_conditioned":
+            continue  # static floor — no state tracking needed
+
+        tickers       = l2_data.get("tickers", [])
+        cond          = floor_def.get("breadth_condition", {})
+        strong_thresh = int(cond.get("strong_breadth_threshold", 3))
+        hyst_days     = int(cond.get("hysteresis_days", 5))
+        strong_floor  = float(floor_def.get("strong_breadth_floor", 0.22))
+        weak_floor    = float(floor_def.get("weak_breadth_floor", 0.12))
+        infeas_floor  = float(floor_def.get("infeasible_floor", 0.0))
+        infeas_cond   = str(floor_def.get("infeasible_condition", ""))
+
+        # Today's breadth counts
+        positive_count  = sum(1 for t in tickers if (raw_by_ticker.get(t) or 0.0) > 0)
+        floor_exit_count = sum(1 for t in tickers if raw_by_ticker.get(t) is None)  # not ranked = exited
+
+        # Determine today's raw breadth category (before hysteresis)
+        infeasible_today = (
+            positive_count == 0
+            or ("floor_exit_count >= 4" in infeas_cond and floor_exit_count >= 4)
+        )
+        if infeasible_today:
+            raw_category = "infeasible"
+        elif positive_count >= strong_thresh:
+            raw_category = "strong"
+        else:
+            raw_category = "weak"
+
+        # Load prior state for this sleeve
+        prior = existing.get(sleeve_name, {})
+        current_category     = prior.get("current_category", raw_category)
+        pending_category     = prior.get("pending_category", raw_category)
+        pending_days         = int(prior.get("pending_days", 0))
+        last_date            = prior.get("last_date", "")
+
+        # Only advance the counter on a new trading day
+        if last_date == today_str:
+            # Already updated today — return stored effective floor
+            effective_floor = {
+                "strong":    strong_floor,
+                "weak":      weak_floor,
+                "infeasible": infeas_floor,
+            }.get(current_category, strong_floor)
+            effective_floors[sleeve_name] = effective_floor
+            existing[sleeve_name] = prior  # no change
+            continue
+
+        # Check if raw category has changed from the pending category
+        if raw_category != pending_category:
+            # New direction — reset pending counter
+            pending_category = raw_category
+            pending_days     = 1
+        else:
+            pending_days += 1
+
+        # Transition if pending has held long enough
+        if pending_days >= hyst_days and pending_category != current_category:
+            logger.info(
+                "breadth_state [%s]: floor transitioning %s → %s "
+                "(positive_count=%d, held %d days)",
+                sleeve_name, current_category, pending_category,
+                positive_count, pending_days,
+            )
+            current_category = pending_category
+
+        effective_floor = {
+            "strong":    strong_floor,
+            "weak":      weak_floor,
+            "infeasible": infeas_floor,
+        }.get(current_category, strong_floor)
+
+        logger.info(
+            "breadth_state [%s]: category=%s floor=%.0f%% "
+            "(positive=%d/%d, pending=%s×%d)",
+            sleeve_name, current_category, effective_floor * 100,
+            positive_count, len(tickers), pending_category, pending_days,
+        )
+
+        existing[sleeve_name] = {
+            "current_category": current_category,
+            "pending_category": pending_category,
+            "pending_days":     pending_days,
+            "last_date":        today_str,
+            "positive_count":   positive_count,
+            "floor_exit_count": floor_exit_count,
+            "effective_floor":  effective_floor,
+        }
+        effective_floors[sleeve_name] = effective_floor
+
+    # Persist updated state
+    try:
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2)
+    except Exception as exc:
+        logger.warning("breadth_state: could not write %s (%s)", state_path, exc)
+
+    return effective_floors
+
+
 def main() -> None:
     policy, hist, hold = load_system_files()
 
@@ -1268,6 +1411,7 @@ def main() -> None:
     _ = calculate_portfolio_value(policy, hold, hist)
 
     df_scores = generate_rankings(policy, hist, candidates, hold)
+    compute_and_persist_breadth_states(policy, df_scores)
     from mws_charts import rotate_and_chart   # local import — keeps matplotlib out of CI
     rotate_and_chart(df_scores, policy)
 

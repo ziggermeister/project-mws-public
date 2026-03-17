@@ -618,8 +618,18 @@ def _build_portfolio_tables(analytics: dict) -> str:
                     "rank":  i + 1,
                     "pct":   float(row["Pct"]) if pd.notna(row["Pct"]) else 0.0,
                     "alpha": str(row.get("Alpha", "—")),
-                    "blend": float(row["Score"]) if pd.notna(row.get("Score")) else 0.0,
+                    "blend": float(row["RawScore"]) if pd.notna(row.get("RawScore")) else 0.0,
                 }
+
+        # ── Breadth state — load persisted hysteresis-resolved floors ─────────
+        _breadth_state: dict = {}
+        _breadth_state_path = mws_analytics.BREADTH_STATE_JSON
+        if os.path.exists(_breadth_state_path):
+            try:
+                with open(_breadth_state_path, "r", encoding="utf-8") as _f:
+                    _breadth_state = json.load(_f)
+            except Exception:
+                pass  # fall back to current-day approximation if file missing/corrupt
 
         # ── Gate lookup ───────────────────────────────────────────────────────
         gates_by_ticker: dict = {}
@@ -646,29 +656,42 @@ def _build_portfolio_tables(analytics: dict) -> str:
         l1_sorted = sorted(sleeves_l1.keys(), key=_l1_sort, reverse=True)
 
         # ── Breadth-conditioned floor resolver ───────────────────────────────
-        def _resolve_floor(l2_data: dict) -> float:
+        def _resolve_floor(l2_data: dict, sleeve_name: str = "") -> float:
             """Return the effective floor fraction for an L2 sleeve.
-            Handles both static float floors and breadth_conditioned floor objects (v2.9.6).
-            For breadth_conditioned floors, uses current-day blend scores as an approximation
-            of breadth state (hysteresis tracking requires multi-day state, handled by analytics).
+
+            For static floors (float): returns value directly.
+            For breadth_conditioned floors (dict, v2.9.6):
+              1. Prefers the hysteresis-resolved value from mws_breadth_state.json
+                 (written by mws_analytics.compute_and_persist_breadth_states).
+              2. Falls back to current-day raw breadth approximation if the state
+                 file is absent or has no entry for this sleeve.
             """
             floor_val = l2_data.get("floor", 0.0)
             if not isinstance(floor_val, dict):
                 return float(floor_val or 0.0)
-            # Breadth-conditioned floor
-            cond    = floor_val.get("breadth_condition", {})
-            tickers = l2_data.get("tickers", [])
-            threshold = int(cond.get("strong_breadth_threshold", 3))
+
+            # Prefer persisted hysteresis-resolved floor
+            if sleeve_name and sleeve_name in _breadth_state:
+                stored = _breadth_state[sleeve_name]
+                if "effective_floor" in stored:
+                    return float(stored["effective_floor"])
+
+            # Fallback: current-day approximation (no hysteresis)
+            cond          = floor_val.get("breadth_condition", {})
+            tickers       = l2_data.get("tickers", [])
+            threshold     = int(cond.get("strong_breadth_threshold", 3))
+            infeas_cond   = str(floor_val.get("infeasible_condition", ""))
             positive_count = sum(
                 1 for t in tickers
                 if scores_by_ticker.get(t, {}).get("blend", 0.0) > 0
             )
             floor_exit_count = sum(
-                1 for t in tickers
-                if scores_by_ticker.get(t, {}).get("blend", 0.0) <= 0
-                and t not in held_tickers  # exited
+                1 for t in tickers if t not in held_tickers
             )
-            infeasible = (positive_count == 0 or floor_exit_count >= 4)
+            infeasible = (
+                positive_count == 0
+                or ("floor_exit_count >= 4" in infeas_cond and floor_exit_count >= 4)
+            )
             if infeasible:
                 return float(floor_val.get("infeasible_floor", 0.0))
             if positive_count >= threshold:
@@ -718,7 +741,7 @@ def _build_portfolio_tables(analytics: dict) -> str:
                       if not hold.loc[hold["Ticker"] == ticker].empty else 0.0
 
             if core_basis in ("compliance_buy", "compliance_trim"):
-                floor_frac = _resolve_floor(l2_data)
+                floor_frac = _resolve_floor(l2_data, l2_name)
                 cap_frac   = l2_data.get("cap")   or 0.0
                 l2_total   = _l2_mv(l2_name)
                 cur_frac   = l2_total / denom if denom > 0 else 0.0
@@ -769,7 +792,7 @@ def _build_portfolio_tables(analytics: dict) -> str:
             denom      = total_val if is_overlay else alloc_denom
             for l2_name in l1_data.get("children", []):
                 l2_data   = sleeves_l2.get(l2_name, {})
-                floor_pct = _resolve_floor(l2_data) * 100
+                floor_pct = _resolve_floor(l2_data, l2_name) * 100
                 cap_pct   = (l2_data.get("cap")   or 0) * 100
                 l2_total  = _l2_mv(l2_name)
                 cur_pct   = (l2_total / denom * 100) if denom > 0 else 0.0
@@ -839,7 +862,7 @@ def _build_portfolio_tables(analytics: dict) -> str:
 
             for l2_name in sorted(children, key=_l2_mv, reverse=True):
                 l2_data   = sleeves_l2.get(l2_name, {})
-                floor_pct = _resolve_floor(l2_data) * 100
+                floor_pct = _resolve_floor(l2_data, l2_name) * 100
                 cap_pct   = (l2_data.get("cap")   or 0) * 100
                 l2_total  = _l2_mv(l2_name)
                 cur_pct   = (l2_total / denom * 100) if denom > 0 else 0.0
