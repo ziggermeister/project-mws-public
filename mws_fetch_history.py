@@ -40,6 +40,8 @@ import json
 import sys
 import time
 import io
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional, Set
@@ -83,6 +85,23 @@ _FALLBACK_REFERENCE = [
     "IBB", "SOXX", "PICK", "SRVR",
     "^VIX",
 ]
+
+# ── Parallel fetch config ─────────────────────────────────────────────────────
+MAX_FETCH_WORKERS   = 5     # concurrent Stooq connections
+REQUEST_INTERVAL    = 0.10  # minimum seconds between HTTP requests (global, ~10 req/s)
+
+_rate_lock          = threading.Lock()
+_last_fetch_time: List[float] = [0.0]  # mutable singleton — shared across threads
+
+def _throttled_sleep() -> None:
+    """Global rate limiter: enforces REQUEST_INTERVAL between any two HTTP calls."""
+    with _rate_lock:
+        now  = time.time()
+        wait = REQUEST_INTERVAL - (now - _last_fetch_time[0])
+        if wait > 0:
+            time.sleep(wait)
+        _last_fetch_time[0] = time.time()
+
 
 # ── Stooq ─────────────────────────────────────────────────────────────────────
 STOOQ_URL = "https://stooq.com/q/d/l/"
@@ -259,6 +278,41 @@ def todays_trading_date() -> str:
     return candidate.strftime("%Y-%m-%d")
 
 
+def _fetch_rt_one(ticker: str, target_date: str) -> dict:
+    """
+    Fetch a single ticker's RT quote from Stooq. Returns a result dict with:
+      display, row (dict or None), msg (status string for printing).
+    Called in parallel by fetch_today_stooq_rt.
+    """
+    _throttled_sleep()
+    display = DISPLAY_OVERRIDE.get(ticker, ticker)
+    symbol  = stooq_symbol(ticker)
+    params  = {"s": symbol, "f": "sd2t2ohlcv", "e": "csv"}
+    try:
+        resp = requests.get(STOOQ_RT_URL, params=params, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        text = resp.text.strip()
+        if not text or "No data" in text or len(text) < 10:
+            return {"display": display, "row": None, "msg": "no data"}
+
+        line  = text.splitlines()[-1]
+        parts = line.split(",")
+        if len(parts) < 7:
+            return {"display": display, "row": None, "msg": f"unexpected format: {text[:60]}"}
+
+        row_date  = parts[1].strip()
+        close_str = parts[6].strip()
+        if row_date != target_date:
+            return {"display": display, "row": None, "msg": f"returned {row_date}, expected {target_date}"}
+
+        price = round(float(close_str), 6)
+        row   = {"Date": pd.Timestamp(target_date), "Ticker": display, "AdjClose": price}
+        return {"display": display, "row": row, "msg": f"${price:.4f} @ {parts[2].strip()}"}
+
+    except Exception as e:
+        return {"display": display, "row": None, "msg": f"error: {type(e).__name__}: {e}"}
+
+
 def fetch_today_stooq_rt(tickers: List[str], target_date: str) -> pd.DataFrame:
     """
     Fetch today's latest price for each ticker from Stooq's real-time quote
@@ -268,44 +322,29 @@ def fetch_today_stooq_rt(tickers: List[str], target_date: str) -> pd.DataFrame:
     CSV format returned by Stooq RT: Symbol,Date,Time,Open,High,Low,Close,Volume
     We use Close as AdjClose (same-day: no dividend adjustment needed; the next
     Stooq historical fetch will overwrite with official adjusted closes).
+
+    Requests are issued in parallel (MAX_FETCH_WORKERS threads) with the shared
+    global rate limiter to stay polite to Stooq.
     """
-    rows = []
     print(f"\n📡  Stooq daily history lagged — fetching {target_date} quotes from Stooq RT ...")
 
+    # Fetch in parallel; collect results keyed by ticker for stable print order
+    _rt_results: dict = {}
+    with ThreadPoolExecutor(max_workers=MAX_FETCH_WORKERS) as _pool:
+        _futures = {_pool.submit(_fetch_rt_one, t, target_date): t for t in tickers}
+        for _fut in as_completed(_futures):
+            res = _fut.result()
+            _rt_results[res["display"]] = res
+
+    rows = []
     for ticker in tickers:
         display = DISPLAY_OVERRIDE.get(ticker, ticker)
-        symbol  = stooq_symbol(ticker)
-        params  = {"s": symbol, "f": "sd2t2ohlcv", "e": "csv"}
-
-        try:
-            resp = requests.get(STOOQ_RT_URL, params=params, headers=HEADERS, timeout=15)
-            resp.raise_for_status()
-            text = resp.text.strip()
-            if not text or "No data" in text or len(text) < 10:
-                print(f"    {display:<14} — Stooq RT: no data")
-                continue
-
-            # Parse single-row CSV: Symbol,Date,Time,Open,High,Low,Close,Volume
-            line = text.splitlines()[-1]  # skip header if present
-            parts = line.split(",")
-            if len(parts) < 7:
-                print(f"    {display:<14} — Stooq RT: unexpected format: {text[:60]}")
-                continue
-
-            row_date = parts[1].strip()
-            close_str = parts[6].strip()  # Close column
-            if row_date != target_date:
-                print(f"    {display:<14} — Stooq RT: returned {row_date}, expected {target_date}")
-                continue
-
-            price = round(float(close_str), 6)
-            rows.append({"Date": pd.Timestamp(target_date), "Ticker": display, "AdjClose": price})
-            print(f"    {display:<14} — Stooq RT: ${price:.4f} @ {parts[2].strip()}")
-
-        except Exception as e:
-            print(f"    {display:<14} — Stooq RT error: {type(e).__name__}: {e}")
-
-        time.sleep(0.2)
+        res     = _rt_results.get(display, {"display": display, "row": None, "msg": "no result"})
+        if res["row"] is not None:
+            rows.append(res["row"])
+            print(f"    {display:<14} — Stooq RT: {res['msg']}")
+        else:
+            print(f"    {display:<14} — Stooq RT: {res['msg']}")
 
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["Date", "Ticker", "AdjClose"])
 
@@ -361,8 +400,21 @@ print("(Source: Stooq.com — no auth required)\n")
 frames = []
 failed = []
 
+def _fetch_one(ticker: str) -> tuple:
+    """Thread worker: rate-limit then fetch historical prices for one ticker."""
+    _throttled_sleep()
+    return ticker, fetch_ticker(ticker, fetch_start)
+
+# Parallel fetch — results collected into a dict, then printed in stable order
+_fetch_results: dict = {}
+with ThreadPoolExecutor(max_workers=MAX_FETCH_WORKERS) as _pool:
+    _futures = {_pool.submit(_fetch_one, t): t for t in ALL_TICKERS}
+    for _fut in as_completed(_futures):
+        _ticker, _df = _fut.result()
+        _fetch_results[_ticker] = _df
+
 for i, ticker in enumerate(ALL_TICKERS, 1):
-    df = fetch_ticker(ticker, fetch_start)
+    df = _fetch_results.get(ticker)
     if df is None or df.empty:
         print(f"  [{i:2d}/{len(ALL_TICKERS)}] {ticker:<12} — NO DATA")
         failed.append(ticker)
@@ -371,8 +423,6 @@ for i, ticker in enumerate(ALL_TICKERS, 1):
         print(f"  [{i:2d}/{len(ALL_TICKERS)}] {ticker:<12} — "
               f"{len(df):>5} rows  "
               f"({df['Date'].min().date()} → {df['Date'].max().date()})")
-
-    time.sleep(0.4)   # be polite to Stooq
 
 if not frames:
     sys.exit("\nERROR: No data fetched. Check: curl -s 'https://stooq.com/q/d/l/?s=spy.us&d1=20240101&d2=20240110&i=d'")
