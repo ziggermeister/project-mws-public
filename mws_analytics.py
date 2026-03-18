@@ -52,6 +52,8 @@ MARKET_CTX_MD      = "mws_market_context.md"
 CHART_FILENAME     = "mws_equity_curve.png"
 BREADTH_STATE_JSON        = "mws_breadth_state.json"
 TACTICAL_CASH_STATE_JSON  = "mws_tactical_cash_state.json"
+POLICY_RUNTIME_JSON       = "mws_policy_runtime.json"      # stripped policy for LLM (auto-generated)
+PRECOMPUTED_TARGETS_JSON  = "mws_precomputed_targets.json" # trade table for LLM (auto-generated)
 
 
 # ==============================================================================
@@ -1464,6 +1466,67 @@ def compute_and_persist_tactical_cash_state(
     return state
 
 
+def generate_policy_runtime(
+    policy: dict,
+    out_path: str = POLICY_RUNTIME_JSON,
+) -> dict:
+    """
+    Strip verbose/descriptive fields from mws_policy.json and write a compact
+    mws_policy_runtime.json for LLM use.
+
+    SYNC GUARANTEE: This file is auto-generated from mws_policy.json on every
+    mws_analytics.py run. Never edit it by hand — changes will be overwritten.
+    The _runtime_meta block carries the source file's last_updated date so any
+    staleness is immediately visible.
+
+    Strips  : notes, economic_driver, rationale, monitoring, description(s),
+              condition_notes, constraint_precedence_during_drawdown, and the
+              entire top-level sections: objectives, news_intelligence, definitions.
+    Keeps   : all numeric thresholds, boolean flags, ticker lists, structural keys.
+    Savings : ~60-65% token reduction vs the full policy (≈15 000 tokens saved).
+    """
+    import copy
+
+    # Keys stripped wherever they appear (recursive)
+    STRIP_KEYS = frozenset({
+        "notes", "economic_driver", "rationale", "monitoring",
+        "description", "descriptions", "condition_notes",
+        "constraint_precedence_during_drawdown",
+    })
+    # Top-level sections stripped entirely (large, not needed at run time)
+    STRIP_TOP_LEVEL = frozenset({"objectives", "news_intelligence", "definitions"})
+
+    def _strip(obj: Any) -> Any:
+        if isinstance(obj, dict):
+            return {k: _strip(v) for k, v in obj.items() if k not in STRIP_KEYS}
+        if isinstance(obj, list):
+            return [_strip(item) for item in obj]
+        return obj
+
+    runtime: dict = _strip(copy.deepcopy(policy))
+    for key in STRIP_TOP_LEVEL:
+        runtime.pop(key, None)
+
+    runtime["_runtime_meta"] = {
+        "generated":           datetime.now().strftime("%Y-%m-%d"),
+        "source":              POLICY_FILENAME,
+        "source_last_updated": policy.get("meta", {}).get("last_updated", "unknown"),
+        "note": (
+            "Auto-generated from mws_policy.json by mws_analytics.py. "
+            "Do not edit — overwritten on every run."
+        ),
+    }
+
+    try:
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(runtime, f, indent=2, ensure_ascii=False)
+        logger.info("Policy runtime written → %s", out_path)
+    except Exception as exc:
+        logger.warning("Could not write policy runtime %s: %s", out_path, exc)
+
+    return runtime
+
+
 def main() -> None:
     policy, hist, hold = load_system_files()
 
@@ -1490,6 +1553,7 @@ def main() -> None:
     df_scores = generate_rankings(policy, hist, candidates, hold)
     compute_and_persist_breadth_states(policy, df_scores)
     compute_and_persist_tactical_cash_state(df_scores)
+    generate_policy_runtime(policy)          # token-lean policy copy for interactive LLM runs
     from mws_charts import rotate_and_chart   # local import — keeps matplotlib out of CI
     rotate_and_chart(df_scores, policy)
 

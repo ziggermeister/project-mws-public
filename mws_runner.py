@@ -54,12 +54,14 @@ MAX_TOKENS     = 16000
 MAX_RESPONSE_CHARS   = 120_000   # ~30k tokens; alert if exceeded
 MAX_BLOCK_CHARS      = 60_000    # each XML block independently capped for parsing safety
 # File paths — single source of truth lives in mws_analytics; imported here
-POLICY_FILE     = mws_analytics.POLICY_FILENAME
-HOLDINGS_FILE   = mws_analytics.HOLDINGS_CSV
-HISTORY_FILE    = mws_analytics.HISTORY_CSV
-MACRO_FILE      = mws_analytics.MACRO_MD
-MARKET_CTX_FILE = mws_analytics.MARKET_CTX_MD
-RESULTS_FILE    = mws_analytics.RESULTS_CSV
+POLICY_FILE              = mws_analytics.POLICY_FILENAME
+HOLDINGS_FILE            = mws_analytics.HOLDINGS_CSV
+HISTORY_FILE             = mws_analytics.HISTORY_CSV
+MACRO_FILE               = mws_analytics.MACRO_MD
+MARKET_CTX_FILE          = mws_analytics.MARKET_CTX_MD
+RESULTS_FILE             = mws_analytics.RESULTS_CSV
+POLICY_RUNTIME_FILE      = mws_analytics.POLICY_RUNTIME_JSON      # stripped policy (LLM use)
+PRECOMPUTED_TARGETS_FILE = mws_analytics.PRECOMPUTED_TARGETS_JSON  # trade table (LLM use)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -98,6 +100,7 @@ def run_analytics() -> dict:
 
     log.info("Generating momentum rankings...")
     df_scores = mws_analytics.generate_rankings(policy, hist, candidates, hold)
+    mws_analytics.generate_policy_runtime(policy)   # regenerate stripped policy for LLM
 
     # Per-ticker execution gate (buy direction as default for reporting)
     gate_rows = []
@@ -147,10 +150,16 @@ def build_prompt(analytics: dict) -> str:
     scores  = analytics["df_scores"]
     gates   = analytics["df_gates"]
 
-    # Trim policy for prompt — exclude bulky sections not needed by the LLM runner
-    policy_trimmed = {k: v for k, v in policy.items() if k not in [
-        "ticker_constraints",   # very long; not needed for recommendation
-    ]}
+    # Use the auto-generated runtime policy (stripped of notes/rationale, ~65% smaller).
+    # POLICY_RUNTIME_FILE is written by generate_policy_runtime() during run_analytics()
+    # so it is always fresh.  Fall back to full policy minus ticker_constraints if missing.
+    try:
+        with open(POLICY_RUNTIME_FILE, encoding="utf-8") as _rf:
+            policy_trimmed = json.load(_rf)
+    except Exception:
+        policy_trimmed = {k: v for k, v in policy.items() if k not in [
+            "ticker_constraints", "objectives", "news_intelligence", "definitions",
+        ]}
 
     scores_str = scores.to_string(index=False) if not scores.empty else "No rankings generated."
     gates_str  = gates.to_string(index=False)  if not gates.empty  else "Execution gate disabled or no data."
@@ -882,6 +891,7 @@ def _build_portfolio_tables(analytics: dict) -> str:
             children   = l1_data.get("children", [])
             is_overlay = (l1_name == "stabilizers")
             comp_d     = total_val if is_overlay else compliance_denom  # floor/cap display
+            sizing_d   = total_val if is_overlay else sizing_denom       # weight display
             l1_total   = _l1_mv(l1_name)
             l1_cur_pct = (l1_total / comp_d * 100) if comp_d > 0 else 0.0
             l1_cap_str = f"{l1_cap * 100:.0f}%" if l1_cap else "overlay"
@@ -929,7 +939,7 @@ def _build_portfolio_tables(analytics: dict) -> str:
                 )
                 for ticker in held_in_sleeve:
                     t_mv  = float(hold.loc[hold["Ticker"] == ticker, "MV"].sum())
-                    t_wt  = (t_mv / denom * 100) if denom > 0 else 0.0
+                    t_wt  = (t_mv / sizing_d * 100) if sizing_d > 0 else 0.0
                     s     = scores_by_ticker.get(ticker, {})
                     rank  = s.get("rank", "—")
                     alpha = s.get("alpha", "—")
@@ -1316,6 +1326,197 @@ def _build_portfolio_tables(analytics: dict) -> str:
             '</p>'
         )
 
+        # ── Write mws_precomputed_targets.json for interactive LLM runs ─────────
+        # This is the token-lean alternative to embedding the full analytics bundle in
+        # the prompt.  It is auto-generated every run — never edit by hand.
+        # SYNC GUARANTEE: generated here from the same variables that drive the HTML
+        # tables, so it is always consistent with the email output.
+        try:
+            _regime = dd.get("state", "normal")
+            _dd_pct = round(abs(dd.get("drawdown", 0)) * 100, 2)
+
+            # Per-ticker records
+            _tickers_out: dict = {}
+
+            # Action tickers (BUY / TRIM / DEFER-BUY / SPIKE-TRIM)
+            for _t, _d in action_items:
+                _s   = scores_by_ticker.get(_t, {})
+                _g   = gates_by_ticker.get(_t, {})
+                _mv  = float(hold.loc[hold["Ticker"] == _t, "MV"].sum())
+                _px  = float(hold.loc[hold["Ticker"] == _t, "Price"].iloc[0]) \
+                       if not hold.loc[hold["Ticker"] == _t].empty else 0.0
+                _sh  = float(hold.loc[hold["Ticker"] == _t, "Shares"].iloc[0]) \
+                       if not hold.loc[hold["Ticker"] == _t].empty else 0.0
+                _su, _ssh, _spfx, _snote = scaled_trades.get(_t, (None, None, "~", ""))
+                _tickers_out[_t] = {
+                    "shares":        round(_sh, 5),
+                    "price":         round(_px, 4),
+                    "mv":            round(_mv, 2),
+                    "sleeve_l1":     _d["l1"],
+                    "sleeve_l2":     _d["l2"],
+                    "current_pct":   round(_d["cur_pct"], 2),
+                    "floor_pct":     round(_d["floor_pct"], 1),
+                    "cap_pct":       round(_d["cap_pct"], 1),
+                    "momentum_rank": _s.get("rank", None),
+                    "momentum_pct":  round(_s.get("pct", 0) * 100, 1),
+                    "raw_score":     round(_s.get("blend", 0), 4),
+                    "gate_z":        round(_g.get("z_score", 0), 2) if _g.get("z_score") is not None else None,
+                    "gate_action":   _g.get("action", "proceed"),
+                    "action":        _d["label"],
+                    "basis":         _d["basis"],
+                    "est_usd":       round(_su, 0) if _su is not None else None,
+                    "est_shares":    _ssh,
+                    "scale_note":    _snote,
+                }
+
+            # DEPLOY tickers (residual cash deployment)
+            for _t, _d, _du, _ds in deploy_items:
+                _s   = scores_by_ticker.get(_t, {})
+                _g   = gates_by_ticker.get(_t, {})
+                _mv  = float(hold.loc[hold["Ticker"] == _t, "MV"].sum())
+                _px  = float(hold.loc[hold["Ticker"] == _t, "Price"].iloc[0]) \
+                       if not hold.loc[hold["Ticker"] == _t].empty else 0.0
+                _sh  = float(hold.loc[hold["Ticker"] == _t, "Shares"].iloc[0]) \
+                       if not hold.loc[hold["Ticker"] == _t].empty else 0.0
+                _tickers_out[_t] = {
+                    "shares":        round(_sh, 5),
+                    "price":         round(_px, 4),
+                    "mv":            round(_mv, 2),
+                    "sleeve_l1":     _d["l1"],
+                    "sleeve_l2":     _d["l2"],
+                    "current_pct":   round(_d["cur_pct"], 2),
+                    "floor_pct":     round(_d["floor_pct"], 1),
+                    "cap_pct":       round(_d["cap_pct"], 1),
+                    "momentum_rank": _s.get("rank", None),
+                    "momentum_pct":  round(_s.get("pct", 0) * 100, 1),
+                    "raw_score":     round(_s.get("blend", 0), 4),
+                    "gate_z":        round(_g.get("z_score", 0), 2) if _g.get("z_score") is not None else None,
+                    "gate_action":   _g.get("action", "proceed"),
+                    "action":        "DEPLOY",
+                    "basis":         "residual_deployment",
+                    "est_usd":       round(_du, 0),
+                    "est_shares":    _ds,
+                    "scale_note":    "",
+                }
+
+            # HOLD tickers (not in action_items or deploy_items)
+            _active_set = set(t for t, _ in action_items) | set(t for t, _, _, _ in deploy_items)
+            for _t, _d in ticker_data.items():
+                if _t in _active_set:
+                    continue
+                _s   = scores_by_ticker.get(_t, {})
+                _g   = gates_by_ticker.get(_t, {})
+                _mv  = float(hold.loc[hold["Ticker"] == _t, "MV"].sum())
+                _px  = float(hold.loc[hold["Ticker"] == _t, "Price"].iloc[0]) \
+                       if not hold.loc[hold["Ticker"] == _t].empty else 0.0
+                _sh  = float(hold.loc[hold["Ticker"] == _t, "Shares"].iloc[0]) \
+                       if not hold.loc[hold["Ticker"] == _t].empty else 0.0
+                _tickers_out[_t] = {
+                    "shares":        round(_sh, 5),
+                    "price":         round(_px, 4),
+                    "mv":            round(_mv, 2),
+                    "sleeve_l1":     _d["l1"],
+                    "sleeve_l2":     _d["l2"],
+                    "current_pct":   round(_d["cur_pct"], 2),
+                    "floor_pct":     round(_d["floor_pct"], 1),
+                    "cap_pct":       round(_d["cap_pct"], 1),
+                    "momentum_rank": _s.get("rank", None),
+                    "momentum_pct":  round(_s.get("pct", 0) * 100, 1),
+                    "raw_score":     round(_s.get("blend", 0), 4),
+                    "gate_z":        round(_g.get("z_score", 0), 2) if _g.get("z_score") is not None else None,
+                    "gate_action":   _g.get("action", "proceed"),
+                    "action":        "HOLD",
+                    "basis":         _d["basis"],
+                    "est_usd":       None,
+                    "est_shares":    None,
+                    "scale_note":    "",
+                }
+
+            # Sleeve summary
+            _sleeves_out: dict = {}
+            for _l2n in set(
+                d["l2"] for d in ticker_data.values()
+                if not sleeves_l2.get(d["l2"], {}).get("exclude_from_denominator", False)
+            ):
+                _l2d  = sleeves_l2.get(_l2n, {})
+                _l2mv = _l2_mv(_l2n)
+                _fl   = _resolve_floor(_l2d, _l2n)
+                _cap  = _l2d.get("cap") or 0.0
+                _cpt  = (_l2mv / compliance_denom * 100) if compliance_denom > 0 else 0.0
+                if   _cpt < _fl * 100 - 0.1:  _st = "BELOW_FLOOR"
+                elif _cpt > _cap * 100 + 0.1:  _st = "ABOVE_CAP"
+                else:                           _st = "in_band"
+                _sleeves_out[_l2n] = {
+                    "mv":          round(_l2mv, 2),
+                    "current_pct": round(_cpt, 2),
+                    "floor_pct":   round(_fl * 100, 1),
+                    "cap_pct":     round(_cap * 100, 1),
+                    "status":      _st,
+                }
+
+            # Overlay summary
+            _ov_out: dict = {}
+            for _ot in ["DBMF", "KMLM"]:
+                _omv = float(hold.loc[hold["Ticker"] == _ot, "MV"].sum()) if _ot in held_tickers else 0.0
+                _ov_out[_ot] = {"mv": round(_omv, 2), "pct_tpv": round(_omv / total_val * 100, 2)}
+
+            _targets_doc = {
+                "_runtime_meta": {
+                    "generated":      TODAY,
+                    "source_scripts": ["mws_analytics.py", "mws_runner.py"],
+                    "note": (
+                        "Auto-generated — do not edit. Overwritten on every run. "
+                        "Use this file to drive interactive LLM runs instead of "
+                        "re-deriving targets from raw analytics."
+                    ),
+                },
+                "run_date":              TODAY,
+                "tpv":                   round(total_val, 2),
+                "sizing_denom":          round(sizing_denom, 2),
+                "compliance_denom":      round(compliance_denom, 2),
+                "tactical_cash_active":  _tactical_cash > 0,
+                "tactical_cash_usd":     round(_tactical_cash, 2),
+                "drawdown_pct":          _dd_pct,
+                "regime":                _regime,
+                "breadth_state":         _breadth_state,
+                "portfolio":             _tickers_out,
+                "sleeves":               _sleeves_out,
+                "overlays": {
+                    "total_pct_tpv": round(overlay_mv / total_val * 100, 2),
+                    "band":          [0.06, 0.12],
+                    **_ov_out,
+                },
+                "bucket_a": {
+                    "mv":           round(bucket_a_mv, 2),
+                    "min_required": 45000,
+                    "status":       "ok" if bucket_a_mv >= 45000 else "BELOW_MIN",
+                },
+                "trade_budget": {
+                    "cash_on_hand":            round(cash_mv, 2),
+                    "comp_sell_proceeds":      round(comp_sell_proceeds, 2),
+                    "mom_sell_proceeds":       round(mom_sell_proceeds, 2),
+                    "total_available":         round(total_available, 2),
+                    "comp_buy_need":           round(comp_buy_need, 2),
+                    "comp_buy_scale":          round(comp_buy_scale, 4),
+                    "comp_turnover_bound":     _comp_turnover_bound,
+                    "mom_buy_need":            round(mom_buy_need, 2),
+                    "mom_buy_scale":           round(mom_buy_scale, 4),
+                    "deploy_total":            round(sum(u for _, _, u, _ in deploy_items), 2),
+                    "cash_after_all":          round(cash_after_all, 2),
+                    "turnover_cap_pct":        round(_max_turnover_pct * 100, 1),
+                    "turnover_cap_usd":        round(_turnover_cap_usd, 2),
+                    "estimated_signal_sells":  round(mom_sell_proceeds, 2),
+                    "estimated_signal_buys":   round(mom_buy_need * mom_buy_scale + sum(u for _, _, u, _ in deploy_items), 2),
+                },
+            }
+
+            with open(PRECOMPUTED_TARGETS_FILE, "w", encoding="utf-8") as _f:
+                json.dump(_targets_doc, _f, indent=2, ensure_ascii=False)
+            log.info("Precomputed targets written → %s", PRECOMPUTED_TARGETS_FILE)
+
+        except Exception as _json_err:
+            log.warning("Could not write precomputed targets: %s", _json_err, exc_info=True)
+
         return (
             status_html
             + '<h3>Portfolio Positions</h3>' + table1
@@ -1479,6 +1680,14 @@ def main() -> None:
             log.info("Chart generated: %s", mws_analytics.CHART_FILENAME)
         except Exception as chart_err:
             log.warning("Chart generation skipped: %s", chart_err)
+
+        # Write mws_precomputed_targets.json (side-effect of table build; HTML discarded).
+        # This happens BEFORE the LLM call so interactive sessions (no API key) still get
+        # the file.  send_email() will re-call _build_portfolio_tables() later — harmless.
+        try:
+            _build_portfolio_tables(analytics)
+        except Exception as _pt_err:
+            log.warning("Precomputed targets generation skipped: %s", _pt_err)
 
         if skip_llm:
             log.info("SKIP_LLM set — analytics and chart complete; skipping LLM call and email.")

@@ -1,0 +1,1135 @@
+{
+  "meta": {
+    "policy_name": "MWS v2.9.9",
+    "policy_version": "v2.9.9",
+    "policy_family": "Titanium MWS",
+    "last_updated": "2026-03-17"
+  },
+  "governance": {
+    "reporting_baselines": {
+      "active_benchmarks": [
+        "SPY",
+        "QQQ"
+      ],
+      "corr_anchor_ticker": "VTI",
+      "corr_anchor_tickers": [
+        "VTI",
+        "QQQ"
+      ],
+      "chart_start_date": "2026-01-01"
+    },
+    "fixed_asset_prices": {
+      "CASH": 1.0,
+      "TREASURY_NOTE": {
+        "price_type": "market",
+        "fallback_price": 45000,
+        "fallback_condition": "use_only_if_market_price_unavailable",
+        "compliance_tolerance_pct": 0.03,
+        "bucket_a_breach_if": "market_price × face_value < bucket_a_minimum_usd"
+      }
+    },
+    "execution": {
+      "max_turnover": 0.2,
+      "max_turnover_stress": 0.22,
+      "trade_order": {
+        "sells_first": true
+      },
+      "funding_priority": {
+        "use_cash_first": true,
+        "cash_definition": [
+          "CASH"
+        ],
+        "funding_invariant": "total_sells + cash_used == total_buys",
+        "cash_used_rule": "cash_used = min(cash_available, total_buys)",
+        "residual_allocation_rule": {
+          "priority_order": [
+            "1. Underweight high-momentum inducted tickers — sorted by momentum score descending, up to each ticker's max_total cap. A ticker qualifies if: (a) current weight < target weight computed from percentile_in_band mapping, AND (b) momentum_score > 0.",
+            "2. VTI — receives any residual not absorbed by step 1, up to its max_total cap.",
+            "3. Cash — if step 2 is also fully capped, residual stays as cash."
+          ],
+          "constraint": "Residual allocation must still satisfy all per-ticker caps, sleeve caps, and L1 caps. If a high-momentum ticker is at its max_total, it is skipped in step 1."
+        }
+      },
+      "max_turnover_window": "per_rebalance_event",
+      "max_turnover_annualized": 0.6,
+      "turnover_reporting": {
+        "turnover_clipped_by_annual_cap": false,
+        "turnover_clipped_by_event_cap": false
+      },
+      "trigger_precedence": {
+        "order": [
+          {
+            "priority": 1,
+            "trigger": "drawdown_rules.hard_limit",
+            "action": "reduce_all_positions_toward_sleeve_floors_subject_to_min_total_with_hard_limit_override_if_insufficient",
+            "overrides": "all_lower_priority_triggers",
+            "turnover_cap_exemption": true
+          },
+          {
+            "priority": 2,
+            "trigger": "validators.bucket_a_minimum",
+            "action": "halt_all_buys_restore_bucket_a",
+            "overrides": "priorities_3_through_5"
+          },
+          {
+            "priority": 3,
+            "trigger": "validators.l1_sleeve_caps OR validators.l2_sleeve_caps OR validators.l2_sleeve_floors OR validators.per_ticker_caps OR validators.per_ticker_floors OR validators.ai_tech_breadth_floor_transition",
+            "action": "enforce_cap_floor_compliance_sells_first",
+            "overrides": "priorities_4_through_5"
+          },
+          {
+            "priority": 4,
+            "trigger": "validators.turnover_limit",
+            "action": "clip_rebalance_to_turnover_cap_set_reporting_flag",
+            "overrides": "priority_5"
+          },
+          {
+            "priority": 5,
+            "trigger": "rebalance_triggers.signal_drift OR rebalance_triggers.band_breach OR rebalance_triggers.calendar",
+            "action": "execute_momentum_driven_rebalance",
+            "overrides": "none"
+          }
+        ]
+      }
+    },
+    "lifecycle_rules": {
+      "review_days_default": 30,
+      "stages": {
+        "reference": {
+          "eligible_for_momentum": false,
+          "eligible_for_allocation": false,
+          "requires_review": false
+        },
+        "inducted": {
+          "eligible_for_momentum": true,
+          "eligible_for_allocation": true,
+          "requires_review": true
+        },
+        "activated": {
+          "eligible_for_momentum": false,
+          "eligible_for_allocation": false,
+          "requires_review": true
+        },
+        "overlay": {
+          "eligible_for_momentum": false,
+          "eligible_for_allocation": false,
+          "requires_review": true
+        }
+      },
+      "transitions": {
+        "reference_to_inducted": {
+          "requires": [
+            "manual_approval",
+            "observation_period_days: 30",
+            "positive_momentum_blend_consecutive_days: 15"
+          ],
+          "review_days": 30
+        },
+        "inducted_to_reference": {
+          "triggers": [
+            "blend_score_negative_consecutive_days: 20",
+            "manual_demotion"
+          ],
+          "exit_rule": "reduce_to_zero_over_N_rebalance_cycles",
+          "exit_cycles": 2
+        },
+        "inducted_dormant": {
+          "condition": "lifecycle.stage == inducted AND current_weight == 0",
+          "re_entry_trigger": {
+            "momentum_blend_positive_consecutive_days": 15,
+            "vix_below": 28,
+            "vix_trend_clause": "TBD_round3: add VIX_5d_MA < VIX_20d_MA as alternative gate"
+          },
+          "initial_weight": "sleeve_floor_minimum"
+        },
+        "any_to_activated": {
+          "triggers": [
+            "manual_review_flag",
+            "compliance_hold"
+          ],
+          "effect": "eligible_for_momentum: false, eligible_for_allocation: false"
+        }
+      }
+    },
+    "reference_tickers": [
+      "AGG"
+    ],
+    "defaults": {
+      "merge_order": [
+        "governance.defaults.ticker_constraints",
+        "ticker_constraints.<TICKER>"
+      ],
+      "ticker_constraints": {
+        "lifecycle": {
+          "stage": "reference"
+        },
+        "exclude_from_momentum": true,
+        "exclude_from_denominator": true
+      },
+      "portfolio_accounting": {
+        "sleeve_exposure_source": "ticker_to_sleeves_only",
+        "unmapped_ticker_behavior": "exclude_from_sleeve_caps_and_floors",
+        "exclude_overlays_from_sleeves": true,
+        "overlay_reporting_mode": "separate_sleeve_tree",
+        "overlay_l1_name": "stabilizers"
+      }
+    },
+    "rebalance_triggers": {
+      "calendar": {
+        "enabled": true,
+        "rule": "first_monday_of_month"
+      },
+      "band_breach": {
+        "enabled": true,
+        "hold_days_before_trigger": 3,
+        "applies_to": [
+          "l2_sleeves",
+          "per_ticker_caps",
+          "overlay_bands"
+        ]
+      },
+      "signal_drift": {
+        "enabled": true,
+        "sleeve_drift_threshold": 0.05,
+        "sleeve_drift_units": "abs_weight_delta_pct_points",
+        "ticker_drift_threshold": 0.015,
+        "ticker_drift_units": "abs_weight_delta_pct_points"
+      },
+      "stress_override": {
+        "enabled": true,
+        "condition": "drawdown_rules.soft_limit_breached == true",
+        "action": "freeze_new_buys"
+      }
+    }
+  },
+  "allocation": {
+    "denominator_mode": "allocatable_ex_bucket_a",
+    "band_normalization": "percentile_in_band",
+    "denominator_definition": "Allocatable denominator = TPV minus overlays (DBMF, KMLM) minus Bucket A (TREASURY_NOTE). Cash (Bucket B) IS included. Used as basis for all L1/L2 sleeve cap calculations.",
+    "l1_cap_basis": "allocatable_denominator",
+    "l2_cap_basis": "allocatable_denominator",
+    "ticker_cap_basis": "total_portfolio_value_TPV",
+    "overlay_band_basis": "total_portfolio_value_TPV"
+  },
+  "tactical_cash_management": {
+    "enabled": true,
+    "cash_reserve_buffer_pct": 0.01,
+    "tactical_cash_cap_pct": 0.3,
+    "persistence_required_days": 2,
+    "causal_test": "filter_blocking = any ticker with Pct >= 0.65 AND RawScore <= 0 (would-be momentum buy, actively suppressed by absolute momentum filter)",
+    "sizing_denominator": "TPV - overlays - Bucket A (unchanged; determines target $ for all trades)",
+    "compliance_denominator": "sizing_denominator - tactical_cash (determines L1/L2 floor and cap compliance checks only)"
+  },
+  "cash_reserve": {
+    "target_cash_usd": 3800,
+    "enabled": false,
+    "disabled_date": "2026-01-24",
+    "review_date": "2026-07-01",
+    "re_enable_condition": "bucket_a_value < 42000"
+  },
+  "sleeves": {
+    "level1": {
+      "growth": {
+        "cap": 0.6,
+        "cap_basis": "allocatable_denominator",
+        "children": [
+          "ai_tech",
+          "biotech",
+          "core_equity"
+        ]
+      },
+      "real_assets": {
+        "cap": 0.25,
+        "cap_basis": "allocatable_denominator",
+        "children": [
+          "strategic_materials",
+          "defense_energy"
+        ]
+      },
+      "monetary_hedges": {
+        "cap": 0.15,
+        "cap_basis": "allocatable_denominator",
+        "children": [
+          "precious_metals"
+        ]
+      },
+      "speculative": {
+        "cap": 0.05,
+        "cap_basis": "allocatable_denominator",
+        "children": [
+          "crypto"
+        ]
+      },
+      "stabilizers": {
+        "non_budgeted": true,
+        "exclude_from_momentum": true,
+        "exclude_from_denominator": true,
+        "band_total": [
+          0.06,
+          0.12
+        ],
+        "band_basis": "total_portfolio_value_TPV",
+        "children": [
+          "managed_futures"
+        ]
+      }
+    },
+    "level2": {
+      "ai_tech": {
+        "l1_parent": "growth",
+        "floor": {
+          "type": "breadth_conditioned",
+          "strong_breadth_floor": 0.22,
+          "weak_breadth_floor": 0.12,
+          "infeasible_floor": 0.0,
+          "breadth_condition": {
+            "strong_breadth_threshold": 3,
+            "ticker_count": 5,
+            "positive_definition": "blend_score > 0",
+            "hysteresis_days": 5
+          },
+          "infeasible_condition": "positive_count == 0 OR floor_exit_count >= 4",
+          "priority_on_floor_reduction": 3
+        },
+        "cap": 0.32,
+        "cap_basis": "allocatable_denominator",
+        "tickers": [
+          "SOXQ",
+          "CHAT",
+          "BOTZ",
+          "DTCR",
+          "GRID"
+        ]
+      },
+      "biotech": {
+        "l1_parent": "growth",
+        "floor": 0.04,
+        "cap": 0.12,
+        "cap_basis": "allocatable_denominator",
+        "tickers": [
+          "XBI"
+        ]
+      },
+      "core_equity": {
+        "l1_parent": "growth",
+        "floor": 0.18,
+        "cap": 0.38,
+        "cap_basis": "allocatable_denominator",
+        "tickers": [
+          "VTI",
+          "VXUS"
+        ]
+      },
+      "strategic_materials": {
+        "l1_parent": "real_assets",
+        "floor": 0.04,
+        "cap": 0.1,
+        "cap_basis": "allocatable_denominator",
+        "tickers": [
+          "URNM",
+          "REMX",
+          "COPX"
+        ]
+      },
+      "defense_energy": {
+        "l1_parent": "real_assets",
+        "floor": 0.06,
+        "cap": 0.14,
+        "cap_basis": "allocatable_denominator",
+        "tickers": [
+          "XLE",
+          "ITA"
+        ]
+      },
+      "precious_metals": {
+        "l1_parent": "monetary_hedges",
+        "floor": 0.08,
+        "cap": 0.15,
+        "cap_basis": "allocatable_denominator",
+        "tickers": [
+          "IAUM",
+          "SIVR"
+        ]
+      },
+      "crypto": {
+        "l1_parent": "speculative",
+        "floor": 0.0,
+        "cap": 0.05,
+        "cap_basis": "allocatable_denominator",
+        "stress_cap_total": 0.045,
+        "tickers": [
+          "IBIT"
+        ]
+      },
+      "managed_futures": {
+        "l1_parent": "stabilizers",
+        "non_budgeted": true,
+        "floor": 0.06,
+        "cap": 0.12,
+        "cap_basis": "total_portfolio_value_TPV",
+        "eligible_for_allocation": false,
+        "eligible_for_momentum": false,
+        "exclude_from_momentum": true,
+        "exclude_from_denominator": true,
+        "tickers": [
+          "DBMF",
+          "KMLM"
+        ]
+      }
+    }
+  },
+  "ticker_to_sleeves": {
+    "VTI": {
+      "core_equity": 1.0
+    },
+    "VXUS": {
+      "core_equity": 1.0
+    },
+    "SOXQ": {
+      "ai_tech": 1.0
+    },
+    "CHAT": {
+      "ai_tech": 1.0
+    },
+    "DTCR": {
+      "ai_tech": 1.0
+    },
+    "BOTZ": {
+      "ai_tech": 1.0
+    },
+    "GRID": {
+      "ai_tech": 1.0
+    },
+    "XBI": {
+      "biotech": 1.0
+    },
+    "XLE": {
+      "defense_energy": 1.0
+    },
+    "ITA": {
+      "defense_energy": 1.0
+    },
+    "URNM": {
+      "strategic_materials": 1.0
+    },
+    "REMX": {
+      "strategic_materials": 1.0
+    },
+    "COPX": {
+      "strategic_materials": 1.0
+    },
+    "IAUM": {
+      "precious_metals": 1.0
+    },
+    "SIVR": {
+      "precious_metals": 1.0
+    },
+    "IBIT": {
+      "crypto": 1.0
+    },
+    "DBMF": {
+      "managed_futures": 1.0
+    },
+    "KMLM": {
+      "managed_futures": 1.0
+    }
+  },
+  "ticker_constraints": {
+    "VTI": {
+      "min_total": 0.1,
+      "max_total": 0.25,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "VXUS": {
+      "min_total": 0.04,
+      "max_total": 0.12,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "SOXQ": {
+      "max_total": 0.1,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "CHAT": {
+      "max_total": 0.08,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "DTCR": {
+      "max_total": 0.06,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "BOTZ": {
+      "max_total": 0.02,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "GRID": {
+      "max_total": 0.05,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "IAUM": {
+      "max_total": 0.08,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "SIVR": {
+      "min_total": 0.03,
+      "max_total": 0.06,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "XBI": {
+      "max_total": 0.06,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "ITA": {
+      "max_total": 0.1,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "XLE": {
+      "max_total": 0.08,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "URNM": {
+      "max_total": 0.04,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "REMX": {
+      "max_total": 0.04,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    },
+    "DBMF": {
+      "min_total": 0.03,
+      "max_total": 0.06,
+      "lifecycle": {
+        "stage": "overlay"
+      },
+      "is_overlay": true,
+      "exclude_from_momentum": true,
+      "exclude_from_denominator": true,
+      "eligible_for_allocation": false,
+      "eligible_for_momentum": false,
+      "overlay_name": "managed_futures"
+    },
+    "KMLM": {
+      "min_total": 0.03,
+      "max_total": 0.06,
+      "lifecycle": {
+        "stage": "overlay"
+      },
+      "is_overlay": true,
+      "exclude_from_momentum": true,
+      "exclude_from_denominator": true,
+      "eligible_for_allocation": false,
+      "eligible_for_momentum": false,
+      "overlay_name": "managed_futures"
+    },
+    "CASH": {
+      "lifecycle": {
+        "stage": "reference"
+      },
+      "exclude_from_momentum": true,
+      "exclude_from_denominator": false
+    },
+    "TREASURY_NOTE": {
+      "lifecycle": {
+        "stage": "reference"
+      },
+      "exclude_from_momentum": true,
+      "exclude_from_denominator": true
+    },
+    "QQQ": {
+      "lifecycle": {
+        "stage": "reference"
+      },
+      "exclude_from_momentum": true,
+      "exclude_from_denominator": true
+    },
+    "IBIT": {
+      "max_total": 0.05,
+      "min_total": 0.0,
+      "lifecycle": {
+        "stage": "inducted"
+      },
+      "exclude_from_momentum": false,
+      "exclude_from_denominator": false
+    },
+    "COPX": {
+      "max_total": 0.03,
+      "lifecycle": {
+        "stage": "inducted"
+      }
+    }
+  },
+  "signals": {
+    "momentum_blend": {
+      "weights": {
+        "tr_12m": 0.45,
+        "slope_6m": 0.35,
+        "residual_3m": 0.2
+      }
+    },
+    "volatility_model": {
+      "method": "EWMA",
+      "lookback_days": 126
+    },
+    "momentum_to_weight": {
+      "method": "percentile_in_band",
+      "universe": "inducted_only",
+      "exclude_overlays": true,
+      "exclude_dormant": false,
+      "percentile_lookback_days": 63,
+      "scaling": "linear",
+      "floor_behavior": "hold_at_floor_if_positive_momentum",
+      "floor_exit_behavior": "reduce_to_zero_if_blend_negative_for_N_days",
+      "floor_exit_days": 20,
+      "cap_behavior": "do_not_exceed_per_ticker_max_total",
+      "absolute_momentum_filter": {
+        "enabled": true,
+        "condition": "blend_score > 0",
+        "applies_to": [
+          "momentum_buy",
+          "residual_deployment"
+        ],
+        "exempt": [
+          "compliance_buy",
+          "compliance_trim",
+          "momentum_trim",
+          "spike_trim"
+        ],
+        "effect": "ticker_with_negative_blend_score_receives_no_new_capital_via_momentum_path"
+      }
+    }
+  },
+  "overlays": {
+    "managed_futures": {
+      "enabled": true,
+      "tickers": [
+        "DBMF",
+        "KMLM"
+      ],
+      "band_total": [
+        0.06,
+        0.12
+      ],
+      "per_ticker_band": [
+        0.03,
+        0.06
+      ],
+      "target_split": {
+        "DBMF": 0.5,
+        "KMLM": 0.5
+      },
+      "exclude_from_momentum": true,
+      "exclude_from_denominator": true,
+      "rebalance_rule": "manual_or_band"
+    },
+    "geopolitical_stress": {
+      "enabled": false,
+      "tickers": [],
+      "band_total": [
+        0.02,
+        0.06
+      ],
+      "exclude_from_allocation": true,
+      "exclude_from_denominator": true,
+      "retain_momentum_scoring": true,
+      "momentum_scoring_use": "reference_only",
+      "rebalance_rule": "manual_or_geopolitical_trigger",
+      "geopolitical_trigger_definition": {
+        "conditions": {
+          "brent_1d_pct_change_gte": 0.06,
+          "brent_3d_cumulative_pct_change_gte": 0.08,
+          "vix_spot_gte": 30,
+          "vix_inversion": "VIX_spot > VIX_3m AND VIX_spot >= 25"
+        },
+        "trigger_logic": "ANY",
+        "trigger_effect": "advisory_review_required",
+        "auto_execute": false
+      }
+    }
+  },
+  "validators": {
+    "overlay_contract_enforced": {
+      "enabled": true,
+      "severity": "error",
+      "assertions": [
+        {
+          "overlay_ticker": "DBMF",
+          "exclude_from_momentum": true,
+          "exclude_from_denominator": true,
+          "cap_min": 0.03,
+          "cap_max": 0.06,
+          "scope": "total_portfolio"
+        },
+        {
+          "overlay_ticker": "KMLM",
+          "exclude_from_momentum": true,
+          "exclude_from_denominator": true,
+          "cap_min": 0.03,
+          "cap_max": 0.06,
+          "scope": "total_portfolio"
+        }
+      ]
+    },
+    "default_reference_contract": {
+      "enabled": true,
+      "severity": "error"
+    },
+    "l1_sleeve_caps": {
+      "enabled": true,
+      "severity": "error"
+    },
+    "l2_sleeve_caps": {
+      "enabled": true,
+      "severity": "error"
+    },
+    "l2_sleeve_floors": {
+      "enabled": true,
+      "severity": "warning"
+    },
+    "per_ticker_caps": {
+      "enabled": true,
+      "severity": "error"
+    },
+    "per_ticker_floors": {
+      "enabled": true,
+      "severity": "error"
+    },
+    "per_ticker_bands": {
+      "enabled": true,
+      "severity": "error"
+    },
+    "funding_invariant": {
+      "enabled": true,
+      "severity": "error",
+      "assertion": "total_sells + cash_used == total_buys"
+    },
+    "turnover_limit": {
+      "enabled": true,
+      "severity": "warning",
+      "window": "per_rebalance_event",
+      "threshold": "max_turnover",
+      "stress_threshold": "max_turnover_stress"
+    },
+    "bucket_a_minimum": {
+      "enabled": true,
+      "severity": "error",
+      "assertion": "market_value(TREASURY_NOTE) >= definitions.buckets.bucket_a_protected_liquidity.minimum_usd"
+    },
+    "drawdown_limit": {
+      "enabled": true,
+      "severity": "error",
+      "soft_threshold": "drawdown_rules.soft_limit",
+      "hard_threshold": "drawdown_rules.hard_limit"
+    },
+    "signal_staleness": {
+      "enabled": true,
+      "severity": "warning",
+      "max_stale_days": 3
+    },
+    "momentum_data_missing": {
+      "enabled": true,
+      "severity": "warning"
+    },
+    "lifecycle_review_overdue": {
+      "enabled": true,
+      "severity": "warning"
+    },
+    "rebalance_trigger_overdue": {
+      "enabled": true,
+      "severity": "warning"
+    }
+  },
+  "scheduled_cash_flows": [
+    {
+      "label": "Annual SEPP withdrawal",
+      "amount": -45000,
+      "recurrence": "annual",
+      "month": 1,
+      "day": 5
+    }
+  ],
+  "execution_gates": {
+    "_meta": {
+      "added_version": "v2.9.0",
+      "added_date": "2026-03-10",
+      "reviewed_by": [
+        "ChatGPT",
+        "Gemini"
+      ],
+      "review_rounds_completed": 4,
+      "review_date": "2026-03-10",
+      "production_ready": true,
+      "status": "active",
+      "applies_to": "momentum_driven_trades_only",
+      "does_not_apply_to": [
+        "hard_limit_drawdown_reduction",
+        "bucket_a_restoration",
+        "cap_floor_compliance_enforcement",
+        "turnover_cap_clipping"
+      ],
+      "spike_trim_annotation_applies_to": [
+        "momentum_driven_trades",
+        "cap_floor_compliance_sells"
+      ]
+    },
+    "short_term_confirmation": {
+      "enabled": true,
+      "method": "z_score",
+      "lookback_days": 2,
+      "vol_source": "ewma_annual_vol",
+      "ewma_span_days": 126,
+      "vol_clamp_enabled": true,
+      "vol_clamp_floor_multiplier": 0.75,
+      "vol_clamp_ceiling_multiplier": 1.5,
+      "vol_clamp_rv1y_window_days": 252,
+      "vol_clamp_note": "v2.9.4: effective_vol = clamp(ewma_vol, 0.75×RV1y, 1.50×RV1y). Validated against 2019–2026 history (COVID 2020, rate shock 2022). Prevents gate over-sensitivity in compressed-vol regimes (floor) and gate lock-up during velocity shocks (ceiling). See future_review_items.ewma_regime_shift_vol_clamp for full F1 validation.",
+      "vol_conversion": "(annual_vol / sqrt(252)) * sqrt(2)",
+      "vol_conversion_simplified": "annual_vol / sqrt(126)",
+      "vol_conversion_derivation": "daily_vol = annual_vol / sqrt(252); 2d_vol = daily_vol * sqrt(2); simplified: annual_vol / sqrt(126). Both forms are equivalent.",
+      "sell_defer_sigma": 2.5,
+      "buy_defer_sigma": 2.0,
+      "sell_defer_if": "z_score <= -2.5",
+      "buy_defer_if": "z_score >= +2.0",
+      "spike_trim_if": "z_score >= +2.0 AND trade_direction == SELL",
+      "spike_trim_effect": "execute_immediately_flag_as_spike_trim",
+      "spike_trim_scope": "momentum_trades_and_cap_breach_sells",
+      "max_defer_calendar_days": 10,
+      "stress_regime_overrides": {
+        "condition": "drawdown_rules.soft_limit_breached == true",
+        "sell_defer_max_calendar_days": 3,
+        "buy_defer_max_calendar_days": 10
+      },
+      "turnover_accounting": {
+        "rule": "deferred_trade_turnover_attributed_to_originating_rebalance_event",
+        "implementation_note": "Engine must tag each trade with originating_rebalance_id at signal generation time, not at execution time. Execution engine posts turnover to originating_rebalance_id regardless of when settlement occurs."
+      },
+      "hard_overrides": [
+        "hard_limit_drawdown",
+        "per_ticker_cap_breach",
+        "bucket_a_minimum_breach"
+      ],
+      "recompute_vol_at": "each_rebalance_event",
+      "review_decisions": {
+        "asymmetric_sigma": {
+          "decision": "adopted",
+          "sell_defer_sigma": 2.5,
+          "buy_defer_sigma": 2.0
+        },
+        "max_defer_units": {
+          "decision": "calendar_days",
+          "value": 10,
+          "value_stress_sell": 3
+        },
+        "fat_tail_tickers": {
+          "decision": "per_ticker_gate_sigma_override",
+          "fixed_tickers": [
+            "SIVR",
+            "IBIT"
+          ],
+          "monitor_only_tickers": [
+            "IAUM"
+          ],
+          "recalibration": {
+            "base_cadence": "annual",
+            "exception_trigger": "ewma_emp_gap > 3pp buy-side OR > 5pp sell-side for 2 consecutive monthly runs",
+            "exception_action": "manual gate_sigma recalibration and policy version bump"
+          }
+        },
+        "spike_trim_scope": {
+          "decision": "extend_annotation_to_cap_breach_sells"
+        },
+        "stress_sell_defer": {
+          "decision": "shorten_to_3_days_not_disable",
+          "chatgpt_recommendation": "disable_sell_defer_during_soft_limit",
+          "gemini_recommendation": "accept_full_freeze"
+        },
+        "turnover_accounting": {
+          "decision": "attribute_to_originating_rebalance"
+        },
+        "vol_conversion_documentation": {
+          "decision": "document_full_derivation"
+        }
+      },
+      "open_items": {
+        "hidden_gate_allocation_interaction": {
+          "status": "confirmed_and_accepted",
+          "confirmed_by": [
+            "ChatGPT Round 2",
+            "Gemini Round 2"
+          ],
+          "mechanisms": [
+            "Mean-reversion tilt: systematic sell-deferral during drawdowns causes portfolio to hold losers longer than momentum signal intends.",
+            "Trade supersession: deferred sell may never execute if fresh rebalance recomputes a smaller gap at a recovered price.",
+            "Signal drift amplification (ChatGPT Round 2, new): actual_weight > intended_weight post-deferral means future rank changes have larger-than-intended portfolio impact, introducing path dependency in the allocation engine."
+          ],
+          "magnitude": "Small. Sell-defer fires at 2.5sigma (~0.6% of days per ticker). 10-day expiry limits persistence. Estimated 2-4% of sells deferred annually.",
+          "net_effect": "Mild momentum × mean-reversion overlay. Not a bug. Accepted as structural trade-off of execution timing protection.",
+          "action": "Monitor via rebalance logs. Quantify in Round 3 simulation over multi-cycle backtest."
+        },
+        "spike_trim_cap_interaction": {
+          "status": "accepted_with_monitoring",
+          "confirmed_by": [
+            "ChatGPT Round 3+4",
+            "Gemini Round 3+4"
+          ],
+          "mechanism": "Cap-boundary oscillation: spike-trim execution at P_spike > P_signal may cause post-trim weight to undershoot target, triggering a compensating buy at next rebalance on the same ticker. Conditions required: ticker near cap + short-term spike >= 2sigma + momentum rank persistent. Most likely tickers: SOXQ, CHAT, SIVR, URNM.",
+          "frequency_estimate": "< 1% of trades. Bounded structurally by existing 20% turnover cap (round-trip consumes two slots in the same cycle).",
+          "directionality": "Not necessarily harmful. SELL at spike then BUY slightly lower is often a profitable micro-rebalance capturing the volatility premium. Harmful only if spike persists without mean-reversion — less common than reversion in short windows.",
+          "path_decision": "Path A — monitor with automatic counter and escalation. No cooldown rule added. Both reviewers endorsed after ChatGPT directionality and turnover-cap-adequacy arguments.",
+          "review_decisions": {
+            "chatgpt_round4": "Path A endorsed. Monitoring sufficient. Cooldown would introduce signal-suppression artifact (strong winners held below target), arguably worse than the rare oscillation.",
+            "gemini_round4": "Path A endorsed — conceded directionality and turnover-cap arguments. Hard cooldown ruled out."
+          },
+          "contingent_mitigation": {
+            "rule": "spike_trim_reentry_buffer",
+            "status": "inactive_until_threshold_breached",
+            "gap_threshold_weight": 0.0075,
+            "applies_to": "momentum_buys_only",
+            "does_not_override": [
+              "cap_floor_compliance_enforcement",
+              "bucket_restoration",
+              "hard_risk_rules"
+            ],
+            "activation": "automatic_when_monitoring_threshold_breached",
+            "override_hierarchy": "hard_overrides > cap_floor_compliance > spike_trim_reentry_buffer > normal_momentum_trades"
+          }
+        }
+      }
+    },
+    "per_ticker_thresholds": {
+      "_computed_date": "2026-03-10",
+      "_source": "mws_ticker_history.csv",
+      "_method": "ewma_126d_annualised / sqrt(126) applied asymmetrically: buy_defer at 2.0sigma, sell_defer at 2.5sigma",
+      "_note": "Thresholds recomputed at each rebalance from live EWMA vol. Values below are reference snapshot only.",
+      "SIVR": {
+        "vol_ann": 0.7955,
+        "vol_2d": 0.0709,
+        "buy_gate": 0.0886,
+        "sell_gate": 0.0886,
+        "gate_sigma_buy": 1.25,
+        "gate_sigma_sell": 1.25,
+        "emp_p975": 0.0858,
+        "ewma_emp_gap": 0.0559,
+        "flag": "fat_tail_fixed",
+        "fix_method": "per_ticker_gate_sigma_override"
+      },
+      "URNM": {
+        "vol_ann": 0.5377,
+        "vol_2d": 0.0479,
+        "buy_gate": 0.0958,
+        "sell_gate": 0.1197,
+        "emp_p975": 0.0881,
+        "ewma_emp_gap": 0.0077
+      },
+      "IBIT": {
+        "vol_ann": 0.5186,
+        "vol_2d": 0.0462,
+        "buy_gate": 0.0693,
+        "sell_gate": 0.0693,
+        "gate_sigma_buy": 1.5,
+        "gate_sigma_sell": 1.5,
+        "emp_p975": 0.0688,
+        "ewma_emp_gap": 0.0236,
+        "flag": "fat_tail_fixed",
+        "fix_method": "per_ticker_gate_sigma_override"
+      },
+      "REMX": {
+        "vol_ann": 0.4684,
+        "vol_2d": 0.0417,
+        "buy_gate": 0.0835,
+        "sell_gate": 0.1043,
+        "emp_p975": 0.0784,
+        "ewma_emp_gap": 0.005
+      },
+      "COPX": {
+        "vol_ann": 0.4569,
+        "vol_2d": 0.0407,
+        "buy_gate": 0.0814,
+        "sell_gate": 0.1018,
+        "emp_p975": 0.0693,
+        "ewma_emp_gap": 0.0121
+      },
+      "SOXQ": {
+        "vol_ann": 0.3232,
+        "vol_2d": 0.0288,
+        "buy_gate": 0.0576,
+        "sell_gate": 0.072,
+        "emp_p975": 0.0569,
+        "ewma_emp_gap": 0.0007
+      },
+      "IAUM": {
+        "vol_ann": 0.3056,
+        "vol_2d": 0.0272,
+        "buy_gate": 0.0544,
+        "sell_gate": 0.0681,
+        "emp_p975": 0.0386,
+        "ewma_emp_gap": 0.0158
+      },
+      "CHAT": {
+        "vol_ann": 0.2948,
+        "vol_2d": 0.0263,
+        "buy_gate": 0.0525,
+        "sell_gate": 0.0657,
+        "emp_p975": 0.0546,
+        "ewma_emp_gap": -0.0021
+      },
+      "XBI": {
+        "vol_ann": 0.2311,
+        "vol_2d": 0.0206,
+        "buy_gate": 0.0412,
+        "sell_gate": 0.0515,
+        "emp_p975": 0.0437,
+        "ewma_emp_gap": -0.0025
+      },
+      "BOTZ": {
+        "vol_ann": 0.2147,
+        "vol_2d": 0.0191,
+        "buy_gate": 0.0383,
+        "sell_gate": 0.0478,
+        "emp_p975": 0.0413,
+        "ewma_emp_gap": -0.003
+      },
+      "DTCR": {
+        "vol_ann": 0.2105,
+        "vol_2d": 0.0188,
+        "buy_gate": 0.0375,
+        "sell_gate": 0.0469,
+        "emp_p975": 0.0362,
+        "ewma_emp_gap": 0.0013
+      },
+      "ITA": {
+        "vol_ann": 0.1948,
+        "vol_2d": 0.0174,
+        "buy_gate": 0.0347,
+        "sell_gate": 0.0434,
+        "emp_p975": 0.0376,
+        "ewma_emp_gap": -0.0029
+      },
+      "XLE": {
+        "vol_ann": 0.185,
+        "vol_2d": 0.0165,
+        "buy_gate": 0.033,
+        "sell_gate": 0.0412,
+        "emp_p975": 0.0331,
+        "ewma_emp_gap": -0.0001
+      },
+      "GRID": {
+        "vol_ann": 0.1777,
+        "vol_2d": 0.0158,
+        "buy_gate": 0.0317,
+        "sell_gate": 0.0396,
+        "emp_p975": 0.0316,
+        "ewma_emp_gap": 0.0001
+      },
+      "VXUS": {
+        "vol_ann": 0.143,
+        "vol_2d": 0.0127,
+        "buy_gate": 0.0255,
+        "sell_gate": 0.0318,
+        "emp_p975": 0.0224,
+        "ewma_emp_gap": 0.0031
+      },
+      "VTI": {
+        "vol_ann": 0.1182,
+        "vol_2d": 0.0105,
+        "buy_gate": 0.0211,
+        "sell_gate": 0.0263,
+        "emp_p975": 0.0268,
+        "ewma_emp_gap": -0.0058
+      }
+    },
+    "monitoring_design": {
+      "_note": "Three-layer monitoring framework. Recommended by ChatGPT post-v2.9.4 review (2026-03-11), referencing Hendricks VaR evaluation, ESRB procyclicality, and WFE impulse-response literature.",
+      "tail_calibration_drift": {
+        "frequency": "monthly",
+        "new_v294_addition": {
+          "metric": "n_tail_obs",
+          "definition": "Number of 2-day return observations in the calibration window that fall above emp_p97.5 (buy-side) or below emp_p2.5 (sell-side).",
+          "alert_threshold": "n_tail < 5 → suppress recalibration recommendation; add 'low_sample' flag to audit output"
+        },
+        "tickers_under_watch": [
+          "IAUM",
+          "URNM"
+        ],
+        "action": "No change to gate parameters until pp gap exceeds threshold for 2 consecutive monthly runs AND n_tail >= 5."
+      },
+      "clamp_binding_diagnostics": {
+        "frequency": "monthly, plus event-driven after any vol spike",
+        "metrics": [
+          "floor_binding_rate_pct: % of gate evaluations in period where vol_clamp_type == 'floor'",
+          "ceiling_binding_rate_pct: % of gate evaluations in period where vol_clamp_type == 'ceiling'",
+          "clamp_impact_ratio: mean(effective_vol_2d / raw_vol_2d) for the period — 1.0 = no clamp effect"
+        ],
+        "alert_threshold": "ceiling_binding_rate_pct > 15% for any ticker over a rolling 63-day window → flag for review. Floor > 30% for any ticker → flag for review.",
+        "data_source": "vol_clamp_type field in gate evaluation return dicts (logged per trade)"
+      },
+      "outcome_based_kpis": {
+        "frequency": "quarterly",
+        "metrics": [
+          "deferral_rate_by_ticker_direction: % of gate evaluations resulting in 'defer' per ticker/BUY/SELL",
+          "mean_defer_duration_days: average calendar days between defer decision and eventual execution",
+          "slippage_proxy: (execution_price - signal_time_price) / signal_time_price, sign-adjusted for direction — positive = gate improved entry/exit timing"
+        ],
+        "implementation_status": "pending — requires lightweight audit script reading mws_run_results.csv. No runner changes needed.",
+        "target_version": "v2.9.5 audit script"
+      }
+    }
+  },
+  "drawdown_rules": {
+    "enabled": true,
+    "measurement": "peak_to_trough_rolling_252d",
+    "soft_limit": 0.22,
+    "soft_limit_action": "freeze_new_buys_review_required. Per-ticker min_total constraints remain in force during soft limit. No forced selling triggered at soft limit.",
+    "hard_limit": 0.3,
+    "hard_limit_action": "reduce_all_positions toward sleeve floors, subject to per-ticker min_total constraints. Exception: if reducing to sleeve floors is insufficient to exit hard_limit breach, per-ticker min_total may be overridden. In all cases Bucket A minimum is preserved. Hard limit override of min_total must be logged as a compliance exception. Hard-limit compliance trades (cap/floor enforcement, Bucket A protection, hard-limit position reduction) are explicitly exempt from the 20% per-event turnover cap — they execute in full regardless of turnover consumed by momentum-driven trades.",
+    "recovery_condition": {
+      "drawdown_below": 0.15,
+      "consecutive_days": 10,
+      "alternative_condition": "VTI_positive_momentum_5_consecutive_days",
+      "operator": "OR",
+      "action": "resume_normal_rebalancing"
+    },
+    "scheduled_cash_flows": [
+      {
+        "label": "Annual SEPP withdrawal",
+        "amount": -45000,
+        "recurrence": "annual",
+        "month": 1,
+        "day": 5
+      }
+    ],
+    "stress_turnover_cap": "max_turnover_stress"
+  },
+  "_runtime_meta": {
+    "generated": "2026-03-17",
+    "source": "mws_policy.json",
+    "source_last_updated": "2026-03-17",
+    "note": "Auto-generated from mws_policy.json by mws_analytics.py. Do not edit — overwritten on every run."
+  }
+}
