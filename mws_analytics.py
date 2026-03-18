@@ -734,15 +734,6 @@ def update_performance_log(
         logger.warning("update_performance_log: no chart_start_date in policy — skipping")
         return
 
-    # ── Fast price lookup: (date_str, TICKER) → float ────────────────────────
-    # hist is wide format: DatetimeIndex rows, ticker columns
-    price_map: Dict[Tuple[str, str], float] = {}
-    for date_idx, price_row in hist.iterrows():
-        date_str = str(date_idx)[:10]
-        for tkr, px in price_row.items():
-            if pd.notna(px):
-                price_map[(date_str, str(tkr).upper())] = float(px)
-
     # ── Holdings snapshot for portfolio value approximation ───────────────────
     fixed_prices = (policy.get("governance", {}).get("fixed_asset_prices", {}) or {})
     hold_rows: List[Tuple[str, float]] = []
@@ -755,24 +746,50 @@ def update_performance_log(
         if t and shares:
             hold_rows.append((t, shares))
 
+    # ── Vectorized portfolio value series (all dates at once via dot product) ──
+    # Separate market tickers (in hist) from fixed-price assets (CASH, TREASURY_NOTE, etc.)
+    _fixed_pv = 0.0
+    _market_shares: Dict[str, float] = {}
+    for t, shares in hold_rows:
+        fe = fixed_prices.get(t)
+        if fe is not None:
+            if isinstance(fe, dict):
+                if str(fe.get("price_type", "")).lower() == "market" and t in hist.columns:
+                    _market_shares[t] = shares          # market-priced; use hist column
+                else:
+                    _fixed_pv += shares * float(fe.get("fallback_price") or 0)
+            else:
+                _fixed_pv += shares * float(fe)
+        else:
+            if t in hist.columns:
+                _market_shares[t] = shares
+            # tickers absent from hist and not fixed-price contribute $0
+
+    # Single matrix-multiply: hist prices × share counts → portfolio $ per date
+    if _market_shares:
+        _shares_s = pd.Series(_market_shares)
+        _pv_series = hist[list(_market_shares)].ffill().dot(_shares_s) + _fixed_pv
+    else:
+        _pv_series = pd.Series(_fixed_pv, index=hist.index)
+
+    _pv_by_date: Dict[str, float] = {
+        str(d)[:10]: float(v) for d, v in _pv_series.items() if v > 0
+    }
+
+    # ── Benchmark price lookup: (date_str, TICKER) → float (bench tickers only) ─
+    # Benchmarks (SPY, QQQ) are in hist columns — build a compact lookup dict
+    # instead of the full 31K-entry map we used in long format.
+    _bench_cols = [b for b in benches if b in hist.columns]
+    _bench_stack = hist[_bench_cols].stack() if _bench_cols else pd.Series(dtype=float)
+    price_map: Dict[Tuple[str, str], float] = {
+        (str(idx[0])[:10], str(idx[1]).upper()): float(v)
+        for idx, v in _bench_stack.items()
+    }
+
     def _compute_pv(date_str: str, override: Optional[float] = None) -> Optional[float]:
         if override is not None:
             return override
-        total = 0.0
-        for t, shares in hold_rows:
-            fe = fixed_prices.get(t)
-            if fe is not None:
-                if isinstance(fe, dict):
-                    if str(fe.get("price_type", "")).lower() == "market":
-                        px = price_map.get((date_str, t)) or float(fe.get("fallback_price") or 0)
-                    else:
-                        px = float(fe.get("fallback_price") or 0)
-                else:
-                    px = float(fe)
-            else:
-                px = price_map.get((date_str, t), 0.0)
-            total += shares * px
-        return total if total > 0 else None
+        return _pv_by_date.get(date_str)
 
     # ── Column header (must match GAS buildPerfLogHeader_) ───────────────────
     header = (
@@ -1478,7 +1495,13 @@ def generate_policy_runtime(
         "constraint_precedence_during_drawdown",
     })
     # Top-level sections stripped entirely (large, not needed at run time)
-    STRIP_TOP_LEVEL = frozenset({"objectives", "news_intelligence", "definitions"})
+    # execution_gates: gate decisions are pre-computed per ticker in mws_precomputed_targets.json;
+    #   raw config (sigmas, spans, clamp multipliers) is never used in LLM reasoning.
+    # validators: policy integrity checks run by Python only; irrelevant to LLM.
+    STRIP_TOP_LEVEL = frozenset({
+        "objectives", "news_intelligence", "definitions",
+        "execution_gates", "validators",
+    })
 
     def _strip(obj: Any) -> Any:
         if isinstance(obj, dict):
