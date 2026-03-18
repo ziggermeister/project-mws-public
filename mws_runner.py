@@ -165,12 +165,17 @@ def build_prompt(analytics: dict) -> str:
     gates_str  = gates.to_string(index=False)  if not gates.empty  else "Execution gate disabled or no data."
     hold_str   = hold.to_csv(index=False)
 
-    macro_text = ""
-    try:
-        with open(MACRO_FILE) as f:
-            macro_text = f.read()
-    except FileNotFoundError:
-        macro_text = f"[{MACRO_FILE} not found]"
+    # Governance summary — full rationale in mws_governance.md; only conclusions sent to LLM
+    macro_text = (
+        "MWS v2.9.9 — Python owns all deterministic math (targets, compliance, gates); "
+        "LLM role is news overlay, regime assessment, and anomaly flagging only. "
+        "Active mechanisms: breadth-conditioned ai_tech floor (22% strong / 12% weak breadth), "
+        "bifurcated denominators (sizing_denom excludes overlays+BucketA; compliance_denom also "
+        "excludes tactical_cash), absolute momentum filter (Pct≥0.65 AND RawScore≤0 blocks buys), "
+        "compliance buy turnover cap (20%/event, Priority-1 hard_limit exempt). "
+        "Risk: soft_limit=22% freezes new buys; hard_limit=30% reduces all to floors; "
+        "recovery requires <15% drawdown for 10 consecutive days OR VTI positive momentum 5 days."
+    )
 
     return f"""You are the MWS (Momentum-Weighted Scaling) portfolio runner. Today is {TODAY}.
 This run was triggered by: **{TRIGGER_REASON}**.
@@ -537,10 +542,10 @@ def _df_to_md_table(df: pd.DataFrame) -> str:
     cols = list(df.columns)
     header = "| " + " | ".join(str(c) for c in cols) + " |"
     sep    = "|" + "|".join([":---"] * len(cols)) + "|"
-    rows   = [
-        "| " + " | ".join(str(v) for v in row) + " |"
-        for _, row in df.iterrows()
-    ]
+    rows   = (
+        df.apply(lambda row: "| " + " | ".join(str(v) for v in row) + " |", axis=1)
+        .tolist()
+    )
     return "\n".join([header, sep] + rows)
 
 
@@ -653,9 +658,9 @@ def _build_portfolio_tables(analytics: dict) -> str:
         if not df_scores.empty:
             ranked = df_scores.sort_values("Pct", ascending=False).reset_index(drop=True)
             n_ranked = len(ranked)
-            for i, row in ranked.iterrows():
+            for rank_i, row in enumerate(ranked.to_dict("records"), start=1):
                 scores_by_ticker[row["Ticker"]] = {
-                    "rank":  i + 1,
+                    "rank":  rank_i,
                     "pct":   float(row["Pct"]) if pd.notna(row["Pct"]) else 0.0,
                     "alpha": str(row.get("Alpha", "—")),
                     "blend": float(row["RawScore"]) if pd.notna(row.get("RawScore")) else 0.0,
@@ -674,7 +679,7 @@ def _build_portfolio_tables(analytics: dict) -> str:
         # ── Gate lookup ───────────────────────────────────────────────────────
         gates_by_ticker: dict = {}
         if df_gates is not None and not df_gates.empty:
-            for _, row in df_gates.iterrows():
+            for row in df_gates.to_dict("records"):
                 gates_by_ticker[str(row["ticker"])] = {
                     "action":  str(row.get("gate_action", "proceed")),
                     "z_score": row.get("z_score"),
@@ -1681,13 +1686,27 @@ def main() -> None:
         except Exception as chart_err:
             log.warning("Chart generation skipped: %s", chart_err)
 
-        # Write mws_precomputed_targets.json (side-effect of table build; HTML discarded).
-        # This happens BEFORE the LLM call so interactive sessions (no API key) still get
-        # the file.  send_email() will re-call _build_portfolio_tables() later — harmless.
-        try:
-            _build_portfolio_tables(analytics)
-        except Exception as _pt_err:
-            log.warning("Precomputed targets generation skipped: %s", _pt_err)
+        # Write mws_precomputed_targets.json — skip if already post-close fresh AND
+        # holdings have not changed since last write (set FORCE_RECOMPUTE=1 to override).
+        _force     = os.getenv("FORCE_RECOMPUTE", "").strip() in ("1", "true", "yes")
+        _tgt_fresh = (
+            not _force
+            and mws_analytics._file_is_post_close(PRECOMPUTED_TARGETS_FILE)
+            and os.path.exists(mws_analytics.HOLDINGS_CSV)
+            and os.path.getmtime(mws_analytics.HOLDINGS_CSV)
+                <= os.path.getmtime(PRECOMPUTED_TARGETS_FILE)
+        )
+        if _tgt_fresh:
+            log.info(
+                "⚡ %s is post-close fresh and holdings unchanged — skipping regeneration "
+                "(set FORCE_RECOMPUTE=1 to override)",
+                PRECOMPUTED_TARGETS_FILE,
+            )
+        else:
+            try:
+                _build_portfolio_tables(analytics)
+            except Exception as _pt_err:
+                log.warning("Precomputed targets generation skipped: %s", _pt_err)
 
         if skip_llm:
             log.info("SKIP_LLM set — analytics and chart complete; skipping LLM call and email.")

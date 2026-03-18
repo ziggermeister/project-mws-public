@@ -585,46 +585,6 @@
       }
     }
   },
-  "signals": {
-    "momentum_blend": {
-      "weights": {
-        "tr_12m": 0.45,
-        "slope_6m": 0.35,
-        "residual_3m": 0.2
-      }
-    },
-    "volatility_model": {
-      "method": "EWMA",
-      "lookback_days": 126
-    },
-    "momentum_to_weight": {
-      "method": "percentile_in_band",
-      "universe": "inducted_only",
-      "exclude_overlays": true,
-      "exclude_dormant": false,
-      "percentile_lookback_days": 63,
-      "scaling": "linear",
-      "floor_behavior": "hold_at_floor_if_positive_momentum",
-      "floor_exit_behavior": "reduce_to_zero_if_blend_negative_for_N_days",
-      "floor_exit_days": 20,
-      "cap_behavior": "do_not_exceed_per_ticker_max_total",
-      "absolute_momentum_filter": {
-        "enabled": true,
-        "condition": "blend_score > 0",
-        "applies_to": [
-          "momentum_buy",
-          "residual_deployment"
-        ],
-        "exempt": [
-          "compliance_buy",
-          "compliance_trim",
-          "momentum_trim",
-          "spike_trim"
-        ],
-        "effect": "ticker_with_negative_blend_score_receives_no_new_capital_via_momentum_path"
-      }
-    }
-  },
   "overlays": {
     "managed_futures": {
       "enabled": true,

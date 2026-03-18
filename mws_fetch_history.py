@@ -86,6 +86,46 @@ _FALLBACK_REFERENCE = [
     "^VIX",
 ]
 
+def _csv_is_post_close(path: Path) -> bool:
+    """
+    Local equivalent of mws_analytics._file_is_post_close for standalone use.
+    Returns True if the CSV was written after the last market close AND the
+    market is not currently open (so skipping is safe).
+    """
+    if not path.exists():
+        return False
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        try:
+            from backports.zoneinfo import ZoneInfo
+        except ImportError:
+            return False
+
+    ET     = ZoneInfo("America/New_York")
+    now_et = datetime.now(ET)
+
+    # During live market hours: never skip (RT prices are changing)
+    if now_et.weekday() < 5:
+        today_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        if now_et < today_close:
+            return False
+
+    # Find last trading close
+    d = now_et.date()
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    close_et = datetime(d.year, d.month, d.day, 16, 0, 0, tzinfo=ET)
+    if d == now_et.date() and now_et < close_et:
+        d -= timedelta(days=1)
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+        close_et = datetime(d.year, d.month, d.day, 16, 0, 0, tzinfo=ET)
+
+    mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=ET)
+    return mtime >= close_et
+
+
 # ── Parallel fetch config ─────────────────────────────────────────────────────
 MAX_FETCH_WORKERS   = 5     # concurrent Stooq connections
 REQUEST_INTERVAL    = 0.10  # minimum seconds between HTTP requests (global, ~10 req/s)
@@ -370,6 +410,10 @@ if INCREMENTAL_DAYS is not None:
             fetch_start = (last_date - timedelta(days=5)).strftime("%Y-%m-%d")
             print(f"Incremental mode: last date in CSV = {last_date.date()}, "
                   f"fetching from {fetch_start} (5-day overlap buffer)")
+            # Fast exit: skip fetch if CSV is already post-close fresh
+            if _csv_is_post_close(OUT_FILE):
+                print(f"✅  {OUT_FILE.name} is post-close fresh — no fetch needed")
+                import sys as _sys; _sys.exit(0)
         except Exception as e:
             print(f"⚠️  Could not read existing CSV ({e}); falling back to full fetch")
             existing = pd.DataFrame()

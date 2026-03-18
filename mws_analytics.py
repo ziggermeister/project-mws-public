@@ -68,11 +68,91 @@ def _todays_trading_date() -> str:
     return d.strftime("%Y-%m-%d")
 
 
+def _last_market_close_et():
+    """
+    Returns the most recent US equity market close as a timezone-aware datetime
+    (4:00 PM US/Eastern, Mon–Fri). Not holiday-aware.
+
+    If the market is currently open (weekday, before 4 PM ET), returns the
+    PREVIOUS trading day's close so that intraday RT prices are always refreshed.
+    Returns None if the zoneinfo package is unavailable.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        try:
+            from backports.zoneinfo import ZoneInfo          # Python 3.8
+        except ImportError:
+            return None                                       # timezone unavailable
+
+    ET      = ZoneInfo("America/New_York")
+    now_et  = datetime.now(ET)
+    d       = now_et.date()
+
+    # Walk back to the nearest weekday (handles weekend calls)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+
+    close_et = datetime(d.year, d.month, d.day, 16, 0, 0, tzinfo=ET)
+
+    # If we are on that weekday but before 4 PM, retreat one more trading day
+    if d == now_et.date() and now_et < close_et:
+        d -= timedelta(days=1)
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+        close_et = datetime(d.year, d.month, d.day, 16, 0, 0, tzinfo=ET)
+
+    return close_et
+
+
+def _file_is_post_close(filepath: str) -> bool:
+    """
+    Returns True if *filepath* exists and its modification time is >= the most
+    recent market close (4 PM ET on the last trading day).
+
+    Returns False during live market hours (weekday, before 4 PM ET) so that
+    intraday RT prices are always re-fetched regardless of file age.
+    Returns False if the file does not exist or timezone info is unavailable.
+    """
+    if not os.path.exists(filepath):
+        return False
+
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        try:
+            from backports.zoneinfo import ZoneInfo
+        except ImportError:
+            return False
+
+    ET     = ZoneInfo("America/New_York")
+    now_et = datetime.now(ET)
+
+    # During live market hours: always stale so RT prices get refreshed
+    if now_et.weekday() < 5:                                  # Mon–Fri
+        today_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        if now_et < today_close:
+            return False
+
+    last_close = _last_market_close_et()
+    if last_close is None:
+        return False
+
+    mtime = datetime.fromtimestamp(os.path.getmtime(filepath), tz=ET)
+    return mtime >= last_close
+
+
 def _history_is_stale(history_csv: str) -> bool:
     """
-    Return True if the latest date in history_csv is older than today's
-    expected trading date, meaning prices need to be refreshed.
+    Return True if the ticker history needs to be refreshed.
+
+    Fast path: if the file was written after the last market close (and the
+    market is not currently open), prices are already current — skip the CSV
+    read entirely.  During live market hours the fast path is bypassed so that
+    intraday RT prices are always re-fetched.
     """
+    if _file_is_post_close(history_csv):
+        return False                   # file is fresh; no fetch needed
     try:
         # Wide format: Date is the index (first column); read only that column
         df = pd.read_csv(history_csv, index_col=0, parse_dates=True, usecols=[0])
@@ -816,10 +896,10 @@ def update_performance_log(
         if col not in existing_df.columns:
             existing_df[col] = ""
 
+    _valid_rows = existing_df[existing_df["Date"].astype(str).str.strip().ne("")]
     existing_by_date: Dict[str, Dict[str, str]] = {
-        str(r["Date"]).strip(): dict(r)
-        for _, r in existing_df.iterrows()
-        if str(r.get("Date", "")).strip()
+        str(rec["Date"]).strip(): rec
+        for rec in _valid_rows.to_dict("records")
     }
 
     # ── Date universe: all trading days in hist >= chart_start ───────────────
@@ -888,6 +968,10 @@ def update_performance_log(
             row[f"Pct_{b}"]   = ex.get(f"Pct_{b}", "")  if not in_window else ""
             row[f"Diff_{b}"]  = ex.get(f"Diff_{b}", "") if not in_window else ""
         rows.append(row)
+
+    # Cap at 252 trading days (1 year) — prevents unbounded growth
+    if len(rows) > 252:
+        rows = rows[-252:]
 
     result_df = pd.DataFrame(rows, columns=header)
 
@@ -1283,10 +1367,10 @@ def compute_and_persist_breadth_states(
     # Build RawScore lookup
     raw_by_ticker: dict = {}
     if not df_scores.empty and "RawScore" in df_scores.columns:
-        for _, row in df_scores.iterrows():
-            t = str(row["Ticker"])
-            raw = row["RawScore"]
-            raw_by_ticker[t] = float(raw) if pd.notna(raw) else None
+        raw_by_ticker = {
+            str(t): (float(s) if pd.notna(s) else None)
+            for t, s in zip(df_scores["Ticker"], df_scores["RawScore"])
+        }
 
     effective_floors: dict = {}
 
@@ -1433,12 +1517,9 @@ def compute_and_persist_tactical_cash_state(
     if (not df_scores.empty
             and "Pct" in df_scores.columns
             and "RawScore" in df_scores.columns):
-        for _, row in df_scores.iterrows():
-            pct = float(row["Pct"])      if pd.notna(row.get("Pct"))      else 0.0
-            raw = float(row["RawScore"]) if pd.notna(row.get("RawScore")) else 0.0
-            if pct >= 0.65 and raw <= 0:
-                filter_blocking = True
-                break
+        _pct = pd.to_numeric(df_scores["Pct"],      errors="coerce").fillna(0)
+        _raw = pd.to_numeric(df_scores["RawScore"], errors="coerce").fillna(0)
+        filter_blocking = ((_pct >= 0.65) & (_raw <= 0)).any()
 
     # Advance the consecutive-day counter
     prior_blocking = existing.get("filter_blocking", False)
@@ -1501,6 +1582,7 @@ def generate_policy_runtime(
     STRIP_TOP_LEVEL = frozenset({
         "objectives", "news_intelligence", "definitions",
         "execution_gates", "validators",
+        "signals",  # momentum formula config — scores pre-computed; LLM doesn't need raw weights/lookback
     })
 
     def _strip(obj: Any) -> Any:
