@@ -28,6 +28,7 @@ import os
 import re
 import smtplib
 import sys
+import time as _time
 import traceback
 from datetime import datetime
 from email.mime.image import MIMEImage
@@ -69,6 +70,12 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 log = logging.getLogger("mws_runner")
+
+# ── Run-level telemetry ────────────────────────────────────────────────────────
+# _RUN_TIMINGS: wall-clock seconds per phase (populated in main())
+# _TOKEN_USAGE: LLM token counts from the API response (populated in call_claude())
+_RUN_TIMINGS: dict = {}
+_TOKEN_USAGE: dict = {}
 
 
 # ── Step 1: Run Python analytics ──────────────────────────────────────────────
@@ -303,6 +310,21 @@ def call_claude(prompt: str) -> str:
     for block in response.content:
         if hasattr(block, "text"):
             full_text += block.text
+
+    # ── Capture token usage for benchmark reporting ───────────────────────────
+    if hasattr(response, "usage") and response.usage:
+        u = response.usage
+        _TOKEN_USAGE.update({
+            "input_tokens":        getattr(u, "input_tokens",                0) or 0,
+            "output_tokens":       getattr(u, "output_tokens",               0) or 0,
+            "cache_read_tokens":   getattr(u, "cache_read_input_tokens",     0) or 0,
+            "cache_create_tokens": getattr(u, "cache_creation_input_tokens", 0) or 0,
+        })
+        log.info(
+            "⚙️  Token usage: input=%d  output=%d  cache_read=%d  cache_create=%d",
+            _TOKEN_USAGE["input_tokens"], _TOKEN_USAGE["output_tokens"],
+            _TOKEN_USAGE["cache_read_tokens"], _TOKEN_USAGE["cache_create_tokens"],
+        )
 
     log.info("Claude response: %d chars, stop_reason=%s", len(full_text), response.stop_reason)
     return full_text
@@ -1669,22 +1691,96 @@ def send_email(response_text: str, analytics: dict) -> None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def _print_benchmark_report(t_total: float) -> None:
+    """Print a consolidated timing + token benchmark table at end of run."""
+    pt = mws_analytics._PHASE_TIMINGS  # analytics sub-phases
+    rt = _RUN_TIMINGS                   # runner-level phases
+    tok = _TOKEN_USAGE
+    prompt_chars = rt.get("prompt_chars", 0)
+
+    log.info("")
+    log.info("╔═══════════════════════════════════════════════════════╗")
+    log.info("║          ⏱  MWS BENCHMARK REPORT                     ║")
+    log.info("╠═══════════════════════════════════════════════════════╣")
+    log.info("║ ANALYTICS PHASE                                       ║")
+    log.info("║  load_system_files      %6.2fs                       ║", pt.get("load_system_files", 0))
+    log.info("║  run_mws_audit          %6.2fs                       ║", pt.get("run_mws_audit", 0))
+    log.info("║  calculate_portfolio_value %6.2fs                    ║", pt.get("calculate_portfolio_value", 0))
+    log.info("║  update_performance_log %6.2fs                       ║", pt.get("update_performance_log", 0))
+    log.info("║  check_drawdown_state×2 %6.2fs                       ║", pt.get("check_drawdown_state", 0))
+    log.info("║  generate_rankings      %6.2fs                       ║", pt.get("generate_rankings", 0))
+    log.info("║  execution_gates (all)  %6.2fs                       ║", pt.get("execution_gates", 0))
+    log.info("║  generate_policy_runtime%6.2fs                       ║", pt.get("generate_policy_runtime", 0))
+    log.info("║  ─────────────────────────────                        ║")
+    log.info("║  run_analytics() total  %6.2fs                       ║", rt.get("analytics", 0))
+    log.info("╠═══════════════════════════════════════════════════════╣")
+    log.info("║ RUNNER PHASE                                          ║")
+    log.info("║  chart generation       %6.2fs                       ║", rt.get("chart", 0))
+    log.info("║  portfolio_tables       %6.2fs                       ║", rt.get("portfolio_tables", 0))
+    if "build_prompt" in rt:
+        log.info("║  build_prompt           %6.2fs                       ║", rt.get("build_prompt", 0))
+        log.info("║  prompt size            %6d chars (~%dk tokens)    ║",
+                 prompt_chars, prompt_chars // 4000)
+    if "llm_call" in rt:
+        log.info("║  LLM call (wall clock)  %6.2fs                       ║", rt.get("llm_call", 0))
+    log.info("╠═══════════════════════════════════════════════════════╣")
+    if tok:
+        log.info("║ TOKEN USAGE                                           ║")
+        log.info("║  input tokens           %8d                       ║", tok.get("input_tokens", 0))
+        log.info("║  output tokens          %8d                       ║", tok.get("output_tokens", 0))
+        log.info("║  cache read tokens      %8d                       ║", tok.get("cache_read_tokens", 0))
+        total_tok = tok.get("input_tokens", 0) + tok.get("output_tokens", 0)
+        log.info("║  total tokens           %8d                       ║", total_tok)
+        log.info("╠═══════════════════════════════════════════════════════╣")
+    log.info("║ E2E TOTAL (runner only) %6.2fs                       ║", t_total)
+    log.info("╚═══════════════════════════════════════════════════════╝")
+    log.info("")
+
+    # Write machine-readable timing to mws_benchmark_timing.json for the wrapper
+    _timing_doc = {
+        "runner": {
+            "analytics_phases": {k: round(v, 4) for k, v in pt.items()},
+            "runner_phases":    {k: round(v, 4) for k, v in rt.items()},
+            "token_usage":      tok,
+            "prompt_chars":     prompt_chars,
+            "total_s":          round(t_total, 4),
+        }
+    }
+    _timing_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mws_benchmark_timing.json")
+    try:
+        if os.path.exists(_timing_path):
+            with open(_timing_path, "r", encoding="utf-8") as _f:
+                _existing = json.load(_f)
+        else:
+            _existing = {}
+        _existing.update(_timing_doc)
+        with open(_timing_path, "w", encoding="utf-8") as _f:
+            json.dump(_existing, _f, indent=2)
+    except Exception as _e:
+        log.debug("Could not write benchmark timing: %s", _e)
+
+
 def main() -> None:
+    _t_main = _time.perf_counter()
     skip_llm = os.environ.get("SKIP_LLM", "false").lower() in ("1", "true", "yes")
     log.info("=== MWS GitHub Runner start | %s | trigger=%s | skip_llm=%s ===",
              TODAY, TRIGGER_REASON, skip_llm)
 
     try:
+        _t0 = _time.perf_counter()
         analytics = run_analytics()
+        _RUN_TIMINGS["analytics"] = _time.perf_counter() - _t0
         log.info("Analytics complete — %d candidates, TPV $%.0f",
                  len(analytics["candidates"]), analytics["total_val"])
 
         # Generate equity curve chart (saved to mws_equity_curve.png)
+        _t0 = _time.perf_counter()
         try:
             mws_charts.rotate_and_chart(analytics["df_scores"], analytics["policy"])
             log.info("Chart generated: %s", mws_analytics.CHART_FILENAME)
         except Exception as chart_err:
             log.warning("Chart generation skipped: %s", chart_err)
+        _RUN_TIMINGS["chart"] = _time.perf_counter() - _t0
 
         # Write mws_precomputed_targets.json — skip if already post-close fresh AND
         # holdings have not changed since last write (set FORCE_RECOMPUTE=1 to override).
@@ -1696,6 +1792,7 @@ def main() -> None:
             and os.path.getmtime(mws_analytics.HOLDINGS_CSV)
                 <= os.path.getmtime(PRECOMPUTED_TARGETS_FILE)
         )
+        _t0 = _time.perf_counter()
         if _tgt_fresh:
             log.info(
                 "⚡ %s is post-close fresh and holdings unchanged — skipping regeneration "
@@ -1707,15 +1804,22 @@ def main() -> None:
                 _build_portfolio_tables(analytics)
             except Exception as _pt_err:
                 log.warning("Precomputed targets generation skipped: %s", _pt_err)
+        _RUN_TIMINGS["portfolio_tables"] = _time.perf_counter() - _t0
 
         if skip_llm:
             log.info("SKIP_LLM set — analytics and chart complete; skipping LLM call and email.")
+            _print_benchmark_report(_time.perf_counter() - _t_main)
             return
 
+        _t0 = _time.perf_counter()
         prompt = build_prompt(analytics)
+        _RUN_TIMINGS["build_prompt"] = _time.perf_counter() - _t0
+        _RUN_TIMINGS["prompt_chars"] = len(prompt)
         log.info("Prompt built (%d chars)", len(prompt))
 
+        _t0 = _time.perf_counter()
         response = call_claude(prompt)
+        _RUN_TIMINGS["llm_call"] = _time.perf_counter() - _t0
 
         violations = validate_schema(response)
         if violations:
@@ -1742,6 +1846,7 @@ def main() -> None:
         send_email(response, analytics)
 
         log.info("=== MWS GitHub Runner complete ===")
+        _print_benchmark_report(_time.perf_counter() - _t_main)
 
     except SchemaViolationError as sve:
         # Fail-closed: violation report already written to disk by write_market_context().

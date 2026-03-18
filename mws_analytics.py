@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time as _time
 import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple, Dict, List, Set, Any
@@ -21,6 +22,11 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("mws")
+
+# ── Phase timing accumulator ──────────────────────────────────────────────────
+# Populated by instrumented analytics functions during each run.
+# mws_runner.py reads mws_analytics._PHASE_TIMINGS after run_analytics() returns.
+_PHASE_TIMINGS: dict = {}
 
 # Display names for benchmark tickers used in chart labels.
 # Add entries here when adding new benchmarks to active_benchmarks in policy.
@@ -279,6 +285,7 @@ def _fatal(msg: str, code: int = 1) -> None:
     raise SystemExit(code)
 
 def load_system_files() -> Tuple[dict, pd.DataFrame, pd.DataFrame]:
+    _t0 = _time.perf_counter()
     required = [POLICY_FILENAME, HOLDINGS_CSV, HISTORY_CSV]
     missing = [f for f in required if not os.path.exists(f)]
     if missing:
@@ -317,6 +324,7 @@ def load_system_files() -> Tuple[dict, pd.DataFrame, pd.DataFrame]:
     if hist.empty:
         _fatal("[FATAL] HISTORY_CSV has no valid rows after parsing.")
 
+    _PHASE_TIMINGS["load_system_files"] = _time.perf_counter() - _t0
     return policy, hist, hold
 
 
@@ -398,6 +406,7 @@ def get_ticker_sleeve(policy: dict, ticker: str) -> str:
 # 3) Audit + valuation
 # ==============================================================================
 def run_mws_audit(policy: dict, hist: pd.DataFrame, hold: pd.DataFrame):
+    _t0 = _time.perf_counter()
     logger.info("Phase 1: Starting Titanium Hard-Stop Audit...")
 
     policy_required = get_policy_required_tickers(policy)
@@ -425,6 +434,7 @@ def run_mws_audit(policy: dict, hist: pd.DataFrame, hold: pd.DataFrame):
 
     logger.info("AUDIT: Ranking Universe: %d tickers (Active + Held)", len(final_candidates))
     logger.info("Audit Passed.")
+    _PHASE_TIMINGS["run_mws_audit"] = _time.perf_counter() - _t0
     return final_candidates, [], missing_from_hist
 
 
@@ -436,6 +446,7 @@ def calculate_portfolio_value(policy: dict, hold: pd.DataFrame, hist: pd.DataFra
       Legacy:     "CASH": 1.0
       Structured: "TREASURY_NOTE": { "price_type": "market", "fallback_price": 45000, ... }
     """
+    _t0 = _time.perf_counter()
     print("[LOG] Phase 2: Calculating Portfolio Value...")
 
     latest_prices = hist.iloc[-1]   # hist is sorted by Date index; last row = most recent
@@ -485,6 +496,7 @@ def calculate_portfolio_value(policy: dict, hold: pd.DataFrame, hist: pd.DataFra
 
     print(f"\n🚀 TITANIUM COMMAND CENTER | AS-OF: {asof} | policy={policy_version}")
     print(f"🌍 REGIME: 🟢 BULL | PORTFOLIO: ${total_val:,.2f}")
+    _PHASE_TIMINGS["calculate_portfolio_value"] = _time.perf_counter() - _t0
     return total_val, asof
 
 
@@ -578,8 +590,10 @@ def compute_alpha_vs_proxy(hist: pd.DataFrame, ticker: str, proxy: str, start_da
     return tr_t - tr_p
 
 def generate_rankings(policy: dict, hist: pd.DataFrame, candidates: List[str], hold: pd.DataFrame) -> pd.DataFrame:
+    _t0 = _time.perf_counter()
     logger.info("Phase 3: Generating Rankings...")
     if not candidates or hist.empty:
+        _PHASE_TIMINGS["generate_rankings"] = _time.perf_counter() - _t0
         return pd.DataFrame(columns=["Ticker", "Score", "Pct", "RawScore", "Alpha", "AlphaVs", "Sleeve", "Status"])
 
     held_set = get_held_tickers(hold)
@@ -644,6 +658,7 @@ def generate_rankings(policy: dict, hist: pd.DataFrame, candidates: List[str], h
         })
 
     if not rows:
+        _PHASE_TIMINGS["generate_rankings"] = _time.perf_counter() - _t0
         return pd.DataFrame(columns=["Ticker", "Score", "Pct", "RawScore", "Alpha", "AlphaVs", "Sleeve", "Status"])
 
     df = pd.DataFrame(rows)
@@ -672,6 +687,7 @@ def generate_rankings(policy: dict, hist: pd.DataFrame, candidates: List[str], h
                     r["Ticker"], pct_str, raw_str, r["Alpha"], r["AlphaVs"],
                     sleeve_disp, r["Status"])
 
+    _PHASE_TIMINGS["generate_rankings"] = _time.perf_counter() - _t0
     return df[["Ticker", "Score", "Pct", "RawScore", "Alpha", "AlphaVs", "Sleeve", "Status"]]
 
 
@@ -787,6 +803,7 @@ def update_performance_log(
     today_total_val: Optional[float] = None,
     perf_log: str = PERF_LOG_CSV,
 ) -> None:
+    _t0 = _time.perf_counter()
     """
     Update mws_recent_performance.csv with all trading days not yet logged.
     Replicates GAS upsertAndRecomputePerformanceLog_.
@@ -809,9 +826,11 @@ def update_performance_log(
 
     if not benches:
         logger.warning("update_performance_log: no active_benchmarks in policy — skipping")
+        _PHASE_TIMINGS["update_performance_log"] = _time.perf_counter() - _t0
         return
     if not chart_start:
         logger.warning("update_performance_log: no chart_start_date in policy — skipping")
+        _PHASE_TIMINGS["update_performance_log"] = _time.perf_counter() - _t0
         return
 
     # ── Holdings snapshot for portfolio value approximation ───────────────────
@@ -1051,6 +1070,7 @@ def update_performance_log(
         prev_cum = cum
 
     result_df.to_csv(perf_log, index=False)
+    _PHASE_TIMINGS["update_performance_log"] = _time.perf_counter() - _t0
     logger.info(
         "Performance log updated → %s  (%d rows, through %s)",
         perf_log, len(result_df), all_trade_dates[-1],
@@ -1072,6 +1092,7 @@ def check_drawdown_state(policy: dict, perf_log: str = PERF_LOG_CSV) -> dict:
         hard_limit: float  — policy hard-limit threshold (e.g. 0.28)
         recovery  : float  — recovery threshold (e.g. 0.12)
     """
+    _t0 = _time.perf_counter()
     risk  = policy.get("risk_controls", {}) or {}
     soft  = float(risk.get("soft_limit",           0.20))
     hard  = float(risk.get("hard_limit",           0.28))
@@ -1083,6 +1104,7 @@ def check_drawdown_state(policy: dict, perf_log: str = PERF_LOG_CSV) -> dict:
     }
 
     if not os.path.exists(perf_log):
+        _PHASE_TIMINGS["check_drawdown_state"] = _time.perf_counter() - _t0
         return default
 
     try:
@@ -1090,16 +1112,19 @@ def check_drawdown_state(policy: dict, perf_log: str = PERF_LOG_CSV) -> dict:
         df.columns = [c.strip() for c in df.columns]
         twr_col = next((c for c in df.columns if "twr" in c.lower()), None)
         if twr_col is None:
+            _PHASE_TIMINGS["check_drawdown_state"] = _time.perf_counter() - _t0
             return default
 
         series = pd.to_numeric(df[twr_col], errors="coerce").dropna()
         if series.empty:
+            _PHASE_TIMINGS["check_drawdown_state"] = _time.perf_counter() - _t0
             return default
 
         # Build wealth index from cumulative daily returns, then measure max drawdown
         wealth = (1 + series).cumprod()
         dd = _compute_max_drawdown(wealth)   # returns negative float
         if dd is None:
+            _PHASE_TIMINGS["check_drawdown_state"] = _time.perf_counter() - _t0
             return default
 
         abs_dd = abs(dd)
@@ -1110,11 +1135,13 @@ def check_drawdown_state(policy: dict, perf_log: str = PERF_LOG_CSV) -> dict:
         else:
             state = "normal"
 
+        _PHASE_TIMINGS["check_drawdown_state"] = _time.perf_counter() - _t0
         return {"state": state, "drawdown": dd,
                 "soft_limit": soft, "hard_limit": hard, "recovery": recov}
 
     except Exception as exc:
         logger.warning("check_drawdown_state: could not parse perf log (%s); assuming normal", exc)
+        _PHASE_TIMINGS["check_drawdown_state"] = _time.perf_counter() - _t0
         return default
 
 
@@ -1197,6 +1224,7 @@ def check_execution_gate(
       raw_vol_2d       : float | None
       effective_vol_2d : float | None
     """
+    _t0_gate = _time.perf_counter()
     gate_cfg = (
         policy.get("execution_gates", {})
               .get("short_term_confirmation", {})
@@ -1322,6 +1350,9 @@ def check_execution_gate(
                 "vol_clamp_type": vol_clamp_type,
                 "raw_vol_2d": vol_2d, "effective_vol_2d": effective_vol_2d}
 
+    _PHASE_TIMINGS["execution_gates"] = (
+        _PHASE_TIMINGS.get("execution_gates", 0.0) + _time.perf_counter() - _t0_gate
+    )
     return {"action": "proceed",
             "reason": (f"z={z:.2f}, ±{sigma}σ threshold [{gate_source}], "
                        f"within normal range"),
@@ -1567,6 +1598,7 @@ def generate_policy_runtime(
     Keeps   : all numeric thresholds, boolean flags, ticker lists, structural keys.
     Savings : ~60-65% token reduction vs the full policy (≈15 000 tokens saved).
     """
+    _t0 = _time.perf_counter()
     import copy
 
     # Keys stripped wherever they appear (recursive)
@@ -1613,6 +1645,7 @@ def generate_policy_runtime(
     except Exception as exc:
         logger.warning("Could not write policy runtime %s: %s", out_path, exc)
 
+    _PHASE_TIMINGS["generate_policy_runtime"] = _time.perf_counter() - _t0
     return runtime
 
 

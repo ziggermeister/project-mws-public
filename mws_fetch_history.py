@@ -391,8 +391,12 @@ def fetch_today_stooq_rt(tickers: List[str], target_date: str) -> pd.DataFrame:
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
+# ── Benchmark timing ──────────────────────────────────────────────────────────
+_BENCH: dict = {"t0": time.perf_counter()}
+
 # Build ticker universe from policy + tracker
 ALL_TICKERS = load_universe()
+_BENCH["universe_loaded"] = time.perf_counter()
 # Map display names back to fetch names for the required set
 # (DISPLAY_OVERRIDE maps fetch name → display name; invert for the purge check)
 DISPLAY_TO_FETCH = {v: k for k, v in DISPLAY_OVERRIDE.items()}
@@ -413,6 +417,27 @@ if INCREMENTAL_DAYS is not None:
             # Fast exit: skip fetch if CSV is already post-close fresh
             if _csv_is_post_close(OUT_FILE):
                 print(f"✅  {OUT_FILE.name} is post-close fresh — no fetch needed")
+                # Write a sentinel timing entry so mws_benchmark.py knows we fast-exited
+                _fast_timing = BASE_DIR / "mws_benchmark_timing.json"
+                try:
+                    import json as _jf
+                    _et: dict = {}
+                    if _fast_timing.exists():
+                        try:
+                            _et = _jf.loads(_fast_timing.read_text(encoding="utf-8"))
+                        except Exception:
+                            pass
+                    _et["fetch_history"] = {
+                        "total_s": 0.0, "fast_exit": True,
+                        "universe_load_s": 0.0, "parallel_fetch_s": 0.0,
+                        "rt_fallback_s": 0.0, "merge_write_s": 0.0,
+                        "tickers_fetched": 0, "tickers_ok": 0,
+                        "rows_written": len(existing) if not existing.empty else 0,
+                        "mode": "incremental (fast-exit — post-close fresh)",
+                    }
+                    _fast_timing.write_text(_jf.dumps(_et, indent=2), encoding="utf-8")
+                except Exception:
+                    pass
                 import sys as _sys; _sys.exit(0)
         except Exception as e:
             print(f"⚠️  Could not read existing CSV ({e}); falling back to full fetch")
@@ -468,6 +493,8 @@ for i, ticker in enumerate(ALL_TICKERS, 1):
               f"{len(df):>5} rows  "
               f"({df['Date'].min().date()} → {df['Date'].max().date()})")
 
+_BENCH["fetch_done"] = time.perf_counter()
+
 if not frames:
     sys.exit("\nERROR: No data fetched. Check: curl -s 'https://stooq.com/q/d/l/?s=spy.us&d1=20240101&d2=20240110&i=d'")
 
@@ -488,6 +515,8 @@ if _fresh_latest < _expected_date:
               f"(market may not have traded today)")
 else:
     print(f"\n✅  Stooq up-to-date through {_fresh_latest}")
+
+_BENCH["rt_done"] = time.perf_counter()
 
 # ── Merge incremental data with existing history ──────────────────────────────
 fresh = pd.concat(frames, ignore_index=True)
@@ -520,6 +549,7 @@ long.columns.name = None
 
 # ── Write ─────────────────────────────────────────────────────────────────────
 long.to_csv(OUT_FILE)
+_BENCH["write_done"] = time.perf_counter()
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 print(f"\n{'='*60}")
@@ -541,3 +571,48 @@ if INCREMENTAL_DAYS is None:
     ]
     if not short.empty:
         print(f"\n⚠️  Unexpectedly short history (<1000 rows): {short.index.tolist()}")
+
+# ── Benchmark timing summary ──────────────────────────────────────────────────
+_t_end = time.perf_counter()
+_BENCH["total"] = _t_end - _BENCH["t0"]
+_BENCH.setdefault("rt_done",    _BENCH.get("fetch_done", _t_end))
+_BENCH.setdefault("write_done", _t_end)
+
+_fetch_s  = _BENCH.get("fetch_done",  _BENCH["t0"]) - _BENCH["t0"]
+_rt_s     = _BENCH.get("rt_done",     _BENCH["fetch_done"]) - _BENCH.get("fetch_done", _BENCH["t0"])
+_merge_s  = _BENCH.get("write_done",  _t_end) - _BENCH.get("rt_done", _BENCH.get("fetch_done", _BENCH["t0"]))
+_total_s  = _BENCH["total"]
+
+print(f"\n{'─'*52}")
+print(f"⏱  mws_fetch_history timing:")
+print(f"   universe load   : {_BENCH.get('universe_loaded', _BENCH['t0']) - _BENCH['t0']:5.2f}s")
+print(f"   parallel fetch  : {_fetch_s:5.2f}s  ({len(ALL_TICKERS)} tickers, {len(frames)} successful)")
+print(f"   RT fallback     : {_rt_s:5.2f}s")
+print(f"   merge + write   : {_merge_s:5.2f}s")
+print(f"   TOTAL           : {_total_s:5.2f}s")
+print(f"{'─'*52}")
+
+# Write to shared benchmark timing JSON (read by mws_benchmark.py)
+import json as _json
+_timing_path = BASE_DIR / "mws_benchmark_timing.json"
+try:
+    _existing_bench: dict = {}
+    if _timing_path.exists():
+        try:
+            _existing_bench = _json.loads(_timing_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    _existing_bench["fetch_history"] = {
+        "total_s":       round(_total_s, 4),
+        "universe_load_s": round(_BENCH.get("universe_loaded", _BENCH["t0"]) - _BENCH["t0"], 4),
+        "parallel_fetch_s": round(_fetch_s, 4),
+        "rt_fallback_s": round(_rt_s, 4),
+        "merge_write_s": round(_merge_s, 4),
+        "tickers_fetched": len(ALL_TICKERS),
+        "tickers_ok":    len(frames),
+        "rows_written":  len(long),
+        "mode":          "incremental" if INCREMENTAL_DAYS is not None else "full",
+    }
+    _timing_path.write_text(_json.dumps(_existing_bench, indent=2), encoding="utf-8")
+except Exception as _te:
+    pass  # non-fatal
