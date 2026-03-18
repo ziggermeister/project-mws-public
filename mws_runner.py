@@ -1597,6 +1597,232 @@ def send_schema_alert(violation_summary: str) -> None:
     log.info("Schema alert email sent to %s", to_addr)
 
 
+def send_compliance_email(analytics: dict) -> None:
+    """Send a compliance/status digest email when SKIP_LLM=true.
+
+    Contains: portfolio snapshot, sleeve compliance status, momentum rankings,
+    and Python-computed trade candidates (labelled as pending LLM news review).
+    Does NOT contain trade proposals — those require live news overlay via a
+    Claude Code session with WebSearch access.
+    """
+    password  = os.environ.get("GMAIL_APP_PASSWORD")
+    from_addr = os.environ.get("GMAIL_FROM", "bhatnagar.vivek@gmail.com")
+    to_addr   = os.environ.get("GMAIL_TO",   "bhatnagar.vivek@gmail.com")
+
+    if not password:
+        log.warning("GMAIL_APP_PASSWORD not set — skipping compliance email.")
+        return
+
+    total_val = analytics["total_val"]
+    dd        = analytics["drawdown"]
+
+    if dd >= 0.30:
+        regime_label = "🔴 HARD LIMIT"
+    elif dd >= 0.22:
+        regime_label = "⚠️ SOFT LIMIT"
+    else:
+        regime_label = "🟢 NORMAL"
+
+    subject = f"MWS Digest | {TODAY} | TPV ${total_val:,.0f} | {regime_label}"
+
+    # ── Load precomputed targets for sleeve / breadth / trade data ────────────
+    targets: dict = {}
+    try:
+        with open(PRECOMPUTED_TARGETS_FILE, "r", encoding="utf-8") as _f:
+            targets = json.load(_f)
+    except Exception as _e:
+        log.warning("Could not read precomputed targets for compliance email: %s", _e)
+
+    sleeves      = targets.get("sleeves", {})
+    overlays     = targets.get("overlays", {})
+    bucket_a     = targets.get("bucket_a", {})
+    breadth_ai   = targets.get("breadth_state", {}).get("ai_tech", {})
+    portfolio    = targets.get("portfolio", {})
+    trade_budget = targets.get("trade_budget", {})
+    tact_cash    = targets.get("tactical_cash_active", False)
+    sizing_denom = targets.get("sizing_denom", 0.0)
+
+    _TH  = "background:#f0f4f8; border:1px solid #bcd; padding:6px 10px; text-align:left; white-space:nowrap; font-size:12px;"
+    _THR = "background:#f0f4f8; border:1px solid #bcd; padding:6px 10px; text-align:right; white-space:nowrap; font-size:12px;"
+    _TD  = "border:1px solid #ddd; padding:5px 8px; white-space:nowrap; font-size:12px;"
+    _TDR = "border:1px solid #ddd; padding:5px 8px; text-align:right; white-space:nowrap; font-size:12px;"
+    _TDC = "border:1px solid #ddd; padding:5px 8px; text-align:center; white-space:nowrap; font-size:12px;"
+
+    # ── Header: portfolio snapshot ─────────────────────────────────────────────
+    ba_ok   = "✅" if bucket_a.get("status") == "ok" else "⚠️"
+    tc_flag = "⚠️ ACTIVE" if tact_cash else "—"
+    ai_floor = f"{breadth_ai.get('effective_floor', 0)*100:.0f}% ({breadth_ai.get('current_category', '?')})"
+
+    header_html = f"""
+<h1>MWS Compliance Digest — {TODAY}</h1>
+<table style="border-collapse:collapse; margin-bottom:16px;">
+  <tr><td style="{_TD}"><strong>TPV</strong></td><td style="{_TDR}">${total_val:,.0f}</td>
+      <td style="{_TD} padding-left:24px;"><strong>sizing_denom</strong></td><td style="{_TDR}">${sizing_denom:,.0f}</td></tr>
+  <tr><td style="{_TD}"><strong>Drawdown</strong></td><td style="{_TDR}">{dd*100:.1f}%</td>
+      <td style="{_TD} padding-left:24px;"><strong>Regime</strong></td><td style="{_TDR}">{regime_label}</td></tr>
+  <tr><td style="{_TD}"><strong>Bucket A</strong></td><td style="{_TDR}">${bucket_a.get('mv', 0):,.0f} {ba_ok}</td>
+      <td style="{_TD} padding-left:24px;"><strong>Tactical Cash</strong></td><td style="{_TDR}">{tc_flag}</td></tr>
+  <tr><td style="{_TD}"><strong>ai_tech floor</strong></td><td style="{_TDR}">{ai_floor}</td>
+      <td style="{_TD} padding-left:24px;"><strong>Cash</strong></td><td style="{_TDR}">${trade_budget.get('cash_on_hand', 0):,.2f}</td></tr>
+</table>
+"""
+
+    # ── Sleeve compliance table ────────────────────────────────────────────────
+    any_breach = any(s.get("status") != "in_band" for s in sleeves.values())
+    sleeve_header = "⚠️ SLEEVE COMPLIANCE — BREACH DETECTED" if any_breach else "✅ SLEEVE COMPLIANCE — ALL IN BAND"
+    sleeve_rows = ""
+    for sl_name, sl_data in sleeves.items():
+        status = sl_data.get("status", "?")
+        icon   = "✅" if status == "in_band" else "⚠️"
+        row_bg = " background:#fff8e1;" if status != "in_band" else ""
+        sleeve_rows += (
+            f'<tr><td style="{_TD}{row_bg}">{sl_name}</td>'
+            f'<td style="{_TDR}{row_bg}">${sl_data["mv"]:,.0f}</td>'
+            f'<td style="{_TDR}{row_bg}">{sl_data["current_pct"]:.1f}%</td>'
+            f'<td style="{_TDR}{row_bg}">{sl_data["floor_pct"]:.0f}% – {sl_data["cap_pct"]:.0f}%</td>'
+            f'<td style="{_TDC}{row_bg}">{icon} {status}</td></tr>'
+        )
+    # Overlays row
+    ov_pct  = overlays.get("total_pct_tpv", 0.0)
+    ov_band = overlays.get("band", [0.06, 0.12])
+    ov_mv   = sum(v.get("mv", 0) for k, v in overlays.items() if isinstance(v, dict) and "mv" in v)
+    ov_ok   = ov_band[0]*100 <= ov_pct <= ov_band[1]*100
+    ov_icon = "✅" if ov_ok else "⚠️"
+    sleeve_rows += (
+        f'<tr><td style="{_TD}">managed_futures (overlay)</td>'
+        f'<td style="{_TDR}">${ov_mv:,.0f}</td>'
+        f'<td style="{_TDR}">{ov_pct:.1f}% TPV</td>'
+        f'<td style="{_TDR}">{ov_band[0]*100:.0f}% – {ov_band[1]*100:.0f}%</td>'
+        f'<td style="{_TDC}">{ov_icon} {"in_band" if ov_ok else "OUT_OF_BAND"}</td></tr>'
+    )
+
+    sleeve_html = f"""
+<h2>{sleeve_header}</h2>
+<table style="border-collapse:collapse; width:100%;">
+  <tr><th style="{_TH}">Sleeve</th><th style="{_THR}">MV</th><th style="{_THR}">Current %</th>
+      <th style="{_THR}">Floor–Cap</th><th style="{_THR}">Status</th></tr>
+{sleeve_rows}
+</table>
+"""
+
+    # ── Trade candidates (Python-computed; no news overlay) ────────────────────
+    trade_rows = ""
+    has_trades = False
+    for ticker, td in portfolio.items():
+        action = td.get("action", "HOLD")
+        if action == "HOLD":
+            continue
+        has_trades = True
+        est_usd    = td.get("est_usd") or 0.0
+        est_shares = td.get("est_shares")
+        shares_str = str(est_shares) if est_shares is not None else "—"
+        basis      = td.get("basis", "")
+        gate_z     = td.get("gate_z", 0.0)
+        gate_act   = td.get("gate_action", "proceed")
+        gate_str   = f"{gate_z:+.2f} ({gate_act})"
+        action_color = "#d32f2f" if "TRIM" in action else "#1b5e20"
+        trade_rows += (
+            f'<tr><td style="{_TD}"><strong style="color:{action_color}">{action}</strong></td>'
+            f'<td style="{_TD}">{ticker}</td>'
+            f'<td style="{_TD}">{td.get("sleeve_l2","")}</td>'
+            f'<td style="{_TDR}">{td.get("momentum_pct",0):.0f}%</td>'
+            f'<td style="{_TDR}">{td.get("raw_score",0):.3f}</td>'
+            f'<td style="{_TD}">{basis}</td>'
+            f'<td style="{_TDR}">${est_usd:,.0f}</td>'
+            f'<td style="{_TDR}">{shares_str}</td>'
+            f'<td style="{_TDC}">{gate_str}</td></tr>'
+        )
+
+    if has_trades:
+        comp_proceeds = trade_budget.get("comp_sell_proceeds", 0.0)
+        mom_proceeds  = trade_budget.get("mom_sell_proceeds", 0.0)
+        total_avail   = trade_budget.get("total_available", 0.0)
+        scale_pct     = trade_budget.get("mom_buy_scale", 1.0) * 100
+        trade_section = f"""
+<h2>⚙️ PYTHON-COMPUTED TRADE CANDIDATES — pending live news review</h2>
+<p style="color:#555; font-size:12px; font-style:italic;">
+  These are deterministic Python outputs. Trade proposals (go/no-go + news overlay)
+  are produced by the 10 AM Claude Code session with live WebSearch.
+</p>
+<p style="font-size:12px;">
+  <strong>Budget:</strong> compliance sells ${comp_proceeds:,.0f} + momentum sells ${mom_proceeds:,.0f}
+  = ${total_avail:,.0f} available | momentum buy scale {scale_pct:.0f}%
+</p>
+<table style="border-collapse:collapse; width:100%;">
+  <tr><th style="{_TH}">Action</th><th style="{_TH}">Ticker</th><th style="{_TH}">Sleeve</th>
+      <th style="{_THR}">Momentum%</th><th style="{_THR}">Score</th><th style="{_TH}">Basis</th>
+      <th style="{_THR}">Est.$</th><th style="{_THR}">Shares</th><th style="{_THR}">Gate z</th></tr>
+{trade_rows}
+</table>
+"""
+    else:
+        trade_section = "<h2>✅ NO TRADES INDICATED</h2><p>All sleeves in band, no momentum signals above threshold.</p>"
+
+    # ── Footer ─────────────────────────────────────────────────────────────────
+    footer_html = """
+<hr>
+<p style="color:#888; font-size:11px;">
+  <strong>Note:</strong> This digest contains Python-computed compliance status only.
+  Trade proposals with live news overlay are produced by the scheduled Claude Code session (10 AM ET).
+  To trigger an on-demand full LLM run: GitHub Actions → MWS Portfolio Run → Run workflow → set skip_llm=false.
+</p>
+"""
+
+    # ── Assemble + send ────────────────────────────────────────────────────────
+    body_content = header_html + sleeve_html + trade_section
+    body_content += '<hr><h2>Portfolio State</h2>' + _build_portfolio_tables(analytics)
+    body_content += footer_html
+
+    chart_path = mws_analytics.CHART_FILENAME
+    has_chart  = os.path.exists(chart_path)
+    chart_cid  = "mws_equity_curve"
+
+    if has_chart:
+        chart_tag = (
+            f'<hr style="margin-top:24px">'
+            f'<img src="cid:{chart_cid}" style="max-width:100%;height:auto;" '
+            f'alt="MWS Equity Curve">'
+        )
+        body_content += chart_tag
+
+    html_body = f"<html><head>{_EMAIL_CSS}</head><body>{body_content}</body></html>"
+
+    msg = MIMEMultipart("mixed")
+    msg["Subject"] = subject
+    msg["From"]    = from_addr
+    msg["To"]      = to_addr
+
+    alt = MIMEMultipart("alternative")
+    plain_text = (
+        f"MWS Compliance Digest — {TODAY}\n"
+        f"TPV: ${total_val:,.0f} | Drawdown: {dd*100:.1f}% | {regime_label}\n\n"
+        f"Sleeve breaches: {sum(1 for s in sleeves.values() if s.get('status') != 'in_band')}\n"
+        f"Trade candidates: {sum(1 for td in portfolio.values() if td.get('action') != 'HOLD')}\n\n"
+        f"Full trade proposals via 10 AM Claude Code session."
+    )
+    alt.attach(MIMEText(plain_text, "plain", "utf-8"))
+
+    if has_chart:
+        related = MIMEMultipart("related")
+        related.attach(MIMEText(html_body, "html", "utf-8"))
+        with open(chart_path, "rb") as f:
+            img = MIMEImage(f.read())
+        img.add_header("Content-ID", f"<{chart_cid}>")
+        img.add_header("Content-Disposition", "inline", filename=chart_path)
+        related.attach(img)
+        alt.attach(related)
+    else:
+        alt.attach(MIMEText(html_body, "html", "utf-8"))
+
+    msg.attach(alt)
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(from_addr, password)
+        smtp.sendmail(from_addr, to_addr, msg.as_string())
+
+    log.info("Compliance digest email sent to %s", to_addr)
+
+
 def send_email(response_text: str, analytics: dict) -> None:
     password  = os.environ.get("GMAIL_APP_PASSWORD")
     from_addr = os.environ.get("GMAIL_FROM", "bhatnagar.vivek@gmail.com")
@@ -1807,7 +2033,8 @@ def main() -> None:
         _RUN_TIMINGS["portfolio_tables"] = _time.perf_counter() - _t0
 
         if skip_llm:
-            log.info("SKIP_LLM set — analytics and chart complete; skipping LLM call and email.")
+            log.info("SKIP_LLM set — sending compliance digest email (no LLM trade proposals).")
+            send_compliance_email(analytics)
             _print_benchmark_report(_time.perf_counter() - _t_main)
             return
 

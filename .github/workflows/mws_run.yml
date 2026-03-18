@@ -19,9 +19,9 @@ on:
         required: false
         default: "manual"
       skip_llm:
-        description: "Skip LLM call and email (analytics + chart only)"
+        description: "Skip LLM call; send compliance digest instead (default: true). Set false for on-demand full LLM run."
         required: false
-        default: "false"
+        default: "true"
         type: boolean
 
 jobs:
@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: write   # needed to commit mws_market_context.md back to repo
+      contents: write   # needed to commit precomputed targets + policy runtime back to repo
 
     steps:
       - name: Checkout repository
@@ -44,7 +44,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run MWS portfolio analysis
+      - name: Run MWS analytics + send compliance digest
+        # Default (SKIP_LLM=true): runs Python analytics, generates equity chart,
+        # writes mws_precomputed_targets.json + mws_policy_runtime.json, and sends
+        # a compliance digest email (sleeve status + Python-computed trade candidates).
+        # Trade proposals with live news overlay are produced by the 10 AM Claude Code
+        # session (WebSearch access required). To trigger an on-demand full LLM run:
+        # GitHub Actions → MWS Portfolio Run → Run workflow → set skip_llm=false.
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # Optional: set ANTHROPIC_MODEL secret to override default model
@@ -53,16 +59,17 @@ jobs:
           GMAIL_FROM: ${{ secrets.GMAIL_FROM }}
           GMAIL_TO: ${{ secrets.GMAIL_TO }}
           TRIGGER_REASON: ${{ github.event.inputs.trigger_reason || 'scheduled' }}
-          SKIP_LLM: ${{ github.event.inputs.skip_llm || 'false' }}
+          SKIP_LLM: ${{ github.event.inputs.skip_llm || 'true' }}
           MPLBACKEND: Agg   # headless matplotlib — no display needed
         run: python mws_runner.py
 
       - name: Commit run outputs back to repo
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "auto: MWS run output ${{ env.TODAY }} [skip ci]"
+          commit_message: "auto: MWS compliance digest [skip ci]"
           file_pattern: |
-            mws_market_context.md
+            mws_precomputed_targets.json
+            mws_policy_runtime.json
             mws_run_results.csv
           commit_user_name: "MWS GitHub Runner"
           commit_user_email: "github-actions[bot]@users.noreply.github.com"
