@@ -107,7 +107,7 @@ def run_analytics() -> dict:
     gate_cfg = (policy.get("execution_gates", {}) or {}).get("short_term_confirmation", {})
     if gate_cfg.get("enabled", False):
         for ticker in candidates:
-            t_hist = hist[hist["Ticker"] == ticker].sort_values("Date")
+            t_hist = hist[[ticker]].dropna() if ticker in hist.columns else pd.DataFrame()
             if len(t_hist) < 5:
                 continue
             result = mws_analytics.check_execution_gate(
@@ -590,7 +590,7 @@ def _build_portfolio_tables(analytics: dict) -> str:
 
         # ── Per-ticker price / MV ─────────────────────────────────────────────
         fixed_raw = (policy.get("governance", {}) or {}).get("fixed_asset_prices", {}) or {}
-        latest_px = hist.sort_values("Date").groupby("Ticker")["AdjClose"].last()
+        latest_px = hist.iloc[-1]
 
         def _get_price(ticker: str) -> float:
             entry = fixed_raw.get(ticker)

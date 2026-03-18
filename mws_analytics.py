@@ -74,8 +74,9 @@ def _history_is_stale(history_csv: str) -> bool:
     expected trading date, meaning prices need to be refreshed.
     """
     try:
-        df = pd.read_csv(history_csv, usecols=["Date"], parse_dates=["Date"])
-        latest = df["Date"].max().strftime("%Y-%m-%d")
+        # Wide format: Date is the index (first column); read only that column
+        df = pd.read_csv(history_csv, index_col=0, parse_dates=True, usecols=[0])
+        latest = df.index.max().strftime("%Y-%m-%d")
         return latest < _todays_trading_date()
     except Exception:
         return False  # if we can't read the file, let load_system_files handle it
@@ -223,34 +224,15 @@ def load_system_files() -> Tuple[dict, pd.DataFrame, pd.DataFrame]:
     policy = _load_json(POLICY_FILENAME)
 
     try:
-        hist = pd.read_csv(HISTORY_CSV)
-        hist.columns = [c.strip() for c in hist.columns]
+        # Wide format: Date index, one column per ticker
+        hist = pd.read_csv(HISTORY_CSV, index_col="Date", parse_dates=True)
+        hist.columns = [c.strip().upper() for c in hist.columns]
+        hist = hist.apply(pd.to_numeric, errors="coerce")
+        hist = hist.sort_index()
         hold = pd.read_csv(HOLDINGS_CSV)
         hold.columns = [c.strip() for c in hold.columns]
     except Exception as e:
         _fatal(f"[FATAL] CSV Corruption: {e}")
-
-    # Standardize history column names: Date, Ticker, AdjClose
-    for col, lower in [("Date", "date"), ("Ticker", "ticker")]:
-        if col not in hist.columns:
-            for c in hist.columns:
-                if c.lower() == lower:
-                    hist.rename(columns={c: col}, inplace=True)
-                    break
-
-    price_col = next(
-        (c for c in ["AdjClose", "adjclose", "Close", "close", "Price", "price"] if c in hist.columns),
-        None
-    )
-    if price_col is None:
-        _fatal("[FATAL] HISTORY_CSV missing a price column (AdjClose/Close/Price).")
-    if price_col != "AdjClose":
-        hist.rename(columns={price_col: "AdjClose"}, inplace=True)
-
-    hist["Date"]     = pd.to_datetime(hist["Date"], errors="coerce")
-    hist["Ticker"]   = hist["Ticker"].astype(str).str.strip().str.upper()
-    hist["AdjClose"] = pd.to_numeric(hist["AdjClose"], errors="coerce")
-    hist = hist.dropna(subset=["Date", "Ticker", "AdjClose"])
 
     if hist.empty:
         _fatal("[FATAL] HISTORY_CSV has no valid rows after parsing.")
@@ -340,9 +322,9 @@ def run_mws_audit(policy: dict, hist: pd.DataFrame, hold: pd.DataFrame):
 
     policy_required = get_policy_required_tickers(policy)
     tc = policy.get("ticker_constraints", {}) or {}
-    have_hist = set(hist["Ticker"].unique())
+    have_hist = set(hist.columns)
 
-    max_date = hist["Date"].max()
+    max_date = hist.index.max()
     logger.info("AUDIT: UniverseMax=%s", max_date.date())
 
     held_set = get_held_tickers(hold)
@@ -376,8 +358,8 @@ def calculate_portfolio_value(policy: dict, hold: pd.DataFrame, hist: pd.DataFra
     """
     print("[LOG] Phase 2: Calculating Portfolio Value...")
 
-    latest_prices = hist.sort_values("Date").groupby("Ticker").last()["AdjClose"]
-    asof = str(hist["Date"].max().date())
+    latest_prices = hist.iloc[-1]   # hist is sorted by Date index; last row = most recent
+    asof = str(hist.index.max().date())
     policy_version = policy.get("meta", {}).get("policy_version", "unknown")
 
     fixed_raw = (policy.get("governance", {}) or {}).get("fixed_asset_prices", {}) or {}
@@ -497,21 +479,20 @@ def _aligned_total_return(prices: pd.Series) -> Optional[float]:
 
 def compute_alpha_vs_proxy(hist: pd.DataFrame, ticker: str, proxy: str, start_date: pd.Timestamp) -> Optional[float]:
     T, P = ticker.upper(), proxy.upper()
-    t_df = hist[(hist["Ticker"] == T) & (hist["Date"] >= start_date)].sort_values("Date")
-    p_df = hist[(hist["Ticker"] == P) & (hist["Date"] >= start_date)].sort_values("Date")
-    if t_df.empty or p_df.empty:
+    if T not in hist.columns or P not in hist.columns:
         return None
 
-    common = np.intersect1d(
-        t_df["Date"].values.astype("datetime64[ns]"),
-        p_df["Date"].values.astype("datetime64[ns]")
-    )
-    if len(common) < 2:
+    t_s = hist.loc[start_date:, T].dropna()
+    p_s = hist.loc[start_date:, P].dropna()
+    if len(t_s) < 2 or len(p_s) < 2:
         return None
 
-    idx = pd.to_datetime(common)
-    tr_t = _aligned_total_return(t_df.set_index("Date").loc[idx]["AdjClose"])
-    tr_p = _aligned_total_return(p_df.set_index("Date").loc[idx]["AdjClose"])
+    idx = t_s.index.intersection(p_s.index)
+    if len(idx) < 2:
+        return None
+
+    tr_t = _aligned_total_return(t_s.loc[idx])
+    tr_p = _aligned_total_return(p_s.loc[idx])
     if tr_t is None or tr_p is None:
         return None
     return tr_t - tr_p
@@ -552,18 +533,18 @@ def generate_rankings(policy: dict, hist: pd.DataFrame, candidates: List[str], h
 
     # ── Anchor price series for residual_3m component ────────────────────────
     anchor_ticker = str(policy.get("corr_anchor_ticker", "VTI")).upper()
-    anchor_data = hist[hist["Ticker"] == anchor_ticker].sort_values("Date")
     anchor_prices: pd.Series = (
-        anchor_data.set_index("Date")["AdjClose"] if not anchor_data.empty else pd.Series(dtype=float)
+        hist[anchor_ticker].dropna() if anchor_ticker in hist.columns else pd.Series(dtype=float)
     )
 
     # ── Compute raw blend score per candidate ────────────────────────────────
     rows: List[dict] = []
     for t in candidates:
-        t_data = hist[hist["Ticker"] == t].sort_values("Date")
-        if t_data.empty:
+        if t not in hist.columns:
             continue
-        prices = t_data.set_index("Date")["AdjClose"]
+        prices = hist[t].dropna()
+        if prices.empty:
+            continue
 
         tr12   = _compute_tr12m(prices)
         slope6 = _compute_slope_6m(prices)
@@ -754,9 +735,13 @@ def update_performance_log(
         return
 
     # ── Fast price lookup: (date_str, TICKER) → float ────────────────────────
+    # hist is wide format: DatetimeIndex rows, ticker columns
     price_map: Dict[Tuple[str, str], float] = {}
-    for row in hist.itertuples(index=False):
-        price_map[(str(row.Date)[:10], str(row.Ticker).upper())] = float(row.AdjClose)
+    for date_idx, price_row in hist.iterrows():
+        date_str = str(date_idx)[:10]
+        for tkr, px in price_row.items():
+            if pd.notna(px):
+                price_map[(date_str, str(tkr).upper())] = float(px)
 
     # ── Holdings snapshot for portfolio value approximation ───────────────────
     fixed_prices = (policy.get("governance", {}).get("fixed_asset_prices", {}) or {})
@@ -826,7 +811,7 @@ def update_performance_log(
 
     all_trade_dates = sorted({
         str(d)[:10]
-        for d in hist["Date"].unique()
+        for d in hist.index
         if str(d)[:10] >= chart_start
     })
     if not all_trade_dates:
@@ -1152,8 +1137,7 @@ def check_execution_gate(
 
     # ── Compute EWMA vol_2d from price history ────────────────────────────────
     span   = int(gate_cfg.get("ewma_span_days", 126))
-    t_data = hist[hist["Ticker"] == ticker].sort_values("Date")
-    if t_data.empty:
+    if ticker not in hist.columns:
         return {"action": "proceed",
                 "reason": f"no_price_history_for_{ticker}",
                 "z_score": None, "threshold": None,
@@ -1161,7 +1145,7 @@ def check_execution_gate(
                 "max_defer_days": max_defer_days,
                 "vol_clamp_type": "n/a", "raw_vol_2d": None, "effective_vol_2d": None}
 
-    prices = t_data.set_index("Date")["AdjClose"]
+    prices = hist[ticker].dropna()
     vol_2d = compute_ewma_vol_2d(prices, span=span)
     if vol_2d is None or vol_2d == 0:
         return {"action": "proceed",

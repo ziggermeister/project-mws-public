@@ -326,8 +326,8 @@ REQUIRED_DISPLAY: Set[str] = {
 if INCREMENTAL_DAYS is not None:
     if OUT_FILE.exists():
         try:
-            existing = pd.read_csv(OUT_FILE, parse_dates=["Date"])
-            last_date = existing["Date"].max()
+            existing = pd.read_csv(OUT_FILE, index_col="Date", parse_dates=True)
+            last_date = existing.index.max()
             fetch_start = (last_date - timedelta(days=5)).strftime("%Y-%m-%d")
             print(f"Incremental mode: last date in CSV = {last_date.date()}, "
                   f"fetching from {fetch_start} (5-day overlap buffer)")
@@ -345,11 +345,11 @@ else:
 
 # ── Purge tickers no longer in the required set ───────────────────────────────
 if not existing.empty:
-    existing_tickers = set(existing["Ticker"].str.strip().str.upper().unique())
+    existing_tickers = {c.strip().upper() for c in existing.columns}
     purge = existing_tickers - {t.upper() for t in REQUIRED_DISPLAY}
     if purge:
         print(f"\n🗑️  Purging {len(purge)} retired ticker(s) from history: {sorted(purge)}")
-        existing = existing[~existing["Ticker"].str.strip().str.upper().isin(purge)]
+        existing = existing.drop(columns=[c for c in existing.columns if c.strip().upper() in purge])
     # Report any tickers newly added to the universe (not yet in history)
     new_tickers = {t.upper() for t in REQUIRED_DISPLAY} - existing_tickers
     if new_tickers:
@@ -400,31 +400,43 @@ fresh = pd.concat(frames, ignore_index=True)
 fresh["Date"] = pd.to_datetime(fresh["Date"])
 
 if not existing.empty and INCREMENTAL_DAYS is not None:
-    # Drop overlap window from existing (already purged above), then concat fresh
-    cutoff = fresh["Date"].min()
-    base = existing[existing["Date"] < cutoff]
-    long = pd.concat([base, fresh], ignore_index=True)
-    print(f"\nMerged: {len(base):,} existing rows + {len(fresh):,} fresh rows")
+    # fresh is still long format; pivot to wide first
+    fresh_wide = fresh.pivot_table(index="Date", columns="Ticker", values="AdjClose", aggfunc="last")
+    fresh_wide.index = pd.to_datetime(fresh_wide.index)
+    cutoff = fresh_wide.index.min()
+    base = existing[existing.index < cutoff]
+    # Merge on union of columns
+    all_cols = sorted(set(base.columns) | set(fresh_wide.columns))
+    combined = pd.concat([base.reindex(columns=all_cols), fresh_wide.reindex(columns=all_cols)]).sort_index()
+    print(f"\nMerged: {len(base):,} existing rows + {len(fresh_wide):,} fresh rows")
+    long = combined  # wide format already
 else:
-    long = fresh
+    long = fresh  # still long format — will be pivoted in the write step below
 
-long = long.sort_values(["Ticker", "Date"]).drop_duplicates(
-    subset=["Ticker", "Date"], keep="last"
-).reset_index(drop=True)
+# ── Convert to wide format if still in long format (full fetch path) ──────────
+if "Ticker" in long.columns:
+    long = long.sort_values(["Ticker", "Date"]).drop_duplicates(subset=["Ticker", "Date"], keep="last")
+    long = long.pivot_table(index="Date", columns="Ticker", values="AdjClose", aggfunc="last").sort_index()
+else:
+    # Already wide (incremental merge path) — just ensure sorted
+    long = long.sort_index()
+
+long.index.name = "Date"
+long.columns.name = None
 
 # ── Write ─────────────────────────────────────────────────────────────────────
-long.to_csv(OUT_FILE, index=False)
+long.to_csv(OUT_FILE)
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 print(f"\n{'='*60}")
 print(f"✅  Saved {len(long):,} rows → {OUT_FILE.name}")
-print(f"    Date range : {long['Date'].min().date()} → {long['Date'].max().date()}")
-print(f"    Tickers    : {long['Ticker'].nunique()}")
+print(f"    Date range : {long.index.min().date()} → {long.index.max().date()}")
+print(f"    Tickers    : {long.shape[1]}")
 
 if failed:
     print(f"\n⚠️  Failed ({len(failed)}): {failed}")
 
-counts = long.groupby("Ticker")["Date"].count().sort_values(ascending=False)
+counts = long.notna().sum().sort_values(ascending=False)
 print("\nRows per ticker:")
 print(counts.to_string())
 
