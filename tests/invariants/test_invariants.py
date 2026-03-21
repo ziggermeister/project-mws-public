@@ -84,6 +84,7 @@ def _standard_setup(tmp_path, monkeypatch, drawdown_state="normal",
     monkeypatch.setattr(mws_runner,    "PRECOMPUTED_TARGETS_FILE",  targets_path)
 
     tpv = float(holdings["MV"].sum())
+    _dr = policy.get("drawdown_rules", {})
     analytics = {
         "policy":    policy,
         "holdings":  holdings,
@@ -91,7 +92,8 @@ def _standard_setup(tmp_path, monkeypatch, drawdown_state="normal",
         "total_val": tpv,
         "val_asof":  str(hist.index.max().date()),
         "drawdown":  {"state": drawdown_state, "drawdown": 0.0 if drawdown_state == "normal" else -0.23,
-                      "soft_limit": 0.22, "hard_limit": 0.30},
+                      "soft_limit": _dr.get("soft_limit", 0.22),
+                      "hard_limit": _dr.get("hard_limit", 0.30)},
         "df_scores": scores,
         "df_gates":  gates,
     }

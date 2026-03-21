@@ -17,45 +17,6 @@ import pandas as pd
 import pytest
 
 
-class _NumpyEncoder(json.JSONEncoder):
-    """JSON encoder that handles numpy scalar types (numpy.bool_, numpy.float64, etc.).
-
-    Python 3.9 raises TypeError for numpy.bool_ in the default encoder.
-    This custom encoder converts numpy scalars to their Python equivalents
-    so the runner's precomputed_targets.json write succeeds in test environments.
-    """
-    def default(self, obj):
-        if isinstance(obj, np.bool_):
-            return bool(obj)
-        if isinstance(obj, np.integer):
-            return int(obj)
-        if isinstance(obj, np.floating):
-            return float(obj)
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        return super().default(obj)
-
-
-def _patch_json_dump(monkeypatch):
-    """
-    Monkeypatch json.dump (and the json module used by mws_runner) to use
-    NumpyEncoder so numpy.bool_ values in precomputed_targets.json don't crash.
-
-    This is needed because:
-    - mws_runner.py calls json.dump(...) at line 1735
-    - The dict contains numpy.bool_ from pandas comparisons (e.g. _bucket_a_breach)
-    - Python 3.9's json encoder does not handle numpy.bool_
-    """
-    import mws_runner as _runner_mod
-    _orig_dump = json.dump
-
-    def _patched_dump(obj, fp, **kwargs):
-        kwargs.setdefault("cls", _NumpyEncoder)
-        return _orig_dump(obj, fp, **kwargs)
-
-    # Patch the json module that mws_runner imported
-    monkeypatch.setattr(_runner_mod.json, "dump", _patched_dump)
-
 # ── Make sure the repo root is on sys.path so mws_analytics and mws_runner import ──
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
@@ -441,13 +402,19 @@ def run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkey
     total_val = float(holdings["MV"].sum())
     val_asof  = str(hist.index.max().date())
 
+    _dr = policy.get("drawdown_rules", {})
     analytics = {
         "policy":       policy,
         "holdings":     holdings,
         "hist":         hist,
         "total_val":    total_val,
         "val_asof":     val_asof,
-        "drawdown":     {"state": "normal", "drawdown": 0.0, "soft_limit": 0.22, "hard_limit": 0.30},
+        "drawdown":     {
+            "state":      "normal",
+            "drawdown":   0.0,
+            "soft_limit": _dr.get("soft_limit", 0.22),
+            "hard_limit": _dr.get("hard_limit", 0.30),
+        },
         "df_scores":    scores,
         "df_gates":     gates,
     }
@@ -459,12 +426,6 @@ def run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkey
         raise RuntimeError(
             "_build_portfolio_tables() did not write precomputed_targets.json. "
             "Check runner logs above for the exception."
-        )
-
-    if not os.path.exists(targets_path):
-        raise RuntimeError(
-            "_build_portfolio_tables() did not write precomputed_targets.json (2nd check). "
-            "JSON serialization may have failed — check runner logs."
         )
 
     with open(targets_path, encoding="utf-8") as f:

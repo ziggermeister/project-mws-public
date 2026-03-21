@@ -118,7 +118,9 @@ class TestCheckDrawdownState:
         _write_twr_csv(path, cum)
         policy = _make_policy_correct(soft_limit=0.22, hard_limit=0.30)
         result = mws.check_drawdown_state(policy, perf_log=path)
-        assert result["state"] in ("soft_limit", "hard_limit")
+        assert result["state"] == "soft_limit", (
+            f"25% drawdown with soft=22%, hard=30% must yield 'soft_limit', got {result['state']!r}"
+        )
 
     def test_returns_policy_thresholds(self, tmp_path):
         """Returned dict contains soft_limit and hard_limit from policy."""

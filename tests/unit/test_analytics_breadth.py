@@ -20,16 +20,19 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import matplotlib; matplotlib.use("Agg")
 import mws_analytics as mws
+from tests.conftest import make_policy as _make_full_policy
 
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# ── Constants derived from canonical policy fixture ───────────────────────────
+# These are read from make_policy() so they stay in sync if policy defaults change.
 
 AI_TECH_TICKERS = ["SOXQ", "CHAT", "BOTZ", "DTCR", "GRID"]
 
-STRONG_FLOOR  = 0.22
-WEAK_FLOOR    = 0.12
-INFEAS_FLOOR  = 0.0
-HYST_DAYS     = 5
+_ai_tech_floor = _make_full_policy()["sleeves"]["level2"]["ai_tech"]["floor"]
+STRONG_FLOOR  = _ai_tech_floor["strong_breadth_floor"]   # 0.22
+WEAK_FLOOR    = _ai_tech_floor["weak_breadth_floor"]     # 0.12
+INFEAS_FLOOR  = _ai_tech_floor["infeasible_floor"]       # 0.0
+HYST_DAYS     = _ai_tech_floor["breadth_condition"]["hysteresis_days"]  # 5
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

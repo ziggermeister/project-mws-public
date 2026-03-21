@@ -215,6 +215,7 @@ class TestGoldenRegression:
         monkeypatch.setattr(mws_analytics, "HOLDINGS_CSV",             holdings_csv)
         monkeypatch.setattr(mws_runner,    "PRECOMPUTED_TARGETS_FILE",  targets_path)
 
+        _dr = policy.get("drawdown_rules", {})
         analytics = {
             "policy":    policy,
             "holdings":  holdings,
@@ -222,7 +223,8 @@ class TestGoldenRegression:
             "total_val": float(holdings["MV"].sum()),
             "val_asof":  str(hist.index.max().date()),
             "drawdown":  {"state": "soft_limit", "drawdown": -0.23,
-                          "soft_limit": 0.22, "hard_limit": 0.30},
+                          "soft_limit": _dr.get("soft_limit", 0.22),
+                          "hard_limit": _dr.get("hard_limit", 0.30)},
             "df_scores": scores,
             "df_gates":  gates,
         }
@@ -258,6 +260,7 @@ class TestGoldenRegression:
         monkeypatch.setattr(mws_analytics, "HOLDINGS_CSV",             holdings_csv)
         monkeypatch.setattr(mws_runner,    "PRECOMPUTED_TARGETS_FILE",  targets_path)
 
+        _dr = policy.get("drawdown_rules", {})
         analytics = {
             "policy":    policy,
             "holdings":  holdings,
@@ -265,7 +268,8 @@ class TestGoldenRegression:
             "total_val": float(holdings["MV"].sum()),
             "val_asof":  str(hist.index.max().date()),
             "drawdown":  {"state": "hard_limit", "drawdown": -0.31,
-                          "soft_limit": 0.22, "hard_limit": 0.30},
+                          "soft_limit": _dr.get("soft_limit", 0.22),
+                          "hard_limit": _dr.get("hard_limit", 0.30)},
             "df_scores": scores,
             "df_gates":  gates,
         }

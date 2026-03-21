@@ -227,7 +227,8 @@ class TestRunnerAction:
         monkeypatch.setattr(mws_analytics, "HOLDINGS_CSV",             holdings_csv)
         monkeypatch.setattr(mws_runner,    "PRECOMPUTED_TARGETS_FILE",  targets_path)
 
-        # Inject soft_limit drawdown state
+        # Inject soft_limit drawdown state — read thresholds from policy
+        _dr = policy.get("drawdown_rules", {})
         analytics = {
             "policy":    policy,
             "holdings":  holdings,
@@ -235,7 +236,8 @@ class TestRunnerAction:
             "total_val": float(holdings["MV"].sum()),
             "val_asof":  str(hist.index.max().date()),
             "drawdown":  {"state": "soft_limit", "drawdown": -0.23,
-                          "soft_limit": 0.22, "hard_limit": 0.30},
+                          "soft_limit": _dr.get("soft_limit", 0.22),
+                          "hard_limit": _dr.get("hard_limit", 0.30)},
             "df_scores": scores,
             "df_gates":  gates,
         }
