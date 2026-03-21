@@ -415,10 +415,17 @@ if INCREMENTAL_DAYS is not None:
             print(f"Incremental mode: last date in CSV = {last_date.date()}, "
                   f"fetching from {fetch_start} (5-day overlap buffer)")
             # Fast exit: skip fetch if CSV content already covers the expected
-            # last trading date. Uses data content (not mtime) so it works
-            # correctly on GitHub Actions where checkout always resets mtime
-            # to the current time, making mtime-based checks unreliable.
-            if last_date.strftime("%Y-%m-%d") >= todays_trading_date():
+            # last trading date AND the ticker universe matches the required set.
+            # Fix: previously only checked the date. If policy added/removed tickers
+            # since the last fetch the script would exit without backfilling or purging,
+            # causing missing-history errors and stale ranking inputs.
+            _existing_cols = {c.strip().upper() for c in existing.columns}
+            _required_cols = {t.upper() for t in REQUIRED_DISPLAY}
+            _universe_ok   = (_existing_cols == _required_cols)
+            if not _universe_ok:
+                print(f"⚠️  Ticker universe changed (CSV has {len(_existing_cols)}, "
+                      f"policy requires {len(_required_cols)}) — forcing fetch")
+            if last_date.strftime("%Y-%m-%d") >= todays_trading_date() and _universe_ok:
                 print(f"✅  {OUT_FILE.name} is already up-to-date through {last_date.date()} — no fetch needed")
                 # Write a sentinel timing entry so mws_benchmark.py knows we fast-exited
                 _fast_timing = BASE_DIR / "mws_benchmark_timing.json"

@@ -418,11 +418,14 @@ def run_mws_audit(policy: dict, hist: pd.DataFrame, hold: pd.DataFrame):
 
     held_set = get_held_tickers(hold)
 
-    # Ranking candidates: inducted/activated tickers with price history
+    # Ranking candidates: inducted tickers only. ACTIVATED tickers are explicitly
+    # marked eligible_for_momentum: false and eligible_for_allocation: false in policy.
+    # Including them distorts percentile ranks for valid allocated instruments.
+    # Held tickers (line below) are always included for reporting continuity.
     candidates: Set[str] = set()
     for t in tc:
         stage = get_ticker_stage(policy, t)
-        if stage in ["INDUCTED", "ACTIVATED"] and t in have_hist:
+        if stage == "INDUCTED" and t in have_hist:
             candidates.add(t)
 
     candidates |= held_set  # always include held for reporting continuity

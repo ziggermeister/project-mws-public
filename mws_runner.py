@@ -651,6 +651,13 @@ def _build_portfolio_tables(analytics: dict) -> str:
         bucket_a_mv = hold.loc[hold["Class"] == "bucket_a",        "MV"].sum()
         alloc_denom = total_val - overlay_mv - bucket_a_mv
 
+        # Fix: Bucket A enforcement. Policy: Bucket A (TREASURY_NOTE ≥ $45K) is the
+        # highest-precedence non-drawdown constraint. When breached, all discretionary
+        # buys (momentum + residual deployment) must be suppressed. Compliance buys
+        # for structural floor enforcement still execute — they take priority.
+        _bucket_a_min   = float((policy.get("bucket_a", {}) or {}).get("minimum_balance", 45000))
+        _bucket_a_breach = bucket_a_mv < _bucket_a_min
+
         # ── Bifurcated denominators — tactical cash management (v2.9.8) ──────
         # sizing_denom    = full deployable pie; cash stays visible so recovery
         #                   buys scale correctly when the abs-momentum filter lifts.
@@ -786,6 +793,20 @@ def _build_portfolio_tables(analytics: dict) -> str:
             gate_sell   = _gate.get("action_sell", "proceed")
             pct         = scores_by_ticker.get(ticker, {}).get("pct", 0.5)
             _dd_state   = dd.get("state", "normal")
+
+            # Fix: per-ticker min_total floor (TPV-based). Policy defines hard per-ticker
+            # floors independently of L2 sleeve floors (e.g. VTI: 10% TPV, VXUS: 4% TPV).
+            # The L2 sleeve floor can be satisfied while an individual ticker is below its
+            # own min_total (e.g. if VXUS is high and VTI low within core_equity).
+            # This check must come before L2 sleeve logic and is NOT blocked by stress_freeze
+            # (policy: "per-ticker min_total constraints remain in force during soft limit").
+            _tc_min = policy.get("ticker_constraints", {}).get(ticker, {})
+            _min_tot = _tc_min.get("min_total")
+            if _min_tot is not None:
+                _t_mv_cur   = float(hold.loc[hold["Ticker"] == ticker, "MV"].sum())
+                _t_tpv_pct  = _t_mv_cur / total_val if total_val > 0 else 0.0
+                if _t_tpv_pct < float(_min_tot) - 0.001:
+                    return "BUY", "#c8e6c9", "compliance_buy"
 
             # Spike-trim: large upward spike on a ticker that would be trimmed.
             # Must be evaluated after determining direction — moved below action logic.
@@ -1122,6 +1143,26 @@ def _build_portfolio_tables(analytics: dict) -> str:
                         _old_usd, _pfx = raw_trades[_t]
                         raw_trades[_t] = (_old_usd * _scale_s, _pfx)
 
+        # Fix: L1 sleeve cap enforcement. L2 sleeve caps are enforced above, but
+        # combined buys across multiple L2 children can still push the parent L1
+        # sleeve over its cap. Scale all buys in the L1 proportionally if needed.
+        for _l1n, _l1d in sleeves_l1.items():
+            _l1_cap_f = _l1d.get("cap")
+            if not _l1_cap_f:
+                continue  # stabilizers / overlays have no L1 cap
+            _l1_headroom = max(0.0, float(_l1_cap_f) * sizing_denom - _l1_mv(_l1n))
+            _l1_buy_t = [_t for _t, _d in action_items
+                         if _d["l1"] == _l1n and _d["label"] == "BUY"]
+            if not _l1_buy_t:
+                continue
+            _l1_buy_need = sum(raw_trades[_t][0] for _t in _l1_buy_t)
+            if _l1_buy_need <= _l1_headroom:
+                continue  # already within L1 cap — no scaling needed
+            _l1_scale = min(1.0, _l1_headroom / _l1_buy_need) if _l1_buy_need > 0 else 1.0
+            for _t in _l1_buy_t:
+                _old_usd, _pfx = raw_trades[_t]
+                raw_trades[_t] = (_old_usd * _l1_scale, _pfx)
+
         # Pass 2: budget-constrained waterfall
         # Reserves (ring-fenced before any discretionary spending):
         #   1. DEFER-BUY reserve: gated buys will fire within 10 days → keep cash
@@ -1195,24 +1236,38 @@ def _build_portfolio_tables(analytics: dict) -> str:
         _remaining_turnover   = max(0.0, _turnover_cap_usd - _turnover_used_comp)
         _mom_cash_scale       = (cash_for_discretionary / mom_buy_need) if mom_buy_need > 0 else 1.0
         _mom_turnover_scale   = (_remaining_turnover     / mom_buy_need) if mom_buy_need > 0 else 1.0
-        mom_buy_scale  = min(1.0, _mom_cash_scale, _mom_turnover_scale)
+        # Fix: suppress momentum buys when Bucket A is below minimum.
+        mom_buy_scale  = 0.0 if _bucket_a_breach else min(1.0, _mom_cash_scale, _mom_turnover_scale)
         cash_after_mom = cash_for_discretionary - mom_buy_need * mom_buy_scale
 
         # Phase 3: deploy residual to highest-momentum HOLD tickers within sleeve cap headroom.
-        # Greedy: highest-momentum HOLDs fill first up to their sleeve's cap headroom.
+        # Fix: suppress residual deployment when Bucket A is below minimum.
         deploy_items: list = []  # (ticker, d, deploy_usd, deploy_sh)
         residual = cash_after_mom
-        if residual > 500:
-            hold_candidates = sorted(
-                [
-                    (t, d) for t, d in ticker_data.items()
-                    if d["label"] in ("HOLD", "hold|abs_filter")
-                    # Absolute momentum filter (v2.9.7): residual only flows to positive-blend tickers
-                    and scores_by_ticker.get(t, {}).get("blend", 0.0) > 0
-                ],
-                key=lambda x: scores_by_ticker.get(x[0], {}).get("pct", 0.0),
-                reverse=True,
+        if residual > 500 and not _bucket_a_breach:
+            # Fix: policy says residual flows first to underweight high-momentum tickers,
+            # then VTI as explicit fallback. Sort non-VTI candidates by momentum percentile
+            # descending; VTI is appended last so it only receives cash no other ticker
+            # can absorb. "Underweight" is proxied by positive blend + sleeve cap headroom
+            # (already enforced per-ticker in the loop below).
+            _deploy_pool = [
+                (t, d) for t, d in ticker_data.items()
+                if d["label"] in ("HOLD", "hold|abs_filter")
+                and scores_by_ticker.get(t, {}).get("blend", 0.0) > 0
+                and t != "VTI"
+            ]
+            _deploy_pool.sort(key=lambda x: scores_by_ticker.get(x[0], {}).get("pct", 0.0), reverse=True)
+            # Append VTI last if it qualifies (positive blend, in HOLD)
+            _vti_entry = next(
+                ((t, d) for t, d in ticker_data.items()
+                 if t == "VTI"
+                 and d["label"] in ("HOLD", "hold|abs_filter")
+                 and scores_by_ticker.get(t, {}).get("blend", 0.0) > 0),
+                None,
             )
+            if _vti_entry:
+                _deploy_pool.append(_vti_entry)
+            hold_candidates = _deploy_pool
             for ticker, d in hold_candidates:
                 if residual < 100:
                     break
