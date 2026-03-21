@@ -191,3 +191,232 @@ class TestDrawdownStateTransitions:
         assert result_loose["state"] == "normal", (
             "Relaxed soft_limit=0.22 must NOT fire at 16% drawdown"
         )
+
+
+# ── Tests: update_and_check_drawdown_state (ITEM 1) ───────────────────────────
+
+def _make_scores_df(vti_raw=0.0):
+    """Build a minimal df_scores with VTI at a given RawScore."""
+    return pd.DataFrame([{
+        "Ticker":   "VTI",
+        "Score":    0.5,
+        "Pct":      0.5,
+        "RawScore": vti_raw,
+        "Alpha":    "N/A",
+        "AlphaVs":  "VTI",
+        "Sleeve":   "core_equity",
+        "Status":   "INDUCTED/HELD",
+    }])
+
+
+def _perf_path_with_drawdown(tmp_path, drawdown_pct, name="perf.csv"):
+    """Write a performance CSV that yields the specified drawdown and return path."""
+    path = str(tmp_path / name)
+    cum = _cum_series_with_transition(drawdown_pct, n_up1=80, n_down1=80, n_recovery=0)
+    _write_cum_twr(path, cum)
+    return path
+
+
+class TestDrawdownRecoveryStateMachine:
+    """
+    Tests for update_and_check_drawdown_state() — the stateful, persisted
+    version of check_drawdown_state() that tracks recovery counters.
+    """
+
+    def test_no_state_file_returns_clean_defaults(self, tmp_path):
+        """No JSON file → function returns state with counters at 0."""
+        state_path = str(tmp_path / "dd_state.json")
+        perf_path  = str(tmp_path / "perf.csv")
+        # Normal state (tiny drawdown)
+        _write_cum_twr(perf_path, _cum_series_with_transition(0.05, 50, 20, 0))
+
+        result = mws.update_and_check_drawdown_state(
+            _policy(), perf_path, pd.DataFrame(), state_path=state_path
+        )
+        assert result["consecutive_days_recovered"] == 0
+        assert result["vti_pos_mom_days"] == 0
+        assert "state" in result
+
+    def test_normal_state_keeps_counters_zero(self, tmp_path):
+        """In normal state (no drawdown): both counters stay 0."""
+        state_path = str(tmp_path / "dd_state.json")
+        perf_path  = str(tmp_path / "perf.csv")
+        _write_cum_twr(perf_path, _cum_series_with_transition(0.05, 50, 20, 0))
+
+        result = mws.update_and_check_drawdown_state(
+            _policy(), perf_path, _make_scores_df(vti_raw=0.5), state_path=state_path
+        )
+        assert result["state"] == "normal"
+        assert result["consecutive_days_recovered"] == 0
+        assert result["vti_pos_mom_days"] == 0
+
+    def test_stress_below_threshold_increments_consecutive_days(self, tmp_path, monkeypatch):
+        """soft_limit state + drawdown < 15% → consecutive_days_recovered increments."""
+        state_path = str(tmp_path / "dd_state.json")
+        perf_path  = str(tmp_path / "perf.csv")
+        # 24% drawdown → soft_limit
+        _write_cum_twr(perf_path, _cum_series_with_transition(0.24, 80, 80, 0))
+
+        # Monkeypatch check_drawdown_state to return soft_limit with dd < 0.15
+        monkeypatch.setattr(mws, "check_drawdown_state", lambda policy, perf_log: {
+            "state": "soft_limit", "drawdown": -0.10,  # 10% < 15% threshold
+            "soft_limit": 0.22, "hard_limit": 0.30, "recovery": 0.15,
+        })
+
+        result = mws.update_and_check_drawdown_state(
+            _policy(), perf_path, _make_scores_df(vti_raw=-0.1), state_path=state_path
+        )
+        assert result["consecutive_days_recovered"] == 1, (
+            "First day below recovery threshold in soft_limit should set counter to 1"
+        )
+
+    def test_stress_above_threshold_resets_consecutive_days(self, tmp_path, monkeypatch):
+        """soft_limit state + drawdown > 15% → counter stays 0."""
+        state_path = str(tmp_path / "dd_state.json")
+        perf_path  = str(tmp_path / "perf.csv")
+
+        monkeypatch.setattr(mws, "check_drawdown_state", lambda policy, perf_log: {
+            "state": "soft_limit", "drawdown": -0.20,  # 20% > 15% threshold
+            "soft_limit": 0.22, "hard_limit": 0.30, "recovery": 0.15,
+        })
+
+        result = mws.update_and_check_drawdown_state(
+            _policy(), perf_path, _make_scores_df(vti_raw=-0.1), state_path=state_path
+        )
+        assert result["consecutive_days_recovered"] == 0
+
+    def test_recovery_triggers_at_10_consecutive_days(self, tmp_path, monkeypatch):
+        """10 consecutive days with dd < 0.15 in soft_limit → recovery_triggered=True."""
+        state_path = str(tmp_path / "dd_state.json")
+        perf_path  = str(tmp_path / "perf.csv")
+
+        monkeypatch.setattr(mws, "check_drawdown_state", lambda policy, perf_log: {
+            "state": "soft_limit", "drawdown": -0.10,
+            "soft_limit": 0.22, "hard_limit": 0.30, "recovery": 0.15,
+        })
+
+        _dates = [f"2026-03-{10+i:02d}" for i in range(11)]
+        result = None
+        for i, d in enumerate(_dates):
+            monkeypatch.setattr(mws, "_todays_trading_date", lambda _d=d: _d)
+            result = mws.update_and_check_drawdown_state(
+                _policy(), perf_path, _make_scores_df(vti_raw=-0.1), state_path=state_path
+            )
+
+        assert result["recovery_triggered"] is True, (
+            "After 10+ consecutive days below threshold, recovery_triggered must be True"
+        )
+        assert result["state"] == "normal", "State must flip to normal on recovery"
+
+    def test_vti_positive_increments_vti_counter(self, tmp_path, monkeypatch):
+        """In soft_limit with positive VTI RawScore → vti_pos_mom_days increments."""
+        state_path = str(tmp_path / "dd_state.json")
+        perf_path  = str(tmp_path / "perf.csv")
+
+        monkeypatch.setattr(mws, "check_drawdown_state", lambda policy, perf_log: {
+            "state": "soft_limit", "drawdown": -0.25,
+            "soft_limit": 0.22, "hard_limit": 0.30, "recovery": 0.15,
+        })
+
+        result = mws.update_and_check_drawdown_state(
+            _policy(), perf_path, _make_scores_df(vti_raw=0.3), state_path=state_path
+        )
+        assert result["vti_pos_mom_days"] == 1, (
+            "Positive VTI RawScore in soft_limit should set vti_pos_mom_days to 1"
+        )
+
+    def test_vti_recovery_triggers_at_5_days(self, tmp_path, monkeypatch):
+        """5 consecutive days with positive VTI → state=normal on day 5."""
+        state_path = str(tmp_path / "dd_state.json")
+        perf_path  = str(tmp_path / "perf.csv")
+
+        monkeypatch.setattr(mws, "check_drawdown_state", lambda policy, perf_log: {
+            "state": "soft_limit", "drawdown": -0.25,
+            "soft_limit": 0.22, "hard_limit": 0.30, "recovery": 0.15,
+        })
+
+        _dates = [f"2026-03-{10+i:02d}" for i in range(5)]
+        result = None
+        for d in _dates:
+            monkeypatch.setattr(mws, "_todays_trading_date", lambda _d=d: _d)
+            result = mws.update_and_check_drawdown_state(
+                _policy(), perf_path, _make_scores_df(vti_raw=0.4), state_path=state_path
+            )
+
+        assert result["recovery_triggered"] is True, (
+            "5 consecutive days of positive VTI momentum must trigger recovery"
+        )
+        assert result["state"] == "normal"
+
+    def test_vti_counter_resets_on_negative(self, tmp_path, monkeypatch):
+        """VTI goes negative mid-streak → counter resets to 0."""
+        state_path = str(tmp_path / "dd_state.json")
+        perf_path  = str(tmp_path / "perf.csv")
+
+        monkeypatch.setattr(mws, "check_drawdown_state", lambda policy, perf_log: {
+            "state": "soft_limit", "drawdown": -0.25,
+            "soft_limit": 0.22, "hard_limit": 0.30, "recovery": 0.15,
+        })
+
+        # Day 1: positive VTI
+        monkeypatch.setattr(mws, "_todays_trading_date", lambda: "2026-03-10")
+        mws.update_and_check_drawdown_state(
+            _policy(), perf_path, _make_scores_df(vti_raw=0.4), state_path=state_path
+        )
+
+        # Day 2: negative VTI
+        monkeypatch.setattr(mws, "_todays_trading_date", lambda: "2026-03-11")
+        result = mws.update_and_check_drawdown_state(
+            _policy(), perf_path, _make_scores_df(vti_raw=-0.2), state_path=state_path
+        )
+        assert result["vti_pos_mom_days"] == 0, "Negative VTI must reset vti_pos_mom_days to 0"
+
+    def test_idempotent_on_same_day(self, tmp_path, monkeypatch):
+        """Call twice with same date → counters do not double-increment."""
+        state_path = str(tmp_path / "dd_state.json")
+        perf_path  = str(tmp_path / "perf.csv")
+
+        monkeypatch.setattr(mws, "check_drawdown_state", lambda policy, perf_log: {
+            "state": "soft_limit", "drawdown": -0.10,
+            "soft_limit": 0.22, "hard_limit": 0.30, "recovery": 0.15,
+        })
+        monkeypatch.setattr(mws, "_todays_trading_date", lambda: "2026-03-15")
+
+        mws.update_and_check_drawdown_state(
+            _policy(), perf_path, _make_scores_df(vti_raw=0.3), state_path=state_path
+        )
+        result = mws.update_and_check_drawdown_state(
+            _policy(), perf_path, _make_scores_df(vti_raw=0.3), state_path=state_path
+        )
+        # Both counters should be 1 (from first call), not 2 (idempotent)
+        assert result["consecutive_days_recovered"] <= 1
+        assert result["vti_pos_mom_days"] <= 1
+
+    def test_no_tmp_file_left_after_write(self, tmp_path, monkeypatch):
+        """Atomic write must not leave a .tmp file behind."""
+        state_path = str(tmp_path / "dd_state.json")
+        perf_path  = str(tmp_path / "perf.csv")
+        _write_cum_twr(perf_path, _cum_series_with_transition(0.05, 50, 20, 0))
+
+        mws.update_and_check_drawdown_state(
+            _policy(), perf_path, pd.DataFrame(), state_path=state_path
+        )
+        assert not os.path.exists(state_path + ".tmp"), (
+            "Atomic write must clean up the .tmp file after os.replace"
+        )
+
+    def test_state_file_has_required_keys(self, tmp_path):
+        """Output JSON must contain all required keys."""
+        state_path = str(tmp_path / "dd_state.json")
+        perf_path  = str(tmp_path / "perf.csv")
+        _write_cum_twr(perf_path, _cum_series_with_transition(0.05, 50, 20, 0))
+
+        result = mws.update_and_check_drawdown_state(
+            _policy(), perf_path, pd.DataFrame(), state_path=state_path
+        )
+        required_keys = {
+            "date", "state", "drawdown",
+            "consecutive_days_recovered", "vti_pos_mom_days", "recovery_triggered",
+        }
+        missing = required_keys - set(result.keys())
+        assert not missing, f"Missing keys in drawdown state: {missing}"

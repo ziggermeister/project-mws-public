@@ -58,6 +58,8 @@ MARKET_CTX_MD      = "mws_market_context.md"
 CHART_FILENAME     = "mws_equity_curve.png"
 BREADTH_STATE_JSON        = "mws_breadth_state.json"
 TACTICAL_CASH_STATE_JSON  = "mws_tactical_cash_state.json"
+DRAWDOWN_STATE_JSON       = "mws_drawdown_state.json"
+REBALANCE_LEDGER_JSON     = "mws_rebalance_ledger.json"
 POLICY_RUNTIME_JSON       = "mws_policy_runtime.json"      # stripped policy for LLM (auto-generated)
 PRECOMPUTED_TARGETS_JSON  = "mws_precomputed_targets.json" # trade table for LLM (auto-generated)
 
@@ -1191,6 +1193,113 @@ def check_drawdown_state(policy: dict, perf_log: str = PERF_LOG_CSV) -> dict:
         return default
 
 
+def update_and_check_drawdown_state(
+    policy: dict,
+    perf_log: pd.DataFrame,
+    df_scores: pd.DataFrame,
+    state_path: str = DRAWDOWN_STATE_JSON,
+) -> dict:
+    """
+    Stateful, persisted version of check_drawdown_state().
+
+    Calls check_drawdown_state() for the current point-in-time drawdown dict,
+    then maintains two recovery counters:
+      1. consecutive_days_recovered — days below recovery threshold while in stress
+      2. vti_pos_mom_days — consecutive days VTI has positive RawScore while in stress
+
+    Recovery triggers when either counter reaches its threshold (10 or 5 days).
+    State is persisted to state_path using atomic write (.tmp + os.replace).
+    Idempotent per trading day.
+
+    Returns a dict with all drawdown fields plus counter state.
+    """
+    dd = check_drawdown_state(policy, perf_log)
+    today_str = _todays_trading_date()
+
+    # Load existing persisted state
+    existing: dict = {}
+    if os.path.exists(state_path):
+        try:
+            with open(state_path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except Exception as exc:
+            logger.warning("drawdown_state: could not load %s (%s)", state_path, exc)
+
+    # Idempotent: if already updated today, return stored state
+    if existing.get("date") == today_str:
+        return existing
+
+    current_state = dd["state"]
+    current_dd_abs = abs(dd.get("drawdown", 0.0))
+    in_stress = current_state in ("soft_limit", "hard_limit")
+    recovery_threshold = float(
+        policy.get("drawdown_rules", {}).get("recovery_condition", {}).get("drawdown_below", 0.15)
+    )
+
+    # Counter 1: consecutive days below recovery threshold
+    if in_stress and current_dd_abs < recovery_threshold:
+        consecutive_days_recovered = existing.get("consecutive_days_recovered", 0) + 1
+    else:
+        consecutive_days_recovered = 0
+
+    # Counter 2: VTI positive momentum consecutive days
+    _vti_raw = 0.0
+    if (df_scores is not None
+            and not df_scores.empty
+            and "Ticker" in df_scores.columns
+            and "RawScore" in df_scores.columns):
+        _vti_rows = df_scores[df_scores["Ticker"] == "VTI"]
+        if not _vti_rows.empty:
+            _vti_raw = float(pd.to_numeric(_vti_rows["RawScore"].iloc[0], errors="coerce") or 0.0)
+
+    if in_stress and _vti_raw > 0:
+        vti_pos_mom_days = existing.get("vti_pos_mom_days", 0) + 1
+    else:
+        vti_pos_mom_days = 0
+
+    # Check recovery conditions
+    recovery_triggered = in_stress and (
+        consecutive_days_recovered >= 10 or vti_pos_mom_days >= 5
+    )
+
+    if recovery_triggered:
+        reason = (
+            f"consecutive_days_recovered={consecutive_days_recovered}"
+            if consecutive_days_recovered >= 10
+            else f"vti_pos_mom_days={vti_pos_mom_days}"
+        )
+        logger.info(
+            "Drawdown recovery triggered (%s) — overriding state from %s → normal",
+            reason, current_state,
+        )
+        current_state = "normal"
+
+    result = {
+        "date":                       today_str,
+        "state":                      current_state,
+        "drawdown":                   dd.get("drawdown", 0.0),
+        "soft_limit":                 dd["soft_limit"],
+        "hard_limit":                 dd["hard_limit"],
+        "consecutive_days_recovered": consecutive_days_recovered,
+        "vti_pos_mom_days":           vti_pos_mom_days,
+        "recovery_triggered":         recovery_triggered,
+    }
+
+    try:
+        _tmp = state_path + ".tmp"
+        with open(_tmp, "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2)
+        os.replace(_tmp, state_path)
+        logger.info(
+            "drawdown_state: state=%s, consecutive_days_recovered=%d, vti_pos_mom_days=%d",
+            current_state, consecutive_days_recovered, vti_pos_mom_days,
+        )
+    except Exception as exc:
+        logger.warning("drawdown_state: could not write %s (%s)", state_path, exc)
+
+    return result
+
+
 # ==============================================================================
 # 7) Main
 # ==============================================================================
@@ -1699,6 +1808,58 @@ def generate_policy_runtime(
     return runtime
 
 
+def load_rebalance_ledger(ledger_path: str = REBALANCE_LEDGER_JSON) -> dict:
+    """Load YTD rebalance ledger, pruning events from prior calendar years."""
+    current_year = str(datetime.today().year)
+    ledger: dict = {"events": [], "ytd_traded_usd": 0.0}
+    if os.path.exists(ledger_path):
+        try:
+            with open(ledger_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            # Keep only current-year events
+            ledger["events"] = [
+                e for e in raw.get("events", [])
+                if str(e.get("date", "")).startswith(current_year)
+            ]
+        except Exception as exc:
+            logger.warning("rebalance_ledger: could not load %s (%s)", ledger_path, exc)
+    ledger["ytd_traded_usd"] = sum(e.get("traded_usd", 0.0) for e in ledger["events"])
+    return ledger
+
+
+def append_rebalance_event(
+    traded_usd: float,
+    tpv: float,
+    ledger_path: str = REBALANCE_LEDGER_JSON,
+) -> dict:
+    """Append a rebalance event to the ledger. Idempotent per calendar day."""
+    today_str = _todays_trading_date()
+    ledger = load_rebalance_ledger(ledger_path)
+    # Idempotency: if today already has an entry, skip (prevents double-recording)
+    if any(e.get("date") == today_str for e in ledger["events"]):
+        logger.info("rebalance_ledger: entry for %s already exists, skipping", today_str)
+        return ledger
+    ledger["events"].append({
+        "date":           today_str,
+        "traded_usd":     round(traded_usd, 2),
+        "tpv_at_event":   round(tpv, 2),
+        "turnover_pct":   round(traded_usd / tpv * 100, 2) if tpv > 0 else 0.0,
+    })
+    ledger["ytd_traded_usd"] = sum(e.get("traded_usd", 0.0) for e in ledger["events"])
+    try:
+        _tmp = ledger_path + ".tmp"
+        with open(_tmp, "w", encoding="utf-8") as f:
+            json.dump(ledger, f, indent=2)
+        os.replace(_tmp, ledger_path)
+        logger.info(
+            "rebalance_ledger: appended event traded_usd=%.2f, ytd_total=%.2f",
+            traded_usd, ledger["ytd_traded_usd"],
+        )
+    except Exception as exc:
+        logger.warning("rebalance_ledger: could not write %s (%s)", ledger_path, exc)
+    return ledger
+
+
 def main() -> None:
     policy, hist, hold = load_system_files()
 
@@ -1723,6 +1884,10 @@ def main() -> None:
     _ = calculate_portfolio_value(policy, hold, hist)
 
     df_scores = generate_rankings(policy, hist, candidates, hold)
+
+    # Update persisted drawdown state (recovery counters) after rankings are available
+    update_and_check_drawdown_state(policy, PERF_LOG_CSV, df_scores)
+
     compute_and_persist_breadth_states(policy, df_scores)
     compute_and_persist_tactical_cash_state(df_scores)
     generate_policy_runtime(policy)          # token-lean policy copy for interactive LLM runs

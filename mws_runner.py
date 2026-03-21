@@ -107,6 +107,13 @@ def run_analytics() -> dict:
 
     log.info("Generating momentum rankings...")
     df_scores = mws_analytics.generate_rankings(policy, hist, candidates, hold)
+
+    # Update persisted drawdown recovery state after rankings are available
+    try:
+        dd = mws_analytics.update_and_check_drawdown_state(policy, mws_analytics.PERF_LOG_CSV, df_scores=df_scores)
+    except Exception as _dds_err:
+        log.warning("update_and_check_drawdown_state failed (non-fatal): %s", _dds_err)
+
     mws_analytics.generate_policy_runtime(policy)   # regenerate stripped policy for LLM
 
     # Per-ticker execution gate — compute for BOTH BUY and SELL directions.
@@ -1209,16 +1216,30 @@ def _build_portfolio_tables(analytics: dict) -> str:
         # naturally in the next rebalance cycle when the compliance check re-fires.
         _exec_policy         = policy.get("governance", {}).get("execution", {})
         _in_soft_limit       = dd.get("state") == "soft_limit"
+        _in_hard_limit       = dd.get("state") == "hard_limit"
         _turnover_key        = "max_turnover_stress" if _in_soft_limit else "max_turnover"
         _max_turnover_pct    = float(_exec_policy.get(_turnover_key, 0.20))
         _turnover_cap_usd    = total_val * _max_turnover_pct
+
+        # Annual YTD cap enforcement
+        _annual_cap_pct  = float(_exec_policy.get("max_turnover_annualized", 0.60))
+        _annual_cap_usd  = total_val * _annual_cap_pct
+        _ledger          = mws_analytics.load_rebalance_ledger(ledger_path=mws_analytics.REBALANCE_LEDGER_JSON)
+        _ytd_used        = float(_ledger.get("ytd_traded_usd", 0.0))
+        _ytd_remaining   = max(0.0, _annual_cap_usd - _ytd_used)
+        if _ytd_remaining < _turnover_cap_usd and not _in_hard_limit:
+            log.warning(
+                "Annual turnover cap binding: ytd_used=%.2f ytd_remaining=%.2f capping event to %.2f",
+                _ytd_used, _ytd_remaining, _ytd_remaining,
+            )
+            _turnover_cap_usd = _ytd_remaining
+
         _cash_lim_scale      = (total_available   / comp_buy_need) if comp_buy_need > 0 else 1.0
         _turnover_lim_scale  = (_turnover_cap_usd / comp_buy_need) if comp_buy_need > 0 else 1.0
         # Fix (hard_limit turnover cap bypass): During a hard_limit drawdown, compliance
         # buys are emergency floor-restoration trades (Priority 1) and are explicitly
         # policy-exempt from the turnover cap. Without this check, the 20% cap would
         # clip the exact trades that are most critical in a severe drawdown.
-        _in_hard_limit       = dd.get("state") == "hard_limit"
         # Fix: Bucket A breach (Priority 2) overrides all buys — including compliance
         # buys (Priority 3). Policy: "halt_all_buys_restore_bucket_a". Previously only
         # momentum buys and DEPLOY were suppressed; compliance buys still executed,
@@ -1310,6 +1331,24 @@ def _build_portfolio_tables(analytics: dict) -> str:
                 residual -= deploy_usd
 
         cash_after_all = residual  # ≈ 0 when fully deployed; ≈ policy_reserve when reserve active
+
+        # Record this event in the rebalance ledger (annual YTD tracking)
+        _event_traded_usd = (
+            comp_buy_need * comp_buy_scale
+            + mom_buy_need * mom_buy_scale
+            + sum(u for _, _, u, _ in deploy_items)
+            + comp_sell_proceeds
+            + mom_sell_proceeds
+        )
+        if _event_traded_usd > 0:
+            try:
+                mws_analytics.append_rebalance_event(
+                    traded_usd=_event_traded_usd,
+                    tpv=total_val,
+                    ledger_path=mws_analytics.REBALANCE_LEDGER_JSON,
+                )
+            except Exception as _led_err:
+                log.warning("append_rebalance_event failed (non-fatal): %s", _led_err)
 
         # Scaled compliance/momentum trade sizes
         scaled_trades: dict = {}  # ticker → (scaled_usd, scaled_sh, pfx, note)
@@ -1692,6 +1731,18 @@ def _build_portfolio_tables(analytics: dict) -> str:
             except Exception:
                 _policy_hash = ""
 
+            # Hash additional state files so intraday changes invalidate the cache
+            def _file_md5(path):
+                try:
+                    with open(path, "rb") as _f:
+                        return _hl.md5(_f.read()).hexdigest()
+                except Exception:
+                    return ""
+
+            _hist_hash          = _file_md5(mws_analytics.HISTORY_CSV)
+            _breadth_hash       = _file_md5(mws_analytics.BREADTH_STATE_JSON)
+            _tactical_hash      = _file_md5(mws_analytics.TACTICAL_CASH_STATE_JSON)
+
             _targets_doc = {
                 "_runtime_meta": {
                     "generated":      TODAY,
@@ -1705,6 +1756,9 @@ def _build_portfolio_tables(analytics: dict) -> str:
                 "run_date":              TODAY,
                 "holdings_hash":         _holdings_hash,
                 "policy_hash":           _policy_hash,
+                "hist_hash":             _hist_hash,
+                "breadth_state_hash":    _breadth_hash,
+                "tactical_cash_hash":    _tactical_hash,
                 "tpv":                   round(total_val, 2),
                 "sizing_denom":          round(sizing_denom, 2),
                 "compliance_denom":      round(compliance_denom, 2),
@@ -1741,6 +1795,10 @@ def _build_portfolio_tables(analytics: dict) -> str:
                     "turnover_cap_usd":        round(_turnover_cap_usd, 2),
                     "estimated_signal_sells":  round(mom_sell_proceeds, 2),
                     "estimated_signal_buys":   round(mom_buy_need * mom_buy_scale + sum(u for _, _, u, _ in deploy_items), 2),
+                    "ytd_traded_usd":          round(_ytd_used, 2),
+                    "ytd_turnover_pct":        round(_ytd_used / total_val * 100, 2) if total_val > 0 else 0.0,
+                    "ytd_remaining_usd":       round(_ytd_remaining, 2),
+                    "annual_cap_pct":          round(_annual_cap_pct * 100, 1),
                 },
             }
 
@@ -2235,17 +2293,24 @@ def main() -> None:
                 _stored_date        = _existing_doc.get("run_date", "")
                 _stored_hash        = _existing_doc.get("holdings_hash", None)
                 _stored_policy_hash = _existing_doc.get("policy_hash", None)
+                _stored_hist_hash   = _existing_doc.get("hist_hash", None)
+                _stored_breadth_hash  = _existing_doc.get("breadth_state_hash", None)
+                _stored_tactical_hash = _existing_doc.get("tactical_cash_hash", None)
                 _today_td     = mws_analytics._todays_trading_date()
-                if os.path.exists(mws_analytics.HOLDINGS_CSV):
-                    with open(mws_analytics.HOLDINGS_CSV, "rb") as _chf:
-                        _cur_hash = _hl2.md5(_chf.read()).hexdigest()
-                else:
-                    _cur_hash = ""
-                if os.path.exists(POLICY_FILE):
-                    with open(POLICY_FILE, "rb") as _cpf:
-                        _cur_policy_hash = _hl2.md5(_cpf.read()).hexdigest()
-                else:
-                    _cur_policy_hash = ""
+
+                def _md5_file(path):
+                    try:
+                        with open(path, "rb") as _ff:
+                            return _hl2.md5(_ff.read()).hexdigest()
+                    except Exception:
+                        return ""
+
+                _cur_hash         = _md5_file(mws_analytics.HOLDINGS_CSV)
+                _cur_policy_hash  = _md5_file(POLICY_FILE)
+                _cur_hist_hash    = _md5_file(mws_analytics.HISTORY_CSV)
+                _cur_breadth_hash = _md5_file(mws_analytics.BREADTH_STATE_JSON)
+                _cur_tactical_hash = _md5_file(mws_analytics.TACTICAL_CASH_STATE_JSON)
+
                 _tgt_fresh = (
                     _stored_date        >= _today_td           # covers today's prices
                     and _stored_hash    is not None            # hash was written (new format)
@@ -2253,6 +2318,18 @@ def main() -> None:
                     and (
                         _stored_policy_hash is None            # old file without policy_hash → still skip
                         or _stored_policy_hash == _cur_policy_hash  # policy unchanged
+                    )
+                    and (
+                        _stored_hist_hash is None              # old format → pass through
+                        or _stored_hist_hash == _cur_hist_hash
+                    )
+                    and (
+                        _stored_breadth_hash is None           # old format → pass through
+                        or _stored_breadth_hash == _cur_breadth_hash
+                    )
+                    and (
+                        _stored_tactical_hash is None          # old format → pass through
+                        or _stored_tactical_hash == _cur_tactical_hash
                     )
                 )
             except Exception:

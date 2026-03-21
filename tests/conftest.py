@@ -29,6 +29,18 @@ matplotlib.use("Agg")
 import mws_analytics  # noqa: E402
 
 
+# ── Autouse fixture: redirect ledger writes to tmp so tests never touch real files ──
+
+@pytest.fixture(autouse=True)
+def _isolate_rebalance_ledger(tmp_path, monkeypatch):
+    """
+    Redirect REBALANCE_LEDGER_JSON writes to a per-test tmp directory.
+    Prevents tests from modifying the real mws_rebalance_ledger.json.
+    Applied automatically to every test that has tmp_path (all test functions).
+    """
+    monkeypatch.setattr(mws_analytics, "REBALANCE_LEDGER_JSON", str(tmp_path / "rebalance_ledger.json"))
+
+
 # ── Synthetic price history ────────────────────────────────────────────────────
 
 def make_hist(tickers=None, n_rows=300, seed=42):
@@ -394,10 +406,13 @@ def run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkey
     # Write holdings CSV for hash computation inside _build_portfolio_tables
     holdings.to_csv(holdings_csv, index=False)
 
+    ledger_path    = str(tmp_path / "rebalance_ledger.json")
+
     monkeypatch.setattr(mws_analytics, "BREADTH_STATE_JSON",       breadth_path)
     monkeypatch.setattr(mws_analytics, "TACTICAL_CASH_STATE_JSON",  tactical_path)
     monkeypatch.setattr(mws_runner,    "PRECOMPUTED_TARGETS_FILE",   targets_path)
     monkeypatch.setattr(mws_analytics, "HOLDINGS_CSV",              holdings_csv)
+    monkeypatch.setattr(mws_analytics, "REBALANCE_LEDGER_JSON",     ledger_path)
 
     # Compute total_val from holdings
     total_val = float(holdings["MV"].sum())

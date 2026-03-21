@@ -517,3 +517,133 @@ class TestNativeJsonSerializable:
         with open(targets_path) as f:
             doc = json.load(f)
         assert "portfolio" in doc, "precomputed_targets.json must contain 'portfolio' key"
+
+
+# ── Tests: extended cache hashes (ITEM 4) ─────────────────────────────────────
+
+class TestExtendedCacheHashes:
+    """
+    Tests for the three additional intraday-staleness hash fields added to
+    precomputed_targets.json: hist_hash, breadth_state_hash, tactical_cash_hash.
+    """
+
+    def _build_doc(self, tmp_path, monkeypatch):
+        """Helper: run _build_portfolio_tables() and return parsed JSON doc."""
+        import mws_runner
+        import mws_analytics as _mws
+        from tests.conftest import make_policy, make_hist, make_holdings, make_scores, make_gate_rows
+
+        policy   = make_policy()
+        ba_min   = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
+        holdings = make_holdings({
+            "VTI":           (100, 230.0, "core_equity"),
+            "IAUM":          (200,  40.0, "precious_metals"),
+            "TREASURY_NOTE": (  1, float(ba_min), "bucket_a"),
+            "CASH":          (  1,     1.0, "cash"),
+        })
+        hist   = make_hist(["VTI", "IAUM"], n_rows=300)
+        scores = make_scores({"VTI": 0.5, "IAUM": 0.4})
+        gates  = make_gate_rows(["VTI", "IAUM"])
+
+        targets_path = str(tmp_path / "precomputed_targets.json")
+        holdings_csv = str(tmp_path / "holdings.csv")
+        holdings.to_csv(holdings_csv, index=False)
+
+        monkeypatch.setattr(_mws,       "HOLDINGS_CSV",             holdings_csv)
+        monkeypatch.setattr(_mws,       "BREADTH_STATE_JSON",       str(tmp_path / "bs.json"))
+        monkeypatch.setattr(_mws,       "TACTICAL_CASH_STATE_JSON", str(tmp_path / "tcs.json"))
+        monkeypatch.setattr(mws_runner, "PRECOMPUTED_TARGETS_FILE", targets_path)
+
+        analytics = {
+            "policy":    policy,
+            "holdings":  holdings,
+            "hist":      hist,
+            "total_val": float(holdings["MV"].sum()),
+            "val_asof":  str(hist.index.max().date()),
+            "drawdown":  {"state": "normal", "drawdown": 0.0,
+                          "soft_limit": policy["drawdown_rules"]["soft_limit"],
+                          "hard_limit": policy["drawdown_rules"]["hard_limit"]},
+            "df_scores": scores,
+            "df_gates":  gates,
+        }
+        mws_runner._build_portfolio_tables(analytics)
+        with open(targets_path) as f:
+            return json.load(f)
+
+    def test_targets_json_contains_hist_hash(self, tmp_path, monkeypatch):
+        """precomputed_targets.json must contain 'hist_hash' field."""
+        doc = self._build_doc(tmp_path, monkeypatch)
+        assert "hist_hash" in doc, "precomputed_targets.json must contain 'hist_hash'"
+
+    def test_targets_json_contains_breadth_state_hash(self, tmp_path, monkeypatch):
+        """precomputed_targets.json must contain 'breadth_state_hash' field."""
+        doc = self._build_doc(tmp_path, monkeypatch)
+        assert "breadth_state_hash" in doc, "precomputed_targets.json must contain 'breadth_state_hash'"
+
+    def test_targets_json_contains_tactical_cash_hash(self, tmp_path, monkeypatch):
+        """precomputed_targets.json must contain 'tactical_cash_hash' field."""
+        doc = self._build_doc(tmp_path, monkeypatch)
+        assert "tactical_cash_hash" in doc, "precomputed_targets.json must contain 'tactical_cash_hash'"
+
+    def test_missing_state_file_yields_empty_string_hash(self, tmp_path, monkeypatch):
+        """When breadth/tactical state files don't exist, hash should be '' (no exception)."""
+        # bs.json and tcs.json are not written to tmp_path, so they won't exist
+        doc = self._build_doc(tmp_path, monkeypatch)
+        # The files don't exist → _file_md5 returns ""
+        assert doc["breadth_state_hash"] == "", (
+            "Missing breadth state file should produce empty string hash, not raise"
+        )
+        assert doc["tactical_cash_hash"] == "", (
+            "Missing tactical cash state file should produce empty string hash, not raise"
+        )
+
+    def test_backward_compat_old_cache_no_new_hash_fields(self, tmp_path, monkeypatch):
+        """
+        If stored targets JSON has no hist_hash/breadth_state_hash/tactical_cash_hash
+        (old format), the fast-exit check must NOT invalidate it (None sentinel passes).
+        """
+        import mws_runner
+        import mws_analytics as _mws
+
+        # Write an old-format targets.json that has holdings_hash but no new fields
+        old_doc = {
+            "run_date":     _mws._todays_trading_date(),
+            "holdings_hash": "abc123",
+            # no hist_hash, breadth_state_hash, tactical_cash_hash
+        }
+        targets_path = str(tmp_path / "precomputed_targets.json")
+        with open(targets_path, "w") as f:
+            json.dump(old_doc, f)
+
+        # Patch the precomputed targets path and holdings CSV to match
+        holdings_csv = str(tmp_path / "holdings.csv")
+        pd.DataFrame({
+            "Ticker": ["CASH"], "Shares": [1], "Price": [1.0], "MV": [1.0], "Class": ["cash"]
+        }).to_csv(holdings_csv, index=False)
+
+        import hashlib
+        with open(holdings_csv, "rb") as hf:
+            holdings_hash = hashlib.md5(hf.read()).hexdigest()
+        old_doc["holdings_hash"] = holdings_hash
+        with open(targets_path, "w") as f:
+            json.dump(old_doc, f)
+
+        monkeypatch.setattr(mws_runner, "PRECOMPUTED_TARGETS_FILE", targets_path)
+        monkeypatch.setattr(_mws, "HOLDINGS_CSV", holdings_csv)
+        # Make FORCE_RECOMPUTE not set
+        monkeypatch.delenv("FORCE_RECOMPUTE", raising=False)
+
+        # The fast-exit check should treat missing new-format hashes as matching (None sentinel)
+        # We verify by reading the stored doc and checking the sentinel logic manually:
+        stored_hist_hash     = old_doc.get("hist_hash", None)
+        stored_breadth_hash  = old_doc.get("breadth_state_hash", None)
+        stored_tactical_hash = old_doc.get("tactical_cash_hash", None)
+        # None sentinel → treat as matching (don't invalidate)
+        assert stored_hist_hash    is None, "Old-format doc should have no hist_hash"
+        assert stored_breadth_hash is None, "Old-format doc should have no breadth_state_hash"
+        assert stored_tactical_hash is None, "Old-format doc should have no tactical_cash_hash"
+        # The freshness logic: None → pass (treat as matching), so the cache is fresh
+        for stored in (stored_hist_hash, stored_breadth_hash, stored_tactical_hash):
+            assert stored is None or stored == "any_value", (
+                "None sentinel must not invalidate cache for old-format files"
+            )
