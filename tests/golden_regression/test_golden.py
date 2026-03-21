@@ -60,6 +60,17 @@ def _load_or_create_golden(scenario_name, doc, tickers_to_lock):
     Load the golden file if it exists, or create it from the current run.
 
     Returns (golden_data, created) where created=True on first run.
+
+    Schema uses only fields that actually exist in runner output (Codex P1):
+      action      — the trade action (BUY, TRIM, HOLD, DEPLOY, DEFER-BUY)
+      basis       — the decision basis string
+      gate_action — gate result (proceed / defer / spike_trim)
+      est_usd     — estimated trade size (always ≥ 0; direction from action)
+      current_pct — current weight as 0–100
+
+    Removed (Codex P1 fix):
+      initial_target_weight — runner does not emit 'target_pct'
+      scale_applied         — runner does not emit this field (see 'scale_note' string)
     """
     path = _golden_path(scenario_name)
     if os.path.exists(path):
@@ -74,11 +85,11 @@ def _load_or_create_golden(scenario_name, doc, tickers_to_lock):
         if row is None:
             continue
         golden[ticker] = {
-            "initial_target_weight": row.get("target_pct"),
-            "action":                row.get("action"),
-            "basis":                 row.get("basis"),
-            "gate_action":           row.get("gate_action", "proceed"),
-            "scale_applied":         row.get("scale_applied", 1.0),
+            "action":      row.get("action"),
+            "basis":       row.get("basis"),
+            "gate_action": row.get("gate_action", "proceed"),
+            "est_usd":     row.get("est_usd"),
+            "current_pct": row.get("current_pct"),
         }
 
     os.makedirs(_GOLDEN_DIR, exist_ok=True)
@@ -87,10 +98,13 @@ def _load_or_create_golden(scenario_name, doc, tickers_to_lock):
     return golden, True
 
 
-def _assert_golden(scenario_name, doc, tickers_to_lock, tol=0.005):
+def _assert_golden(scenario_name, doc, tickers_to_lock, est_usd_tol=50.0):
     """
     Compare doc['portfolio'] against the golden file for the given scenario.
-    Creates the golden file on first run and passes.
+    Creates the golden file on first run and skips (first-run bootstrap).
+
+    Asserts preconditions first (ticker must be in output) before checking values,
+    so an optional guard cannot mask a disappearing ticker (Codex P1 fix).
     """
     golden, created = _load_or_create_golden(scenario_name, doc, tickers_to_lock)
     if created:
@@ -99,30 +113,30 @@ def _assert_golden(scenario_name, doc, tickers_to_lock, tol=0.005):
     portfolio = doc.get("portfolio", {})
     failures = []
     for ticker, expected in golden.items():
-        row = portfolio.get(ticker)
-        if row is None:
-            failures.append(f"{ticker}: not in portfolio output")
+        # Precondition: ticker must be in output (no optional guards — Codex P1)
+        if ticker not in portfolio:
+            failures.append(f"{ticker}: not in portfolio output (regression: ticker disappeared)")
             continue
+        row = portfolio[ticker]
 
-        # Check action
-        if expected.get("action") and row.get("action") != expected["action"]:
+        # Check action (exact match)
+        if expected.get("action") is not None and row.get("action") != expected["action"]:
             failures.append(
                 f"{ticker}: action {row['action']!r} != expected {expected['action']!r}"
             )
-        # Check basis (substring match)
+        # Check basis (substring match — allows basis to gain context without breaking)
         if expected.get("basis"):
             if expected["basis"] not in (row.get("basis") or ""):
                 failures.append(
                     f"{ticker}: basis {row.get('basis')!r} does not contain "
                     f"expected {expected['basis']!r}"
                 )
-        # Check initial_target_weight within tolerance (Gap 4)
-        if expected.get("initial_target_weight") is not None:
-            got = row.get("target_pct")
-            if got is not None and abs(got - expected["initial_target_weight"]) > tol:
+        # Check est_usd within $50 tolerance (handles rounding across price updates)
+        if expected.get("est_usd") is not None and row.get("est_usd") is not None:
+            if abs((row["est_usd"] or 0) - (expected["est_usd"] or 0)) > est_usd_tol:
                 failures.append(
-                    f"{ticker}: target_pct {got:.4f} differs from golden "
-                    f"{expected['initial_target_weight']:.4f} by > {tol:.1%}"
+                    f"{ticker}: est_usd {row['est_usd']} differs from golden "
+                    f"{expected['est_usd']} by > ${est_usd_tol:.0f}"
                 )
 
     assert not failures, (

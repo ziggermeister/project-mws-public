@@ -1,16 +1,16 @@
 {
   "VTI": {
-    "initial_target_weight": null,
     "action": "HOLD",
     "basis": "hold",
     "gate_action": "proceed",
-    "scale_applied": 1.0
+    "est_usd": null,
+    "current_pct": 28.38
   },
   "IAUM": {
-    "initial_target_weight": null,
     "action": "TRIM",
     "basis": "compliance_trim",
     "gate_action": "proceed",
-    "scale_applied": 1.0
+    "est_usd": 532.0,
+    "current_pct": 15.8
   }
 }

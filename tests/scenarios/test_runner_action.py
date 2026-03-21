@@ -71,17 +71,17 @@ class TestRunnerAction:
 
         doc = run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkeypatch)
 
-        # IAUM is at 1% — far below the precious_metals floor of 8%
+        # Codex P1: assert precondition first — no optional guard
         portfolio = doc.get("portfolio", {})
-        if "IAUM" in portfolio:
-            iaum = portfolio["IAUM"]
-            assert iaum["action"] == "BUY", (
-                f"IAUM at {iaum['current_pct']:.1f}% should be a compliance BUY "
-                f"(precious_metals floor={iaum['floor_pct']:.0f}%)"
-            )
-            assert "compliance_buy" in iaum["basis"], (
-                f"Basis should be 'compliance_buy', got {iaum['basis']!r}"
-            )
+        assert "IAUM" in portfolio, "IAUM must appear in portfolio output (regression: ticker disappeared)"
+        iaum = portfolio["IAUM"]
+        assert iaum["action"] == "BUY", (
+            f"IAUM at {iaum['current_pct']:.1f}% should be a compliance BUY "
+            f"(precious_metals floor={iaum['floor_pct']:.0f}%)"
+        )
+        assert "compliance_buy" in iaum["basis"], (
+            f"Basis should be 'compliance_buy', got {iaum['basis']!r}"
+        )
 
     def test_sleeve_above_cap_triggers_compliance_trim(self, tmp_path, monkeypatch):
         """
@@ -104,13 +104,13 @@ class TestRunnerAction:
         doc = run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkeypatch)
 
         portfolio = doc.get("portfolio", {})
-        if "IAUM" in portfolio:
-            iaum = portfolio["IAUM"]
-            assert iaum["action"] == "TRIM", (
-                f"IAUM at {iaum['current_pct']:.1f}% above cap {iaum['cap_pct']:.0f}% "
-                "should be a compliance TRIM"
-            )
-            assert "compliance_trim" in iaum["basis"]
+        assert "IAUM" in portfolio, "IAUM must appear in portfolio output"
+        iaum = portfolio["IAUM"]
+        assert iaum["action"] == "TRIM", (
+            f"IAUM at {iaum['current_pct']:.1f}% above cap {iaum['cap_pct']:.0f}% "
+            "should be a compliance TRIM"
+        )
+        assert "compliance_trim" in iaum["basis"]
 
     @pytest.mark.regression
     def test_per_ticker_min_total_triggers_compliance_buy(self, tmp_path, monkeypatch):
@@ -144,16 +144,16 @@ class TestRunnerAction:
         doc = run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkeypatch)
 
         portfolio = doc.get("portfolio", {})
-        if "VTI" in portfolio:
-            vti = portfolio["VTI"]
-            assert vti["action"] == "BUY", (
-                f"VTI at {vti['current_pct']:.1f}% should trigger compliance_buy "
-                f"(min_total=10% TPV). Got action={vti['action']!r}, basis={vti['basis']!r}"
-            )
-            assert "compliance_buy" in vti["basis"], (
-                f"Bug #13: per-ticker min_total should trigger compliance_buy. "
-                f"Got basis={vti['basis']!r}"
-            )
+        assert "VTI" in portfolio, "VTI must appear in portfolio output"
+        vti = portfolio["VTI"]
+        assert vti["action"] == "BUY", (
+            f"VTI at {vti['current_pct']:.1f}% should trigger compliance_buy "
+            f"(min_total=10% TPV). Got action={vti['action']!r}, basis={vti['basis']!r}"
+        )
+        assert "compliance_buy" in vti["basis"], (
+            f"Bug #13: per-ticker min_total should trigger compliance_buy. "
+            f"Got basis={vti['basis']!r}"
+        )
 
     @pytest.mark.regression
     def test_compliance_buy_not_deferred_by_gate(self, tmp_path, monkeypatch):
@@ -182,16 +182,16 @@ class TestRunnerAction:
         doc = run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkeypatch)
 
         portfolio = doc.get("portfolio", {})
-        if "IAUM" in portfolio:
-            iaum = portfolio["IAUM"]
-            assert iaum["action"] != "DEFER-BUY", (
-                f"Bug #11: compliance buy must not be deferred by gate. "
-                f"IAUM action={iaum['action']!r}, basis={iaum['basis']!r}. "
-                "Execution gate exempts cap_floor_compliance."
-            )
-            assert iaum["action"] == "BUY", (
-                f"IAUM should be BUY (compliance), got {iaum['action']!r}"
-            )
+        assert "IAUM" in portfolio, "IAUM must appear in portfolio output"
+        iaum = portfolio["IAUM"]
+        assert iaum["action"] != "DEFER-BUY", (
+            f"Bug #11: compliance buy must not be deferred by gate. "
+            f"IAUM action={iaum['action']!r}, basis={iaum['basis']!r}. "
+            "Execution gate exempts cap_floor_compliance."
+        )
+        assert iaum["action"] == "BUY", (
+            f"IAUM should be BUY (compliance), got {iaum['action']!r}"
+        )
 
     @pytest.mark.regression
     def test_momentum_buy_blocked_during_soft_limit(self, tmp_path, monkeypatch):
@@ -250,13 +250,14 @@ class TestRunnerAction:
         portfolio = doc.get("portfolio", {})
         # IAUM is in precious_metals — currently at 12% which is within the 8%-15% band.
         # With high momentum (pct=0.80) but soft_limit active → should be HOLD not BUY
-        if "IAUM" in portfolio:
-            iaum = portfolio["IAUM"]
-            if iaum["basis"] == "momentum_buy" or "momentum" in iaum.get("basis", ""):
-                assert iaum["action"] in ("HOLD", "DEFER-BUY"), (
-                    f"Bug #8: momentum buy should be blocked during soft_limit. "
-                    f"IAUM action={iaum['action']!r}, basis={iaum['basis']!r}"
-                )
+        # Codex P1: assert precondition first, then assert the intended invariant
+        assert "IAUM" in portfolio, "IAUM must appear in portfolio output"
+        iaum = portfolio["IAUM"]
+        # Regardless of basis, momentum buys must never fire during soft_limit
+        assert iaum["action"] != "BUY" or "momentum" not in iaum.get("basis", ""), (
+            f"Bug #8: momentum buy should be blocked during soft_limit. "
+            f"IAUM action={iaum['action']!r}, basis={iaum['basis']!r}"
+        )
 
     def test_conflicting_signal_floor_wins_over_low_pct(self, tmp_path, monkeypatch):
         """
@@ -280,14 +281,14 @@ class TestRunnerAction:
 
         doc = run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkeypatch)
         portfolio = doc.get("portfolio", {})
-        if "IAUM" in portfolio:
-            iaum = portfolio["IAUM"]
-            # Floor breach → compliance_buy wins over momentum_trim
-            assert iaum["action"] == "BUY", (
-                f"Compliance BUY (floor enforcement) must override momentum_trim signal. "
-                f"IAUM action={iaum['action']!r}, basis={iaum['basis']!r}"
-            )
-            assert "compliance_buy" in iaum["basis"]
+        assert "IAUM" in portfolio, "IAUM must appear in portfolio output"
+        iaum = portfolio["IAUM"]
+        # Floor breach → compliance_buy wins over momentum_trim
+        assert iaum["action"] == "BUY", (
+            f"Compliance BUY (floor enforcement) must override momentum_trim signal. "
+            f"IAUM action={iaum['action']!r}, basis={iaum['basis']!r}"
+        )
+        assert "compliance_buy" in iaum["basis"]
 
     def test_conflicting_signal_cap_wins_over_high_pct(self, tmp_path, monkeypatch):
         """
@@ -310,11 +311,11 @@ class TestRunnerAction:
 
         doc = run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkeypatch)
         portfolio = doc.get("portfolio", {})
-        if "IAUM" in portfolio:
-            iaum = portfolio["IAUM"]
-            # Cap breach → compliance_trim wins over momentum_buy
-            assert iaum["action"] == "TRIM", (
-                f"Compliance TRIM (cap enforcement) must override momentum_buy signal. "
-                f"IAUM action={iaum['action']!r}, basis={iaum['basis']!r}"
-            )
-            assert "compliance_trim" in iaum["basis"]
+        assert "IAUM" in portfolio, "IAUM must appear in portfolio output"
+        iaum = portfolio["IAUM"]
+        # Cap breach → compliance_trim wins over momentum_buy
+        assert iaum["action"] == "TRIM", (
+            f"Compliance TRIM (cap enforcement) must override momentum_buy signal. "
+            f"IAUM action={iaum['action']!r}, basis={iaum['basis']!r}"
+        )
+        assert "compliance_trim" in iaum["basis"]

@@ -152,13 +152,19 @@ class TestPortfolioInvariants:
 
     # ── Invariant 2c: Post-trade positions respect max_total (Gemini Gap 2c) ─
 
-    def test_post_trade_max_total_not_exceeded(self, tmp_path, monkeypatch):
+    def test_buy_does_not_exceed_max_total(self, tmp_path, monkeypatch):
         """
-        Gap 2c: After applying est_buy_usd, estimated final pct must not exceed
-        max_total + small tolerance for each ticker.
+        Gap 2c: A BUY or DEPLOY action must never push a ticker's post-trade
+        position above its max_total cap.
 
-        This catches bugs where _est_trade() or budget scaling computes a trade
-        that would push a ticker above its hard per-ticker cap.
+        This is the strong form of the constraint: the runner must never *add* to
+        a position that would breach the per-ticker hard cap.  TRIMs are exempt
+        because they can be budget-limited (a partial trim may leave the position
+        still above cap, but it is moving in the right direction).
+
+        Uses actual runner field names (Codex P1 fix):
+          mv      = current market value
+          est_usd = unsigned trade size; direction from action
         """
         doc, tpv = _standard_setup(tmp_path, monkeypatch)
         policy = make_policy()
@@ -170,18 +176,22 @@ class TestPortfolioInvariants:
             max_total = constraints.get(ticker, {}).get("max_total")
             if max_total is None:
                 continue
-            current_mv = row.get("current_mv", 0) or 0
-            est_buy    = row.get("est_buy_usd",  0) or 0
-            est_sell   = row.get("est_sell_usd", 0) or 0
-            final_mv   = current_mv + est_buy - est_sell
+            action = row.get("action", "")
+            if action not in ("BUY", "DEPLOY"):
+                continue  # only assert for buys — trims may be partial
+            current_mv = row.get("mv", 0) or 0
+            est_usd    = row.get("est_usd") or 0
+            final_mv   = current_mv + est_usd
             final_pct  = final_mv / tpv if tpv > 0 else 0
             if final_pct > max_total + tol:
                 violations.append(
-                    f"{ticker}: final_pct={final_pct:.3f} > max_total={max_total} "
-                    f"(buy={est_buy:.0f}, sell={est_sell:.0f}, current={current_mv:.0f})"
+                    f"{ticker}: BUY would push final_pct={final_pct:.3f} > "
+                    f"max_total={max_total} "
+                    f"(est_usd={est_usd:.0f}, mv={current_mv:.0f})"
                 )
         assert not violations, (
-            "Gap 2c: post-trade positions exceed max_total:\n" + "\n".join(violations)
+            "Gap 2c: BUY/DEPLOY actions exceed per-ticker max_total:\n"
+            + "\n".join(violations)
         )
 
     # ── Invariant: est_usd = 0 for DEFER-BUY ─────────────────────────────────
@@ -211,9 +221,10 @@ class TestPortfolioInvariants:
 
         for ticker, row in doc.get("portfolio", {}).items():
             if row.get("action") == "DEFER-BUY":
-                buy = row.get("est_buy_usd", 0) or 0
-                assert buy == 0, (
-                    f"DEFER-BUY for {ticker} must have est_buy_usd=0, got {buy}"
+                # est_usd is the actual runner field (Codex P1: 'est_buy_usd' does not exist)
+                trade_size = row.get("est_usd") or 0
+                assert trade_size == 0, (
+                    f"DEFER-BUY for {ticker} must have est_usd=0, got {trade_size}"
                 )
 
     # ── Invariant: soft_limit → no momentum buys ─────────────────────────────
@@ -246,18 +257,23 @@ class TestPortfolioInvariants:
 
         portfolio = doc.get("portfolio", {})
         cash_mv = 0.0
-        # Sum current_mv for CASH rows, net of sells (which turn into cash)
+        # 'mv' is the actual runner field (Codex P1: 'current_mv' does not exist)
         for ticker, row in portfolio.items():
             if ticker == "CASH":
-                cash_mv = row.get("current_mv", 0) or 0
+                cash_mv = row.get("mv", 0) or 0
 
-        # After trades: add estimated sells, subtract estimated buys across all non-cash tickers
+        # After trades: add estimated sells (TRIM), subtract estimated buys (BUY/DEPLOY)
+        # est_usd is the actual field; direction is determined by action
         net_cash_change = 0.0
         for ticker, row in portfolio.items():
             if ticker in ("CASH", "TREASURY_NOTE"):
                 continue
-            net_cash_change += (row.get("est_sell_usd", 0) or 0)
-            net_cash_change -= (row.get("est_buy_usd",  0) or 0)
+            est_usd = row.get("est_usd") or 0
+            action  = row.get("action", "")
+            if action in ("TRIM",):
+                net_cash_change += est_usd
+            elif action in ("BUY", "DEPLOY"):
+                net_cash_change -= est_usd
 
         final_cash_pct = (cash_mv + net_cash_change) / tpv if tpv > 0 else 0
 
