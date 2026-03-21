@@ -115,12 +115,13 @@ class TestHistoryIsFreshCheck:
 
 class TestPrecomputedTargetsFreshness:
     """
-    Test the holdings_hash / run_date freshness logic embedded in
+    Test the holdings_hash / run_date / policy_hash freshness logic embedded in
     _build_portfolio_tables() output (mws_precomputed_targets.json).
 
     The JSON includes:
       - "run_date": TODAY string
       - "holdings_hash": MD5 of holdings CSV content
+      - "policy_hash": MD5 of mws_policy.json content (Gap 1)
 
     If either changes, the LLM prompt should trigger regeneration.
     These tests use the run_portfolio_tables() conftest helper to generate the
@@ -246,3 +247,129 @@ class TestPrecomputedTargetsFreshness:
         # The history is "fresh" by date — Bug #17 is that the system won't re-fetch
         # just because a new ticker was added. This test documents the behavior.
         assert isinstance(result, bool)  # At minimum: no crash
+
+
+# ── Tests: policy_hash in precomputed_targets.json (Gap 1) ────────────────────
+
+class TestPolicyHashInvalidation:
+    """
+    Gemini Gap 1: cache key must include policy content hash.
+
+    A change to mws_policy.json (e.g. a cap change, a new ticker) must invalidate
+    precomputed_targets.json even when run_date and holdings_hash are unchanged.
+
+    These tests verify:
+      1. precomputed_targets.json contains a 'policy_hash' field.
+      2. Different policy content produces different policy_hash values.
+         (Guards against: policy change silently using stale cached targets.)
+    """
+
+    def _run_tables(self, policy, holdings, hist, scores, gates, tmp_path, monkeypatch,
+                    policy_json_content=None):
+        """
+        Run _build_portfolio_tables() and return the parsed JSON doc.
+
+        If policy_json_content is provided, writes a fake policy.json to tmp_path
+        so POLICY_FILE points to it — allowing policy hash to differ across runs.
+        """
+        import mws_runner
+        import mws_analytics as _mws
+
+        targets_path = str(tmp_path / "precomputed_targets.json")
+        holdings_csv = str(tmp_path / "holdings.csv")
+        holdings.to_csv(holdings_csv, index=False)
+
+        if policy_json_content is not None:
+            policy_path = str(tmp_path / "mws_policy.json")
+            with open(policy_path, "w") as f:
+                import json as _j
+                _j.dump(policy_json_content, f)
+            monkeypatch.setattr(mws_runner, "POLICY_FILE", policy_path)
+
+        monkeypatch.setattr(_mws,       "HOLDINGS_CSV",             holdings_csv)
+        monkeypatch.setattr(_mws,       "BREADTH_STATE_JSON",       str(tmp_path / "bs.json"))
+        monkeypatch.setattr(_mws,       "TACTICAL_CASH_STATE_JSON", str(tmp_path / "tcs.json"))
+        monkeypatch.setattr(mws_runner, "PRECOMPUTED_TARGETS_FILE", targets_path)
+
+        from tests.conftest import _patch_json_dump
+        _patch_json_dump(monkeypatch)
+
+        analytics = {
+            "policy":    policy,
+            "holdings":  holdings,
+            "hist":      hist,
+            "total_val": float(holdings["MV"].sum()),
+            "val_asof":  str(hist.index.max().date()),
+            "drawdown":  {"state": "normal", "drawdown": 0.0,
+                          "soft_limit": 0.22, "hard_limit": 0.30},
+            "df_scores": scores,
+            "df_gates":  gates,
+        }
+        mws_runner._build_portfolio_tables(analytics)
+
+        with open(targets_path) as f:
+            import json as _j
+            return _j.load(f)
+
+    def test_json_contains_policy_hash(self, tmp_path, monkeypatch):
+        """precomputed_targets.json must contain 'policy_hash' field (Gap 1)."""
+        from tests.conftest import make_policy, make_hist, make_holdings, make_scores, make_gate_rows
+
+        policy   = make_policy()
+        holdings = make_holdings({
+            "VTI":           (100, 230.0, "core_equity"),
+            "IAUM":          (200,  40.0, "precious_metals"),
+            "TREASURY_NOTE": (  1, 45000.0, "bucket_a"),
+            "CASH":          (  1,    1.0, "cash"),
+        })
+        hist   = make_hist(["VTI", "IAUM"], n_rows=300)
+        scores = make_scores({"VTI": 0.5, "IAUM": 0.4})
+        gates  = make_gate_rows(["VTI", "IAUM"])
+
+        doc = self._run_tables(policy, holdings, hist, scores, gates,
+                               tmp_path, monkeypatch, policy_json_content=policy)
+        assert "policy_hash" in doc, (
+            "Gap 1: precomputed_targets.json must contain 'policy_hash' so that "
+            "a policy change on the same day invalidates the cache."
+        )
+
+    def test_different_policy_produces_different_hash(self, tmp_path, monkeypatch):
+        """
+        Different mws_policy.json content must produce different policy_hash values.
+
+        This ensures that an intraday cap/floor/ticker change forces regeneration
+        of precomputed_targets.json even when run_date and holdings are unchanged.
+        """
+        from tests.conftest import make_policy, make_hist, make_holdings, make_scores, make_gate_rows
+        import copy
+
+        policy   = make_policy()
+        holdings = make_holdings({
+            "VTI":           (100, 230.0, "core_equity"),
+            "TREASURY_NOTE": (  1, 45000.0, "bucket_a"),
+            "CASH":          (  1,    1.0, "cash"),
+        })
+        hist   = make_hist(["VTI"], n_rows=300)
+        scores = make_scores({"VTI": 0.5})
+        gates  = make_gate_rows(["VTI"])
+
+        policy_v1 = copy.deepcopy(policy)
+        policy_v2 = copy.deepcopy(policy)
+        # Change something meaningful — simulates a cap edit in mws_policy.json
+        policy_v2.setdefault("ticker_constraints", {}).setdefault("VTI", {})["max_total"] = 0.99
+
+        (tmp_path / "run1").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "run2").mkdir(parents=True, exist_ok=True)
+
+        doc1 = self._run_tables(policy_v1, holdings, hist, scores, gates,
+                                tmp_path / "run1", monkeypatch,
+                                policy_json_content=policy_v1)
+
+        doc2 = self._run_tables(policy_v2, holdings, hist, scores, gates,
+                                tmp_path / "run2", monkeypatch,
+                                policy_json_content=policy_v2)
+
+        assert doc1.get("policy_hash") != doc2.get("policy_hash"), (
+            "Gap 1: changing mws_policy.json content must produce a different "
+            "policy_hash so the cache-invalidation check forces regeneration."
+        )

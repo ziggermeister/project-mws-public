@@ -1,0 +1,16 @@
+{
+  "VTI": {
+    "initial_target_weight": null,
+    "action": "HOLD",
+    "basis": "hold",
+    "gate_action": "proceed",
+    "scale_applied": 1.0
+  },
+  "IAUM": {
+    "initial_target_weight": null,
+    "action": "TRIM",
+    "basis": "compliance_trim",
+    "gate_action": "proceed",
+    "scale_applied": 1.0
+  }
+}

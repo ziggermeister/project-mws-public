@@ -1670,15 +1670,22 @@ def _build_portfolio_tables(analytics: dict) -> str:
                 _omv = float(hold.loc[hold["Ticker"] == _ot, "MV"].sum()) if _ot in held_tickers else 0.0
                 _ov_out[_ot] = {"mv": round(_omv, 2), "pct_tpv": round(_omv / total_val * 100, 2)}
 
-            # Compute a content hash of the holdings CSV so the fast-exit check
-            # can detect holdings changes without relying on file mtime (which is
-            # reset to checkout time by git operations, making mtime unreliable).
+            # Compute content hashes for the fast-exit check.
+            # Holdings hash: detects portfolio changes (shares, prices).
+            # Policy hash: detects rule changes (cap, floor, new ticker) that
+            #   would invalidate a same-day cached run.
+            # mtime is not used — git operations reset it to checkout time.
             import hashlib as _hl
             try:
                 with open(mws_analytics.HOLDINGS_CSV, "rb") as _hf:
                     _holdings_hash = _hl.md5(_hf.read()).hexdigest()
             except Exception:
                 _holdings_hash = ""
+            try:
+                with open(POLICY_FILE, "rb") as _pf:
+                    _policy_hash = _hl.md5(_pf.read()).hexdigest()
+            except Exception:
+                _policy_hash = ""
 
             _targets_doc = {
                 "_runtime_meta": {
@@ -1692,6 +1699,7 @@ def _build_portfolio_tables(analytics: dict) -> str:
                 },
                 "run_date":              TODAY,
                 "holdings_hash":         _holdings_hash,
+                "policy_hash":           _policy_hash,
                 "tpv":                   round(total_val, 2),
                 "sizing_denom":          round(sizing_denom, 2),
                 "compliance_denom":      round(compliance_denom, 2),
@@ -2217,18 +2225,28 @@ def main() -> None:
                 import json as _jc
                 with open(PRECOMPUTED_TARGETS_FILE, encoding="utf-8") as _ef:
                     _existing_doc = _jc.load(_ef)
-                _stored_date  = _existing_doc.get("run_date", "")
-                _stored_hash  = _existing_doc.get("holdings_hash", None)
+                _stored_date        = _existing_doc.get("run_date", "")
+                _stored_hash        = _existing_doc.get("holdings_hash", None)
+                _stored_policy_hash = _existing_doc.get("policy_hash", None)
                 _today_td     = mws_analytics._todays_trading_date()
                 if os.path.exists(mws_analytics.HOLDINGS_CSV):
                     with open(mws_analytics.HOLDINGS_CSV, "rb") as _chf:
                         _cur_hash = _hl2.md5(_chf.read()).hexdigest()
                 else:
                     _cur_hash = ""
+                if os.path.exists(POLICY_FILE):
+                    with open(POLICY_FILE, "rb") as _cpf:
+                        _cur_policy_hash = _hl2.md5(_cpf.read()).hexdigest()
+                else:
+                    _cur_policy_hash = ""
                 _tgt_fresh = (
-                    _stored_date  >= _today_td           # covers today's prices
-                    and _stored_hash is not None         # hash was written (new format)
-                    and _stored_hash == _cur_hash        # holdings unchanged
+                    _stored_date        >= _today_td           # covers today's prices
+                    and _stored_hash    is not None            # hash was written (new format)
+                    and _stored_hash    == _cur_hash           # holdings unchanged
+                    and (
+                        _stored_policy_hash is None            # old file without policy_hash → still skip
+                        or _stored_policy_hash == _cur_policy_hash  # policy unchanged
+                    )
                 )
             except Exception:
                 pass  # any read/parse error → recompute
