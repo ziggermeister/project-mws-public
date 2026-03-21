@@ -82,6 +82,19 @@ Gemini counter: the floor prevents total de-allocation during AI rotation; GRID'
 
 ---
 
+## tactical_cash_state_numpy_bool_serialization
+**Status:** `implemented_2026-03-21`
+**Source:** Discovered during live run validation 2026-03-20 (post-audit)
+**Priority:** P1 — state was never persisting on any run; Gemini incorrectly declared false alarm
+
+`compute_and_persist_tactical_cash_state()` in `mws_analytics.py` used `pandas.Series.any()` which returns `numpy.bool_`, not Python `bool`. `json.dump` cannot serialize numpy types. The state file write silently failed on every run. On load, the missing/corrupt file defaulted `filter_blocking=False` and `consecutive_blocked_days=0`, resetting the counter on every run and making the tactical cash state machine non-functional.
+
+Gemini declared this a false alarm in its policy-code consistency audit, stating "Python's json.dump correctly serializes Python True/False". That is true for Python booleans but not for numpy.bool_ — the distinction was missed.
+
+**Fix:** `bool((series).any())` in `mws_analytics.py` line 1565 — wraps the numpy result in a native Python bool before JSON serialization.
+
+---
+
 ## sepp_bucket_a_replenishment_rule
 **Status:** `logged_for_future_review`
 **Source:** Gemini + ChatGPT design review 2026-03-17
