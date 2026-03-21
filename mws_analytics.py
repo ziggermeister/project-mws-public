@@ -1562,7 +1562,7 @@ def compute_and_persist_tactical_cash_state(
             and "RawScore" in df_scores.columns):
         _pct = pd.to_numeric(df_scores["Pct"],      errors="coerce").fillna(0)
         _raw = pd.to_numeric(df_scores["RawScore"], errors="coerce").fillna(0)
-        filter_blocking = ((_pct >= 0.65) & (_raw <= 0)).any()
+        filter_blocking = bool(((_pct >= 0.65) & (_raw <= 0)).any())
 
     # Advance the consecutive-day counter
     prior_blocking = existing.get("filter_blocking", False)
