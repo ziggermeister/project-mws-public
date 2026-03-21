@@ -655,7 +655,12 @@ def _build_portfolio_tables(analytics: dict) -> str:
         # highest-precedence non-drawdown constraint. When breached, all discretionary
         # buys (momentum + residual deployment) must be suppressed. Compliance buys
         # for structural floor enforcement still execute — they take priority.
-        _bucket_a_min   = float((policy.get("bucket_a", {}) or {}).get("minimum_balance", 45000))
+        _bucket_a_min   = float(
+            (policy.get("definitions", {}) or {})
+            .get("buckets", {})
+            .get("bucket_a_protected_liquidity", {})
+            .get("minimum_usd", 45000)          # authoritative field: definitions.buckets.bucket_a_protected_liquidity.minimum_usd
+        )
         _bucket_a_breach = bucket_a_mv < _bucket_a_min
 
         # ── Bifurcated denominators — tactical cash management (v2.9.8) ──────
