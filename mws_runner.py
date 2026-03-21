@@ -1487,6 +1487,17 @@ def _build_portfolio_tables(analytics: dict) -> str:
                 _omv = float(hold.loc[hold["Ticker"] == _ot, "MV"].sum()) if _ot in held_tickers else 0.0
                 _ov_out[_ot] = {"mv": round(_omv, 2), "pct_tpv": round(_omv / total_val * 100, 2)}
 
+            # Compute a content hash of the holdings CSV so the fast-exit check
+            # can detect holdings changes without relying on file mtime (which is
+            # reset to checkout time by git operations, making mtime unreliable).
+            import hashlib as _hl
+            try:
+                _holdings_hash = _hl.md5(
+                    Path(mws_analytics.HOLDINGS_CSV).read_bytes()
+                ).hexdigest()
+            except Exception:
+                _holdings_hash = ""
+
             _targets_doc = {
                 "_runtime_meta": {
                     "generated":      TODAY,
@@ -1498,6 +1509,7 @@ def _build_portfolio_tables(analytics: dict) -> str:
                     ),
                 },
                 "run_date":              TODAY,
+                "holdings_hash":         _holdings_hash,
                 "tpv":                   round(total_val, 2),
                 "sizing_denom":          round(sizing_denom, 2),
                 "compliance_denom":      round(compliance_denom, 2),
@@ -2008,22 +2020,44 @@ def main() -> None:
             log.warning("Chart generation skipped: %s", chart_err)
         _RUN_TIMINGS["chart"] = _time.perf_counter() - _t0
 
-        # Write mws_precomputed_targets.json — skip if already post-close fresh AND
-        # holdings have not changed since last write (set FORCE_RECOMPUTE=1 to override).
-        _force     = os.getenv("FORCE_RECOMPUTE", "").strip() in ("1", "true", "yes")
-        _tgt_fresh = (
-            not _force
-            and mws_analytics._file_is_post_close(PRECOMPUTED_TARGETS_FILE)
-            and os.path.exists(mws_analytics.HOLDINGS_CSV)
-            and os.path.getmtime(mws_analytics.HOLDINGS_CSV)
-                <= os.path.getmtime(PRECOMPUTED_TARGETS_FILE)
-        )
+        # Write mws_precomputed_targets.json — skip if the file already covers
+        # today's trading date AND holdings content has not changed since last
+        # write (set FORCE_RECOMPUTE=1 to override).
+        #
+        # Content-based checks (not mtime): git operations reset file mtimes to
+        # checkout time, making mtime comparisons unreliable in all contexts
+        # (GH Actions, local git pull, worktree switches, etc.).
+        _force = os.getenv("FORCE_RECOMPUTE", "").strip() in ("1", "true", "yes")
+        _tgt_fresh = False
+        if not _force and os.path.exists(PRECOMPUTED_TARGETS_FILE):
+            try:
+                import hashlib as _hl2
+                import json as _jc
+                _existing_doc = _jc.loads(
+                    Path(PRECOMPUTED_TARGETS_FILE).read_text(encoding="utf-8")
+                )
+                _stored_date  = _existing_doc.get("run_date", "")
+                _stored_hash  = _existing_doc.get("holdings_hash", None)
+                _today_td     = mws_analytics._todays_trading_date()
+                _cur_hash     = (
+                    _hl2.md5(Path(mws_analytics.HOLDINGS_CSV).read_bytes()).hexdigest()
+                    if os.path.exists(mws_analytics.HOLDINGS_CSV) else ""
+                )
+                _tgt_fresh = (
+                    _stored_date  >= _today_td           # covers today's prices
+                    and _stored_hash is not None         # hash was written (new format)
+                    and _stored_hash == _cur_hash        # holdings unchanged
+                )
+            except Exception:
+                pass  # any read/parse error → recompute
+
         _t0 = _time.perf_counter()
         if _tgt_fresh:
             log.info(
-                "⚡ %s is post-close fresh and holdings unchanged — skipping regeneration "
+                "⚡ %s is up-to-date for %s and holdings unchanged — skipping regeneration "
                 "(set FORCE_RECOMPUTE=1 to override)",
                 PRECOMPUTED_TARGETS_FILE,
+                mws_analytics._todays_trading_date(),
             )
         else:
             try:
