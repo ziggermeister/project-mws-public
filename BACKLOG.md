@@ -11,11 +11,11 @@ Previously stored in `mws_policy.json → future_review_items` (removed in v2.9.
 
 | # | Item | Priority | Status |
 |---|---|---|---|
-| 1 | `drawdown_recovery_state_machine` | **P1** | Open — merged entry (two duplicates consolidated) |
+| 1 | `drawdown_recovery_state_machine` | **P1** | ✅ Implemented 2026-03-21 (Finding 1 + persisted-state fix) |
 | 2 | `sepp_bucket_a_replenishment_rule` | **High** (deadline Dec 2026) | Open — policy + implementation; review by Sep 2026 |
 | 3 | `vix_floor_in_execution_gate` | **Medium** | Open — backtest-gated before any code change |
-| 4 | `precomputed_cache_intraday_staleness` | **Medium-Low** | Open — operationally mitigated by once-daily run |
-| 5 | `annual_turnover_not_tracked` | **P2** | Open — high-effort new infrastructure |
+| 4 | `precomputed_cache_intraday_staleness` | **Medium-Low** | ✅ Implemented 2026-03-21 (Finding 3 — 5 hashes + 2 new state files) |
+| 5 | `annual_turnover_not_tracked` | **P2** | ✅ Implemented 2026-03-21 (Finding 2 — buy-side-only ledger) |
 | 6 | `allocation_layer_sleeve_constraint_interaction` | **Low** | Open — needs regime-transition backtest |
 | 7 | `ai_tech_dispersion_aware_floor` | **Won't Fix** | Closed — design debate resolved; Gemini/Codex agree |
 | 8 | `iaum_fat_tail_monitoring` | **Ops** | Moved to operational monitoring checklist |
@@ -323,9 +323,9 @@ Bucket A (TREASURY_NOTE ≥ $45K) was computed and flagged as BELOW_MIN but ther
 ---
 
 ## drawdown_recovery_state_machine
-**Status:** `logged_for_future_review`
+**Status:** `implemented_2026-03-21`
 **Source:** OpenAI Codex audit 2026-03-20 + Gemini 2.5-pro audit 2026-03-21 (two independent findings merged 2026-03-21)
-**Priority:** P1 — system cannot auto-exit risk-off state as designed; missed gains during recovery rallies
+**Priority:** P1 — resolved; 223 tests passing
 
 `check_drawdown_state()` in `mws_analytics.py` is a stateless, point-in-time function. It checks whether the portfolio is *currently* in a drawdown state, but has no memory across runs. The policy (`drawdown_rules.recovery_condition`) specifies two exit conditions:
 1. Drawdown improves to < 15% for **10 consecutive trading days**
@@ -350,11 +350,11 @@ Neither condition can be evaluated without persisted state. Once `soft_limit` or
 ---
 
 ## precomputed_cache_intraday_staleness
-**Status:** `logged_for_future_review`
+**Status:** `implemented_2026-03-21`
 **Source:** OpenAI Codex audit 2026-03-20
-**Priority:** Medium-Low — operationally mitigated by once-daily GH Actions run; revisit if run frequency increases
+**Priority:** Medium-Low — resolved; 7 content hashes now cover all state files
 
-`mws_precomputed_targets.json` freshness keyed on `run_date + holdings_hash`. Same-day changes to prices, breadth state, tactical cash state, or drawdown regime are invisible. Only matters if runner is executed multiple times intraday. Fix: include hash of `mws_ticker_history.csv` latest row, `mws_breadth_state.json`, and `mws_tactical_cash_state.json` in freshness check.
+`mws_precomputed_targets.json` freshness keyed on `run_date + holdings_hash`. Same-day changes to prices, breadth state, tactical cash state, or drawdown regime are invisible. Only matters if runner is executed multiple times intraday. Fix: include hash of `mws_ticker_history.csv` latest row, `mws_breadth_state.json`, `mws_tactical_cash_state.json`, `mws_drawdown_state.json`, and `mws_rebalance_ledger.json` in freshness check. All 5 new state-file hashes added with None-sentinel backward compat for old cached files.
 
 ---
 
@@ -381,11 +381,11 @@ DEPLOY loop greedily filled any positive-blend HOLD ticker. VTI was not explicit
 ---
 
 ## annual_turnover_not_tracked
-**Status:** `logged_for_future_review`
+**Status:** `implemented_2026-03-21`
 **Source:** OpenAI Codex audit 2026-03-20
-**Priority:** P2
+**Priority:** P2 — resolved; buy-side-only ledger enforcing 60% annual cap
 
-Only per-event turnover cap is implemented. Annual YTD turnover (60% cap) and deferred-trade attribution to originating rebalance events are not tracked. Requires a rebalance ledger with rebalance_id and annual YTD accumulator.
+Per-event cap was implemented in v2.9.9. Annual YTD cap now enforced via `mws_rebalance_ledger.json` with buy-side-only semantics: `append_rebalance_event(buy_usd, sell_usd)` stores both fields; `ytd_traded_usd` sums `buy_usd` only (cap constrains buys; sells are compliance-driven). Old events with only `traded_usd` fall back gracefully. Hard_limit events remain cap-exempt per policy. Codex Follow-up (2026-03-21): ledger was recording two-sided turnover (`traded_usd = buys + sells`) while the cap only constrains buys — fixed to separate buy_usd/sell_usd.
 
 ---
 
