@@ -1492,9 +1492,8 @@ def _build_portfolio_tables(analytics: dict) -> str:
             # reset to checkout time by git operations, making mtime unreliable).
             import hashlib as _hl
             try:
-                _holdings_hash = _hl.md5(
-                    Path(mws_analytics.HOLDINGS_CSV).read_bytes()
-                ).hexdigest()
+                with open(mws_analytics.HOLDINGS_CSV, "rb") as _hf:
+                    _holdings_hash = _hl.md5(_hf.read()).hexdigest()
             except Exception:
                 _holdings_hash = ""
 
@@ -2033,16 +2032,16 @@ def main() -> None:
             try:
                 import hashlib as _hl2
                 import json as _jc
-                _existing_doc = _jc.loads(
-                    Path(PRECOMPUTED_TARGETS_FILE).read_text(encoding="utf-8")
-                )
+                with open(PRECOMPUTED_TARGETS_FILE, encoding="utf-8") as _ef:
+                    _existing_doc = _jc.load(_ef)
                 _stored_date  = _existing_doc.get("run_date", "")
                 _stored_hash  = _existing_doc.get("holdings_hash", None)
                 _today_td     = mws_analytics._todays_trading_date()
-                _cur_hash     = (
-                    _hl2.md5(Path(mws_analytics.HOLDINGS_CSV).read_bytes()).hexdigest()
-                    if os.path.exists(mws_analytics.HOLDINGS_CSV) else ""
-                )
+                if os.path.exists(mws_analytics.HOLDINGS_CSV):
+                    with open(mws_analytics.HOLDINGS_CSV, "rb") as _chf:
+                        _cur_hash = _hl2.md5(_chf.read()).hexdigest()
+                else:
+                    _cur_hash = ""
                 _tgt_fresh = (
                     _stored_date  >= _today_td           # covers today's prices
                     and _stored_hash is not None         # hash was written (new format)
