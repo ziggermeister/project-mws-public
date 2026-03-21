@@ -668,7 +668,7 @@
     "stress_turnover_cap": "max_turnover_stress"
   },
   "_runtime_meta": {
-    "generated": "2026-03-17",
+    "generated": "2026-03-20",
     "source": "mws_policy.json",
     "source_last_updated": "2026-03-17",
     "note": "Auto-generated from mws_policy.json by mws_analytics.py. Do not edit — overwritten on every run."

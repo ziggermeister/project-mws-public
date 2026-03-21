@@ -77,6 +77,8 @@ jobs:
           GMAIL_TO: ${{ secrets.GMAIL_TO }}
           TRIGGER_REASON: ${{ github.event.inputs.trigger_reason || 'scheduled' }}
           SKIP_LLM: ${{ github.event.inputs.skip_llm || 'true' }}
+          FORCE_RECOMPUTE: "1"  # GH Actions resets all file mtimes to checkout time;
+                                # mtime-based fast-exits are unreliable — always recompute
           MPLBACKEND: Agg   # headless matplotlib — no display needed
         run: python mws_runner.py
 
