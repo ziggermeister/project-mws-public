@@ -1207,13 +1207,19 @@ def _build_portfolio_tables(analytics: dict) -> str:
         # policy-exempt from the turnover cap. Without this check, the 20% cap would
         # clip the exact trades that are most critical in a severe drawdown.
         _in_hard_limit       = dd.get("state") == "hard_limit"
-        comp_buy_scale       = (
-            min(1.0, _cash_lim_scale)                              # hard_limit: cash-only
-            if _in_hard_limit else
-            min(1.0, _cash_lim_scale, _turnover_lim_scale)        # normal: cash + turnover cap
-        )
+        # Fix: Bucket A breach (Priority 2) overrides all buys — including compliance
+        # buys (Priority 3). Policy: "halt_all_buys_restore_bucket_a". Previously only
+        # momentum buys and DEPLOY were suppressed; compliance buys still executed,
+        # draining Bucket B cash needed to restore the SEPP liquidity floor.
+        if _bucket_a_breach:
+            comp_buy_scale = 0.0
+        elif _in_hard_limit:
+            comp_buy_scale = min(1.0, _cash_lim_scale)            # hard_limit: cash-only
+        else:
+            comp_buy_scale = min(1.0, _cash_lim_scale, _turnover_lim_scale)  # normal
         _comp_turnover_bound = (
-            not _in_hard_limit
+            not _bucket_a_breach
+            and not _in_hard_limit
             and _turnover_lim_scale < _cash_lim_scale
             and comp_buy_scale < 0.999
         )
