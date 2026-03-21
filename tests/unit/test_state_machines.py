@@ -420,3 +420,71 @@ class TestDrawdownRecoveryStateMachine:
         }
         missing = required_keys - set(result.keys())
         assert not missing, f"Missing keys in drawdown state: {missing}"
+
+    def test_persisted_state_used_when_fresh_check_returns_normal(self, tmp_path, monkeypatch):
+        """
+        Codex Finding 1: the consecutive-day recovery counter was dead code.
+
+        Root cause: the old code used dd["state"] (result of the fresh point-in-time
+        check_drawdown_state()) to decide whether `in_stress = True`. When drawdown
+        recovers below soft_limit (22%) but above the recovery threshold (15%),
+        check_drawdown_state() returns "normal" — so `in_stress` was always False,
+        and the counter could never increment.
+
+        Fix: use the PERSISTED state (existing.get("state")) to track stress; only
+        exit stress via the explicit recovery conditions (10d counter or 5d VTI).
+
+        This test verifies: if persisted state = "soft_limit" and today's fresh check
+        returns "normal" (drawdown < soft_limit but > recovery threshold), the counter
+        still increments correctly — proving in_stress is derived from persisted state,
+        not the fresh check.
+        """
+        state_path = str(tmp_path / "dd_state.json")
+        perf_path  = str(tmp_path / "perf.csv")
+
+        # Day 1: set initial persisted state to soft_limit via a genuine stress call
+        monkeypatch.setattr(mws, "check_drawdown_state", lambda policy, perf_log: {
+            "state": "soft_limit", "drawdown": -0.24,  # 24% → genuinely in soft_limit
+            "soft_limit": 0.22, "hard_limit": 0.30, "recovery": 0.15,
+        })
+        monkeypatch.setattr(mws, "_todays_trading_date", lambda: "2026-03-10")
+        day1 = mws.update_and_check_drawdown_state(
+            _policy(), perf_path, _make_scores_df(vti_raw=-0.2), state_path=state_path
+        )
+        assert day1["state"] == "soft_limit", "Day 1 must persist soft_limit state"
+
+        # Day 2: fresh check returns "normal" (drawdown = 18%, below soft_limit 22%
+        # but above recovery threshold 15%) — simulates the exact scenario where old
+        # code had a dead-code bug: in_stress was False, counter never incremented.
+        # With the fix, persisted_state = "soft_limit" → in_stress = True → counter fires.
+        monkeypatch.setattr(mws, "check_drawdown_state", lambda policy, perf_log: {
+            "state": "normal", "drawdown": -0.18,  # below soft_limit → fresh says "normal"
+            "soft_limit": 0.22, "hard_limit": 0.30, "recovery": 0.15,
+        })
+        monkeypatch.setattr(mws, "_todays_trading_date", lambda: "2026-03-11")
+        day2 = mws.update_and_check_drawdown_state(
+            _policy(), perf_path, _make_scores_df(vti_raw=-0.2), state_path=state_path
+        )
+        # 18% > 15% recovery threshold → counter stays 0 (above threshold)
+        # But the key invariant: state must remain soft_limit (persisted), not flip to normal
+        assert day2["state"] == "soft_limit", (
+            "Codex Finding 1 (persisted state fix): when fresh check_drawdown_state() "
+            "returns 'normal' (drawdown 18% < soft_limit 22%) but persisted state is "
+            "'soft_limit', the system must stay in soft_limit until the explicit "
+            "recovery conditions are met. Old code flipped to normal immediately."
+        )
+
+        # Day 3: drawdown now drops below 15% → counter increments (in_stress from persisted)
+        monkeypatch.setattr(mws, "check_drawdown_state", lambda policy, perf_log: {
+            "state": "normal", "drawdown": -0.10,  # 10% < 15% → counter should fire
+            "soft_limit": 0.22, "hard_limit": 0.30, "recovery": 0.15,
+        })
+        monkeypatch.setattr(mws, "_todays_trading_date", lambda: "2026-03-12")
+        day3 = mws.update_and_check_drawdown_state(
+            _policy(), perf_path, _make_scores_df(vti_raw=-0.2), state_path=state_path
+        )
+        assert day3["consecutive_days_recovered"] == 1, (
+            "Codex Finding 1: with persisted state = soft_limit and drawdown 10% < 15%, "
+            "the consecutive_days_recovered counter must increment to 1. "
+            "Old code: in_stress was False (fresh check = 'normal'), counter never ran."
+        )

@@ -1332,18 +1332,21 @@ def _build_portfolio_tables(analytics: dict) -> str:
 
         cash_after_all = residual  # ≈ 0 when fully deployed; ≈ policy_reserve when reserve active
 
-        # Record this event in the rebalance ledger (annual YTD tracking)
-        _event_traded_usd = (
+        # Record this event in the rebalance ledger (annual YTD tracking).
+        # The annual cap constrains buy-side only (sells are compliance-driven
+        # and cannot be suppressed), so buy_usd and sell_usd are tracked
+        # separately. Only buy_usd accumulates toward ytd_traded_usd.
+        _event_buy_usd = (
             comp_buy_need * comp_buy_scale
             + mom_buy_need * mom_buy_scale
             + sum(u for _, _, u, _ in deploy_items)
-            + comp_sell_proceeds
-            + mom_sell_proceeds
         )
-        if _event_traded_usd > 0:
+        _event_sell_usd = comp_sell_proceeds + mom_sell_proceeds
+        if _event_buy_usd + _event_sell_usd > 0:
             try:
                 mws_analytics.append_rebalance_event(
-                    traded_usd=_event_traded_usd,
+                    buy_usd=_event_buy_usd,
+                    sell_usd=_event_sell_usd,
                     tpv=total_val,
                     ledger_path=mws_analytics.REBALANCE_LEDGER_JSON,
                 )
@@ -1742,6 +1745,8 @@ def _build_portfolio_tables(analytics: dict) -> str:
             _hist_hash          = _file_md5(mws_analytics.HISTORY_CSV)
             _breadth_hash       = _file_md5(mws_analytics.BREADTH_STATE_JSON)
             _tactical_hash      = _file_md5(mws_analytics.TACTICAL_CASH_STATE_JSON)
+            _drawdown_hash      = _file_md5(mws_analytics.DRAWDOWN_STATE_JSON)
+            _ledger_hash        = _file_md5(mws_analytics.REBALANCE_LEDGER_JSON)
 
             _targets_doc = {
                 "_runtime_meta": {
@@ -1759,6 +1764,8 @@ def _build_portfolio_tables(analytics: dict) -> str:
                 "hist_hash":             _hist_hash,
                 "breadth_state_hash":    _breadth_hash,
                 "tactical_cash_hash":    _tactical_hash,
+                "drawdown_state_hash":   _drawdown_hash,
+                "rebalance_ledger_hash": _ledger_hash,
                 "tpv":                   round(total_val, 2),
                 "sizing_denom":          round(sizing_denom, 2),
                 "compliance_denom":      round(compliance_denom, 2),
@@ -2294,8 +2301,10 @@ def main() -> None:
                 _stored_hash        = _existing_doc.get("holdings_hash", None)
                 _stored_policy_hash = _existing_doc.get("policy_hash", None)
                 _stored_hist_hash   = _existing_doc.get("hist_hash", None)
-                _stored_breadth_hash  = _existing_doc.get("breadth_state_hash", None)
-                _stored_tactical_hash = _existing_doc.get("tactical_cash_hash", None)
+                _stored_breadth_hash    = _existing_doc.get("breadth_state_hash", None)
+                _stored_tactical_hash   = _existing_doc.get("tactical_cash_hash", None)
+                _stored_drawdown_hash   = _existing_doc.get("drawdown_state_hash", None)
+                _stored_ledger_hash     = _existing_doc.get("rebalance_ledger_hash", None)
                 _today_td     = mws_analytics._todays_trading_date()
 
                 def _md5_file(path):
@@ -2305,11 +2314,13 @@ def main() -> None:
                     except Exception:
                         return ""
 
-                _cur_hash         = _md5_file(mws_analytics.HOLDINGS_CSV)
-                _cur_policy_hash  = _md5_file(POLICY_FILE)
-                _cur_hist_hash    = _md5_file(mws_analytics.HISTORY_CSV)
-                _cur_breadth_hash = _md5_file(mws_analytics.BREADTH_STATE_JSON)
-                _cur_tactical_hash = _md5_file(mws_analytics.TACTICAL_CASH_STATE_JSON)
+                _cur_hash           = _md5_file(mws_analytics.HOLDINGS_CSV)
+                _cur_policy_hash    = _md5_file(POLICY_FILE)
+                _cur_hist_hash      = _md5_file(mws_analytics.HISTORY_CSV)
+                _cur_breadth_hash   = _md5_file(mws_analytics.BREADTH_STATE_JSON)
+                _cur_tactical_hash  = _md5_file(mws_analytics.TACTICAL_CASH_STATE_JSON)
+                _cur_drawdown_hash  = _md5_file(mws_analytics.DRAWDOWN_STATE_JSON)
+                _cur_ledger_hash    = _md5_file(mws_analytics.REBALANCE_LEDGER_JSON)
 
                 _tgt_fresh = (
                     _stored_date        >= _today_td           # covers today's prices
@@ -2330,6 +2341,14 @@ def main() -> None:
                     and (
                         _stored_tactical_hash is None          # old format → pass through
                         or _stored_tactical_hash == _cur_tactical_hash
+                    )
+                    and (
+                        _stored_drawdown_hash is None          # old format → pass through
+                        or _stored_drawdown_hash == _cur_drawdown_hash
+                    )
+                    and (
+                        _stored_ledger_hash is None            # old format → pass through
+                        or _stored_ledger_hash == _cur_ledger_hash
                     )
                 )
             except Exception:

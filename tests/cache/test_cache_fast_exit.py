@@ -585,22 +585,53 @@ class TestExtendedCacheHashes:
         doc = self._build_doc(tmp_path, monkeypatch)
         assert "tactical_cash_hash" in doc, "precomputed_targets.json must contain 'tactical_cash_hash'"
 
-    def test_missing_state_file_yields_empty_string_hash(self, tmp_path, monkeypatch):
-        """When breadth/tactical state files don't exist, hash should be '' (no exception)."""
-        # bs.json and tcs.json are not written to tmp_path, so they won't exist
+    def test_targets_json_contains_drawdown_state_hash(self, tmp_path, monkeypatch):
+        """precomputed_targets.json must contain 'drawdown_state_hash' field (Codex P2)."""
         doc = self._build_doc(tmp_path, monkeypatch)
-        # The files don't exist → _file_md5 returns ""
+        assert "drawdown_state_hash" in doc, (
+            "Codex P2: precomputed_targets.json must contain 'drawdown_state_hash' "
+            "so that a drawdown-state change invalidates the cache"
+        )
+
+    def test_targets_json_contains_rebalance_ledger_hash(self, tmp_path, monkeypatch):
+        """precomputed_targets.json must contain 'rebalance_ledger_hash' field (Codex P2)."""
+        doc = self._build_doc(tmp_path, monkeypatch)
+        assert "rebalance_ledger_hash" in doc, (
+            "Codex P2: precomputed_targets.json must contain 'rebalance_ledger_hash' "
+            "so that a ledger change (new rebalance event) invalidates the cache"
+        )
+
+    def test_missing_state_file_yields_empty_string_hash(self, tmp_path, monkeypatch):
+        """When pre-existing state files don't exist, their hashes should be '' (no exception).
+
+        Note: the rebalance ledger may be created *during* the runner run (if any trades
+        fire and `append_rebalance_event` is called), so `rebalance_ledger_hash` can be
+        non-empty after the run. We only test state files that _build_portfolio_tables
+        reads but never writes: breadth state, tactical cash state, and drawdown state.
+        The ledger hash key existence is verified in test_targets_json_contains_*.
+        """
+        doc = self._build_doc(tmp_path, monkeypatch)
+        # The files don't exist before the run → _file_md5 returns ""
         assert doc["breadth_state_hash"] == "", (
             "Missing breadth state file should produce empty string hash, not raise"
         )
         assert doc["tactical_cash_hash"] == "", (
             "Missing tactical cash state file should produce empty string hash, not raise"
         )
+        assert doc["drawdown_state_hash"] == "", (
+            "Missing drawdown state file should produce empty string hash, not raise"
+        )
+        # rebalance_ledger_hash: may be non-empty if the runner fired append_rebalance_event
+        # (which creates the file). Just assert the key is present and is a string.
+        assert isinstance(doc.get("rebalance_ledger_hash"), str), (
+            "rebalance_ledger_hash must be a string (empty or hash), never absent or None"
+        )
 
     def test_backward_compat_old_cache_no_new_hash_fields(self, tmp_path, monkeypatch):
         """
-        If stored targets JSON has no hist_hash/breadth_state_hash/tactical_cash_hash
-        (old format), the fast-exit check must NOT invalidate it (None sentinel passes).
+        If stored targets JSON has no hist_hash / breadth_state_hash / tactical_cash_hash
+        / drawdown_state_hash / rebalance_ledger_hash (old format), the fast-exit check
+        must NOT invalidate it (None sentinel passes through).
         """
         import mws_runner
         import mws_analytics as _mws
@@ -609,7 +640,8 @@ class TestExtendedCacheHashes:
         old_doc = {
             "run_date":     _mws._todays_trading_date(),
             "holdings_hash": "abc123",
-            # no hist_hash, breadth_state_hash, tactical_cash_hash
+            # no hist_hash, breadth_state_hash, tactical_cash_hash,
+            # drawdown_state_hash, rebalance_ledger_hash
         }
         targets_path = str(tmp_path / "precomputed_targets.json")
         with open(targets_path, "w") as f:
@@ -635,15 +667,20 @@ class TestExtendedCacheHashes:
 
         # The fast-exit check should treat missing new-format hashes as matching (None sentinel)
         # We verify by reading the stored doc and checking the sentinel logic manually:
-        stored_hist_hash     = old_doc.get("hist_hash", None)
-        stored_breadth_hash  = old_doc.get("breadth_state_hash", None)
-        stored_tactical_hash = old_doc.get("tactical_cash_hash", None)
+        stored_hist_hash      = old_doc.get("hist_hash", None)
+        stored_breadth_hash   = old_doc.get("breadth_state_hash", None)
+        stored_tactical_hash  = old_doc.get("tactical_cash_hash", None)
+        stored_drawdown_hash  = old_doc.get("drawdown_state_hash", None)
+        stored_ledger_hash    = old_doc.get("rebalance_ledger_hash", None)
         # None sentinel → treat as matching (don't invalidate)
-        assert stored_hist_hash    is None, "Old-format doc should have no hist_hash"
-        assert stored_breadth_hash is None, "Old-format doc should have no breadth_state_hash"
+        assert stored_hist_hash     is None, "Old-format doc should have no hist_hash"
+        assert stored_breadth_hash  is None, "Old-format doc should have no breadth_state_hash"
         assert stored_tactical_hash is None, "Old-format doc should have no tactical_cash_hash"
+        assert stored_drawdown_hash is None, "Old-format doc should have no drawdown_state_hash"
+        assert stored_ledger_hash   is None, "Old-format doc should have no rebalance_ledger_hash"
         # The freshness logic: None → pass (treat as matching), so the cache is fresh
-        for stored in (stored_hist_hash, stored_breadth_hash, stored_tactical_hash):
+        for stored in (stored_hist_hash, stored_breadth_hash, stored_tactical_hash,
+                       stored_drawdown_hash, stored_ledger_hash):
             assert stored is None or stored == "any_value", (
                 "None sentinel must not invalidate cache for old-format files"
             )

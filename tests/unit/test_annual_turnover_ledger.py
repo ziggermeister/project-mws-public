@@ -39,10 +39,11 @@ class TestLoadRebalanceLedger:
         )
 
     def test_append_event_creates_file(self, tmp_path, monkeypatch):
-        """append_rebalance_event creates the ledger file with correct fields."""
+        """append_rebalance_event creates the ledger file with correct buy/sell fields."""
         path = _ledger_path(tmp_path)
         monkeypatch.setattr(mws, "_todays_trading_date", lambda: "2026-03-21")
-        mws.append_rebalance_event(5000.0, 200_000.0, ledger_path=path)
+        mws.append_rebalance_event(buy_usd=5000.0, tpv=200_000.0, sell_usd=2000.0,
+                                   ledger_path=path)
 
         assert os.path.exists(path), "Ledger file must be created"
         with open(path) as f:
@@ -50,22 +51,28 @@ class TestLoadRebalanceLedger:
         assert len(doc["events"]) == 1
         ev = doc["events"][0]
         assert ev["date"] == "2026-03-21"
-        assert ev["traded_usd"] == 5000.0
+        assert ev["buy_usd"] == 5000.0
+        assert ev["sell_usd"] == 2000.0
+        assert ev["total_usd"] == 7000.0
         assert ev["tpv_at_event"] == 200_000.0
-        assert ev["turnover_pct"] == 2.5  # 5000/200000*100
+        assert ev["turnover_pct"] == 3.5  # 7000/200000*100
 
     def test_ytd_accumulates_across_events(self, tmp_path, monkeypatch):
-        """Appending two events on different dates: ytd_traded_usd = sum of both."""
+        """Appending two events on different dates: ytd_traded_usd = sum of buy_usd only."""
         path = _ledger_path(tmp_path)
         monkeypatch.setattr(mws, "_todays_trading_date", lambda: "2026-01-15")
-        mws.append_rebalance_event(10_000.0, 200_000.0, ledger_path=path)
+        # buy=10K, sell=3K → ytd_traded_usd counts only buy=10K
+        mws.append_rebalance_event(buy_usd=10_000.0, tpv=200_000.0, sell_usd=3_000.0,
+                                   ledger_path=path)
 
         monkeypatch.setattr(mws, "_todays_trading_date", lambda: "2026-02-20")
-        mws.append_rebalance_event(8_000.0, 200_000.0, ledger_path=path)
+        # buy=8K, sell=5K → ytd_traded_usd counts only buy=8K
+        mws.append_rebalance_event(buy_usd=8_000.0, tpv=200_000.0, sell_usd=5_000.0,
+                                   ledger_path=path)
 
         ledger = mws.load_rebalance_ledger(ledger_path=path)
         assert ledger["ytd_traded_usd"] == 18_000.0, (
-            "YTD total must accumulate across multiple events"
+            "YTD total must accumulate buy_usd only across multiple events (10K + 8K = 18K)"
         )
         assert len(ledger["events"]) == 2
 
@@ -96,22 +103,49 @@ class TestLoadRebalanceLedger:
         path = _ledger_path(tmp_path)
         monkeypatch.setattr(mws, "_todays_trading_date", lambda: "2026-03-21")
 
-        mws.append_rebalance_event(5000.0, 200_000.0, ledger_path=path)
-        mws.append_rebalance_event(9999.0, 200_000.0, ledger_path=path)  # second call same day
+        mws.append_rebalance_event(buy_usd=5000.0, tpv=200_000.0, ledger_path=path)
+        mws.append_rebalance_event(buy_usd=9999.0, tpv=200_000.0, ledger_path=path)  # second call same day
 
         ledger = mws.load_rebalance_ledger(ledger_path=path)
         assert len(ledger["events"]) == 1, "Idempotency: same-day append must not create duplicate"
-        assert ledger["events"][0]["traded_usd"] == 5000.0, "First event value must be preserved"
+        assert ledger["events"][0]["buy_usd"] == 5000.0, "First event buy_usd must be preserved"
 
     def test_no_tmp_file_left_after_write(self, tmp_path, monkeypatch):
         """append_rebalance_event must clean up .tmp file after atomic write."""
         path = _ledger_path(tmp_path)
         monkeypatch.setattr(mws, "_todays_trading_date", lambda: "2026-03-21")
-        mws.append_rebalance_event(5000.0, 200_000.0, ledger_path=path)
+        mws.append_rebalance_event(buy_usd=5000.0, tpv=200_000.0, ledger_path=path)
 
         assert not os.path.exists(path + ".tmp"), (
             "Atomic write must not leave a .tmp file behind"
         )
+
+    def test_sells_not_counted_toward_ytd_cap(self, tmp_path, monkeypatch):
+        """sell_usd must NOT accumulate in ytd_traded_usd — only buy_usd does.
+
+        The annual cap constrains buy-side only. Sells are compliance-driven and
+        cannot be suppressed, so including them in ytd_traded_usd would cause the
+        cap to bind prematurely on buys.
+        """
+        path = _ledger_path(tmp_path)
+        monkeypatch.setattr(mws, "_todays_trading_date", lambda: "2026-03-21")
+
+        buy_only   = 5_000.0
+        sell_only  = 20_000.0  # large sell — should not affect ytd cap
+        mws.append_rebalance_event(
+            buy_usd=buy_only, tpv=200_000.0, sell_usd=sell_only, ledger_path=path
+        )
+
+        ledger = mws.load_rebalance_ledger(ledger_path=path)
+        assert ledger["ytd_traded_usd"] == buy_only, (
+            f"ytd_traded_usd must equal buy_usd only ({buy_only}), "
+            f"not buy+sell ({buy_only + sell_only}). "
+            "Sells are compliance-driven and cannot be suppressed by the annual cap."
+        )
+        # sell_usd must be stored for informational purposes, not cap enforcement
+        ev = ledger["events"][0]
+        assert ev["sell_usd"] == sell_only, "sell_usd must be recorded for reporting"
+        assert ev["buy_usd"] == buy_only,   "buy_usd must be recorded separately"
 
 
 # ── Tests: runner integration ─────────────────────────────────────────────────
