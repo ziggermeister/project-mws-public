@@ -128,3 +128,44 @@ sleeve_room = max(0.0, cap_frac * denom - l2_total)
 est_usd     = min(est_usd, sleeve_room)
 ```
 This clamps the recommended buy to the remaining sleeve capacity, preventing any momentum buy from creating a cap breach. Compliance buys, trims, DEPLOY, and spike-trims are unaffected.
+
+---
+
+## multi_ticker_sleeve_headroom_sharing
+**Status:** `implemented_2026-03-21`
+**Source:** Gemini 2.5-pro audit 2026-03-20
+**Priority:** P0 — sibling to momentum_buy_sleeve_cap_headroom; fixed in same session
+
+When multiple tickers in the same sleeve both receive `momentum_buy` signals, `_est_trade()` was called independently for each, and each saw the full sleeve headroom (`cap_frac * denom - l2_total`). Their combined raw buys could together exceed available headroom, recreating the cap-breach bug for multi-buyer sleeves.
+
+**Example:** precious_metals headroom = $3,242. SIVR wants $2,100 (capped to $3,242 ✓), IAUM wants $2,400 (also capped to $3,242 ✓). Combined = $4,500 > $3,242 → breach on execution.
+
+**Fix:** After the `raw_trades` Pass 1 loop in `_build_portfolio_tables()`, a sleeve-level scaling pass proportionally reduces each ticker's raw USD so the sleeve total equals available headroom:
+```python
+_sleeve_mom_raw: dict = {}  # l2_name → total raw USD need
+for _t, _d in action_items:
+    if _d["label"] == "BUY" and "momentum_buy" in _d["basis"]:
+        _sleeve_mom_raw[_d["l2"]] = _sleeve_mom_raw.get(_d["l2"], 0.0) + raw_trades[_t][0]
+for _l2n, _total_need in _sleeve_mom_raw.items():
+    # compute _headroom_s = cap * denom - l2_mv; scale_s = min(1, headroom/need)
+    # apply scale_s to all momentum buys in that sleeve
+```
+
+---
+
+## hard_limit_turnover_cap_bypass
+**Status:** `implemented_2026-03-21`
+**Source:** Gemini 2.5-pro audit 2026-03-20
+**Priority:** P0 — dormant until ≥30% drawdown; fixed pre-emptively
+
+Policy v2.9.9 explicitly exempts Priority-1 hard_limit compliance trades from the 20% per-event turnover cap, but the code applied `comp_buy_scale = min(1.0, _cash_lim_scale, _turnover_lim_scale)` unconditionally regardless of drawdown state. During a severe drawdown requiring aggressive floor-restoration buys, the turnover cap would clip the exact trades most critical for risk reduction.
+
+**Fix:** In `_build_portfolio_tables()`, check `dd.get("state") == "hard_limit"` before applying the turnover scale:
+```python
+_in_hard_limit = dd.get("state") == "hard_limit"
+comp_buy_scale = (
+    min(1.0, _cash_lim_scale)                        # hard_limit: cash-only
+    if _in_hard_limit else
+    min(1.0, _cash_lim_scale, _turnover_lim_scale)   # normal: cash + turnover cap
+)
+```

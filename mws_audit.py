@@ -165,29 +165,28 @@ def _load_files() -> str:
 # ── Gemini ────────────────────────────────────────────────────────────────────
 def run_gemini(code_block: str) -> str:
     try:
-        import google.generativeai as genai
+        from google import genai
+        from google.genai import types as genai_types
     except ImportError:
-        return "ERROR: google-generativeai not installed. Run: pip install google-generativeai"
+        return "ERROR: google-genai not installed. Run: pip install google-genai"
 
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return "ERROR: GEMINI_API_KEY not set."
 
-    genai.configure(api_key=api_key)
+    client = genai.Client(api_key=api_key)
 
-    # Use Gemini 2.0 Flash (fast, 1M context) — fall back to 1.5 Pro
-    for model_name in ("gemini-2.0-flash", "gemini-1.5-pro"):
+    # Prefer deepest reasoning model available on the account
+    for model_name in ("gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"):
         try:
-            model = genai.GenerativeModel(
-                model_name=model_name,
-                system_instruction=SYSTEM_PROMPT,
-            )
             print(f"  [Gemini] Using model: {model_name}")
-            response = model.generate_content(
-                code_block,
-                generation_config=genai.GenerationConfig(
-                    temperature=0.2,       # low temp for analytical work
-                    max_output_tokens=8192,
+            response = client.models.generate_content(
+                model=model_name,
+                contents=code_block,
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    temperature=0.2,
+                    max_output_tokens=65536,
                 ),
             )
             return f"# Gemini ({model_name}) Audit\n\n{response.text}"

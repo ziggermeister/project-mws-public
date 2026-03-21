@@ -1045,6 +1045,37 @@ def _build_portfolio_tables(analytics: dict) -> str:
             )
             raw_trades[ticker] = (est_usd or 0.0, est_pfx or "~")
 
+        # Fix (multi-ticker sleeve headroom sharing): When multiple tickers in the
+        # same sleeve both receive momentum_buy signals, each independently saw the
+        # full sleeve headroom in _est_trade(). Their combined buys can exceed the
+        # sleeve cap. Proportionally scale all momentum buys within each sleeve so
+        # their sum never exceeds available headroom.
+        _sleeve_mom_raw: dict = {}  # l2_name → total raw USD need
+        for _t, _d in action_items:
+            if _d["label"] == "BUY" and "momentum_buy" in _d["basis"]:
+                _l2n = _d["l2"]
+                _sleeve_mom_raw[_l2n] = _sleeve_mom_raw.get(_l2n, 0.0) + raw_trades[_t][0]
+        for _l2n, _total_need in _sleeve_mom_raw.items():
+            if _total_need <= 0:
+                continue
+            _l2d_s    = sleeves_l2.get(_l2n, {})
+            _cap_f_s  = _l2d_s.get("cap") or 0.0
+            _l2mv_s   = _l2_mv(_l2n)
+            # All non-overlay tickers in the same sleeve share sizing_denom
+            _denom_s  = next(
+                (ticker_data[_t]["denom"]
+                 for _t, _d in action_items
+                 if _d["l2"] == _l2n and "momentum_buy" in _d["basis"] and _d["label"] == "BUY"),
+                sizing_denom,
+            )
+            _headroom_s = max(0.0, _cap_f_s * _denom_s - _l2mv_s)
+            _scale_s    = min(1.0, _headroom_s / _total_need)
+            if _scale_s < 1.0:
+                for _t, _d in action_items:
+                    if _d["l2"] == _l2n and "momentum_buy" in _d["basis"] and _d["label"] == "BUY":
+                        _old_usd, _pfx = raw_trades[_t]
+                        raw_trades[_t] = (_old_usd * _scale_s, _pfx)
+
         # Pass 2: budget-constrained waterfall
         # Reserves (ring-fenced before any discretionary spending):
         #   1. DEFER-BUY reserve: gated buys will fire within 10 days → keep cash
@@ -1084,8 +1115,21 @@ def _build_portfolio_tables(analytics: dict) -> str:
         _turnover_cap_usd    = total_val * _max_turnover_pct
         _cash_lim_scale      = (total_available   / comp_buy_need) if comp_buy_need > 0 else 1.0
         _turnover_lim_scale  = (_turnover_cap_usd / comp_buy_need) if comp_buy_need > 0 else 1.0
-        comp_buy_scale       = min(1.0, _cash_lim_scale, _turnover_lim_scale)
-        _comp_turnover_bound = (_turnover_lim_scale < _cash_lim_scale and comp_buy_scale < 0.999)
+        # Fix (hard_limit turnover cap bypass): During a hard_limit drawdown, compliance
+        # buys are emergency floor-restoration trades (Priority 1) and are explicitly
+        # policy-exempt from the turnover cap. Without this check, the 20% cap would
+        # clip the exact trades that are most critical in a severe drawdown.
+        _in_hard_limit       = dd.get("state") == "hard_limit"
+        comp_buy_scale       = (
+            min(1.0, _cash_lim_scale)                              # hard_limit: cash-only
+            if _in_hard_limit else
+            min(1.0, _cash_lim_scale, _turnover_lim_scale)        # normal: cash + turnover cap
+        )
+        _comp_turnover_bound = (
+            not _in_hard_limit
+            and _turnover_lim_scale < _cash_lim_scale
+            and comp_buy_scale < 0.999
+        )
         cash_after_comp = total_available - comp_buy_need * comp_buy_scale
 
         # Ring-fence reserves from post-compliance cash
