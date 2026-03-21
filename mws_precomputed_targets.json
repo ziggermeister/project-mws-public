@@ -8,7 +8,7 @@
     "note": "Auto-generated — do not edit. Overwritten on every run. Use this file to drive interactive LLM runs instead of re-deriving targets from raw analytics."
   },
   "run_date": "2026-03-21",
-  "holdings_hash": "",
+  "holdings_hash": "216cae19e8696d1fffbe6c0f510496ee",
   "tpv": 743856.98,
   "sizing_denom": 652933.19,
   "compliance_denom": 652933.19,
@@ -390,11 +390,32 @@
     }
   },
   "sleeves": {
+    "defense_energy": {
+      "mv": 91362.32,
+      "current_pct": 13.99,
+      "floor_pct": 6.0,
+      "cap_pct": 14.0,
+      "status": "in_band"
+    },
     "crypto": {
       "mv": 9132.58,
       "current_pct": 1.4,
       "floor_pct": 0.0,
       "cap_pct": 5.0,
+      "status": "in_band"
+    },
+    "ai_tech": {
+      "mv": 208930.91,
+      "current_pct": 32.0,
+      "floor_pct": 22.0,
+      "cap_pct": 32.0,
+      "status": "in_band"
+    },
+    "precious_metals": {
+      "mv": 94698.08,
+      "current_pct": 14.5,
+      "floor_pct": 8.0,
+      "cap_pct": 15.0,
       "status": "in_band"
     },
     "strategic_materials": {
@@ -403,13 +424,6 @@
       "floor_pct": 4.0,
       "cap_pct": 10.0,
       "status": "ABOVE_CAP"
-    },
-    "ai_tech": {
-      "mv": 208930.91,
-      "current_pct": 32.0,
-      "floor_pct": 22.0,
-      "cap_pct": 32.0,
-      "status": "in_band"
     },
     "core_equity": {
       "mv": 129274.47,
@@ -423,20 +437,6 @@
       "current_pct": 5.79,
       "floor_pct": 4.0,
       "cap_pct": 12.0,
-      "status": "in_band"
-    },
-    "defense_energy": {
-      "mv": 91362.32,
-      "current_pct": 13.99,
-      "floor_pct": 6.0,
-      "cap_pct": 14.0,
-      "status": "in_band"
-    },
-    "precious_metals": {
-      "mv": 94698.08,
-      "current_pct": 14.5,
-      "floor_pct": 8.0,
-      "cap_pct": 15.0,
       "status": "in_band"
     }
   },
