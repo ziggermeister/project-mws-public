@@ -110,3 +110,21 @@ URNM (uranium miners) buy-side EWMA/empirical gap at +1.74pp (emp_p97.5 = 11.19%
 
 **Current gap (as of 2026-03-11):** 1.74pp
 **Action:** Include URNM in monthly calibration audit output. No action until `buy_gap_pp > 3pp` for 2 consecutive monthly runs.
+
+---
+
+## momentum_buy_sleeve_cap_headroom
+**Status:** `implemented_2026-03-21`
+**Source:** Live trade error discovered 2026-03-20 (COPX +45 breach)
+**Priority:** P0 — caused a real compliance breach; fixed immediately
+
+`_est_trade()` computed `momentum_buy` size as `abs(target_mv - t_mv)` with no cap on remaining L2 sleeve headroom. When a sleeve was near (but under) its cap, a momentum buy could recommend an amount exceeding headroom, immediately creating a compliance breach upon execution.
+
+**Real impact (2026-03-20):** strategic_materials was at 9.68% (under 10% cap, $2,091 headroom). System recommended COPX +65 sh ($4,465). User executed +45 sh ($3,094) — still $1,003 over headroom. Sleeve moved to 10.15% (ABOVE_CAP). Required 15-share corrective trim across URNM/COPX/REMX on 2026-03-23.
+
+**Fix:** In `_est_trade()` for `momentum_buy`, added:
+```python
+sleeve_room = max(0.0, cap_frac * denom - l2_total)
+est_usd     = min(est_usd, sleeve_room)
+```
+This clamps the recommended buy to the remaining sleeve capacity, preventing any momentum buy from creating a cap breach. Compliance buys, trims, DEPLOY, and spike-trims are unaffected.

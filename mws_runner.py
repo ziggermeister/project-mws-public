@@ -848,7 +848,19 @@ def _build_portfolio_tables(analytics: dict) -> str:
                 t_mv    = float(hold.loc[hold["Ticker"] == ticker, "MV"].sum())
                 est_usd = abs(target_mv - t_mv)
                 est_usd = max(0.0, est_usd)
-                est_sh  = round(est_usd / t_price) if t_price > 0 else None
+
+                # Cap momentum_buy to remaining sleeve headroom.
+                # Without this, a momentum_buy can push the sleeve above its L2
+                # cap when the sleeve is already near (but under) the cap.
+                # Example: strategic_materials at 9.68% with 10% cap has only
+                # $2,091 headroom — without the cap a buy could recommend $4,465
+                # and execute a compliance breach immediately.
+                if core_basis == "momentum_buy":
+                    cap_frac      = l2_data.get("cap") or 0.0
+                    sleeve_room   = max(0.0, cap_frac * denom - l2_total)
+                    est_usd       = min(est_usd, sleeve_room)
+
+                est_sh  = round(est_usd / t_price) if t_price > 0 and est_usd > 0 else None
                 return est_usd, est_sh, "≈"
 
             return None, None, None
