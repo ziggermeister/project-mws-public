@@ -178,3 +178,23 @@ class TestComputeAndPersistTacticalCashState:
         df = pd.DataFrame()
         result = mws.compute_and_persist_tactical_cash_state(df, state_path=state_path)
         assert result["filter_blocking"] is False
+
+    def test_no_tmp_file_left_after_successful_write(self, tmp_path):
+        """
+        Finding 4 regression: atomic write (.tmp + os.replace) must leave no
+        .tmp file behind after a successful write.
+
+        A lingering .tmp file indicates the write was not atomic — os.replace()
+        did not run, meaning the state file may be inconsistent.
+        """
+        state_path = str(tmp_path / "tactical_cash_state.json")
+        tmp_path_  = state_path + ".tmp"
+        df = _scores_blocking()
+
+        mws.compute_and_persist_tactical_cash_state(df, state_path=state_path)
+
+        assert os.path.exists(state_path), "state file was not written"
+        assert not os.path.exists(tmp_path_), (
+            f"Atomic write left behind a .tmp file at {tmp_path_}. "
+            "os.replace() must clean up the .tmp file on success."
+        )

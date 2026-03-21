@@ -331,3 +331,37 @@ class TestRunnerWaterfall:
             assert tb.get("cash_on_hand", 0) == pytest.approx(0.0, abs=1.0)
         except Exception as e:
             pytest.fail(f"Unexpected exception with zero cash: {e}")
+
+    def test_precomputed_targets_no_tmp_file_left_after_write(self, tmp_path, monkeypatch):
+        """
+        Finding 4 regression: atomic write of mws_precomputed_targets.json
+        (.tmp + os.replace) must leave no .tmp file behind after a successful write.
+
+        A lingering .tmp file means os.replace() didn't run — the targets file
+        could be absent or truncated, breaking the next Claude session that reads it.
+        """
+        policy = make_policy()
+        ba_min = _bucket_a_min(policy)
+        total  = 200_000.0
+        holdings = make_holdings({
+            "VTI":           (400, total * 0.60 / 400, "core_equity"),
+            "IAUM":          ( 50, total * 0.04 / 50,  "precious_metals"),
+            "TREASURY_NOTE": (  1, float(ba_min),       "bucket_a"),
+            "CASH":          (max(1, round(total - total * 0.64 - ba_min)), 1.0, "cash"),
+        })
+        hist   = make_hist(["VTI", "IAUM"], n_rows=300)
+        scores = make_scores({"VTI": 0.5, "IAUM": 0.5})
+        gates  = make_gate_rows(["VTI", "IAUM"])
+
+        targets_path = str(tmp_path / "precomputed_targets.json")
+        tmp_targets  = targets_path + ".tmp"
+
+        _run_with_drawdown(_dd_state(policy, "normal"), tmp_path, monkeypatch,
+                           policy=policy, holdings=holdings,
+                           hist=hist, scores=scores, gates=gates)
+
+        assert os.path.exists(targets_path), "precomputed_targets.json was not written"
+        assert not os.path.exists(tmp_targets), (
+            f"Atomic write left behind a .tmp file at {tmp_targets}. "
+            "os.replace() must clean up the .tmp file on success."
+        )

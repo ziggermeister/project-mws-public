@@ -231,3 +231,25 @@ class TestComputeAndPersistBreadthStates:
         for key in ("current_category", "pending_category", "pending_days",
                     "last_date", "effective_floor"):
             assert key in entry, f"Missing key '{key}' in breadth state entry"
+
+    def test_no_tmp_file_left_after_successful_write(self, tmp_path):
+        """
+        Finding 4 regression: atomic write (.tmp + os.replace) must leave no
+        .tmp file behind after a successful write.
+
+        A lingering .tmp file indicates the write was not atomic — it means
+        os.replace() did not run (e.g., the write raised before reaching it),
+        which would also leave the state file in an inconsistent state.
+        """
+        state_path = str(tmp_path / "breadth_state.json")
+        tmp_path_  = state_path + ".tmp"
+        policy     = _make_policy_with_breadth_floor(hyst_days=1)
+        df         = _scores_n_positive(4)
+
+        mws.compute_and_persist_breadth_states(policy, df, state_path=state_path)
+
+        assert os.path.exists(state_path), "state file was not written"
+        assert not os.path.exists(tmp_path_), (
+            f"Atomic write left behind a .tmp file at {tmp_path_}. "
+            "os.replace() must clean up the .tmp file on success."
+        )
