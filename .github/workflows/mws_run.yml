@@ -46,6 +46,67 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Run test suite (pre-flight gate)
+        # Runs before any data fetch or portfolio computation.
+        # On failure: emails a test-failure alert and aborts the workflow so
+        # no trade recommendation is produced from broken analytics code.
+        id: test-suite
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python -m pytest tests/ -q --tb=short --no-header 2>&1 | tee pytest_output.txt
+
+      - name: Email test failure alert and abort
+        # Runs only when test-suite step failed.
+        # Sends pytest output via Gmail, then exits 1 to fail the workflow.
+        if: steps.test-suite.outcome == 'failure'
+        env:
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          GMAIL_FROM: ${{ secrets.GMAIL_FROM }}
+          GMAIL_TO: ${{ secrets.GMAIL_TO }}
+        run: |
+          python3 - <<'PYEOF'
+          import os, smtplib, sys
+          from email.mime.multipart import MIMEMultipart
+          from email.mime.text import MIMEText
+          from datetime import date
+
+          today     = date.today().isoformat()
+          password  = os.environ.get("GMAIL_APP_PASSWORD")
+          from_addr = os.environ.get("GMAIL_FROM", "bhatnagar.vivek@gmail.com")
+          to_addr   = os.environ.get("GMAIL_TO",   "bhatnagar.vivek@gmail.com")
+
+          try:
+              with open("pytest_output.txt") as f:
+                  output = f.read()
+          except FileNotFoundError:
+              output = "(pytest output not captured)"
+
+          print("=== TEST FAILURE — aborting MWS run ===")
+          print(output)
+
+          if not password:
+              print("GMAIL_APP_PASSWORD not set — test alert not emailed (see logs above).")
+          else:
+              body = (
+                  f"MWS test suite FAILED on {today}.\n"
+                  "Portfolio run was aborted. No trades should be executed.\n\n"
+                  "Fix the failing tests, push to main, and re-trigger the run.\n\n"
+                  "=== pytest -q --tb=short output ===\n\n"
+                  f"{output}"
+              )
+              msg = MIMEMultipart()
+              msg["Subject"] = f"🚨 MWS TEST FAILURE {today} — RUN ABORTED"
+              msg["From"]    = from_addr
+              msg["To"]      = to_addr
+              msg.attach(MIMEText(body, "plain", "utf-8"))
+              with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+                  smtp.login(from_addr, password)
+                  smtp.sendmail(from_addr, to_addr, msg.as_string())
+              print(f"Test failure alert emailed to {to_addr}.")
+          PYEOF
+          exit 1
+
       - name: Fetch latest price history (incremental — last 60 days)
         # Ensures mws_ticker_history.csv is current before analytics runs.
         # Belt-and-suspenders: mws_daily.yml also fetches at 5:30 PM ET and

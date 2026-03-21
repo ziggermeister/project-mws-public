@@ -10,6 +10,11 @@ Usage:
     python3 trigger_run.py --local --no-llm     # local analytics only, no LLM
     python3 trigger_run.py --local --no-tail    # local run, exit immediately
 
+Pre-flight test gate (--local only):
+    pytest tests/ -q --tb=short is run before mws_runner.py.
+    On failure: output is printed to the terminal and the run is aborted.
+    The GitHub Actions workflow has its own equivalent gate in mws_run.yml.
+
 GitHub Actions triggers the same workflow as:
     GitHub → Actions → "MWS Portfolio Run" → Run workflow
 
@@ -89,6 +94,24 @@ def tail_github_run(wait_seconds: int = 15) -> None:
         print(f"View at: gh run view {run_id} --log")
 
 
+def run_preflight_tests(here: str) -> None:
+    """Run pytest pre-flight gate. Streams output to terminal; aborts on failure."""
+    print("=" * 60)
+    print("Pre-flight: running test suite ...")
+    print("=" * 60)
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/", "-q", "--tb=short", "--no-header"],
+        cwd=here,
+    )
+    if result.returncode != 0:
+        print("=" * 60, file=sys.stderr)
+        print("PRE-FLIGHT FAILED: test suite has failures.", file=sys.stderr)
+        print("MWS run aborted. Fix the failing tests before re-running.", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
+        sys.exit(result.returncode)
+    print("All tests passed — proceeding with MWS run.\n")
+
+
 def run_local(no_llm: bool) -> None:
     """Run mws_runner.py locally in the same directory as this script."""
     here = os.path.dirname(os.path.abspath(__file__))
@@ -96,6 +119,8 @@ def run_local(no_llm: bool) -> None:
     if not os.path.exists(runner):
         print(f"ERROR: mws_runner.py not found at {runner}", file=sys.stderr)
         sys.exit(1)
+
+    run_preflight_tests(here)
 
     if no_llm:
         print("Running mws_runner.py locally (analytics + chart only — LLM skipped) ...")
