@@ -6,6 +6,23 @@ Previously stored in `mws_policy.json → future_review_items` (removed in v2.9.
 
 ---
 
+## Open Items — Priority Index
+*Last reviewed: 2026-03-21 (Gemini 2.5-pro + Codex joint audit)*
+
+| # | Item | Priority | Status |
+|---|---|---|---|
+| 1 | `drawdown_recovery_state_machine` | **P1** | Open — merged entry (two duplicates consolidated) |
+| 2 | `sepp_bucket_a_replenishment_rule` | **High** (deadline Dec 2026) | Open — policy + implementation; review by Sep 2026 |
+| 3 | `vix_floor_in_execution_gate` | **Medium** | Open — backtest-gated before any code change |
+| 4 | `precomputed_cache_intraday_staleness` | **Medium-Low** | Open — operationally mitigated by once-daily run |
+| 5 | `annual_turnover_not_tracked` | **P2** | Open — high-effort new infrastructure |
+| 6 | `allocation_layer_sleeve_constraint_interaction` | **Low** | Open — needs regime-transition backtest |
+| 7 | `ai_tech_dispersion_aware_floor` | **Won't Fix** | Closed — design debate resolved; Gemini/Codex agree |
+| 8 | `iaum_fat_tail_monitoring` | **Ops** | Moved to operational monitoring checklist |
+| 9 | `urnm_buy_gate_monitoring` | **Ops** | Moved to operational monitoring checklist |
+
+---
+
 ## ewma_regime_shift_vol_clamp
 **Status:** `implemented_v2.9.4`
 **Source:** ChatGPT fat-tail review (2026-03-11), confirmed by Gemini. Full F1 validation completed 2026-03-11 against extended history (2019–2026).
@@ -18,9 +35,9 @@ EWMA volatility lags true volatility during regime transitions, causing z-score 
 ---
 
 ## iaum_fat_tail_monitoring
-**Status:** `logged_for_future_review`
+**Status:** `moved_to_ops_monitoring_2026-03-21`
 **Source:** ChatGPT + Gemini fat-tail review (2026-03-11)
-**Priority:** Low
+**Priority:** Ops — not an engineering backlog item
 **Scope:** Execution gate — IAUM only
 
 IAUM (gold) EWMA/empirical gap at 1.58pp buy-side (emp_p97.5 = 3.86%, EWMA 2σ = 5.44%). Below the 2pp intervention threshold. Sell-gap at 2.97pp — borderline (trigger at 3pp).
@@ -69,9 +86,10 @@ With a 0–15% TPV band and 22nd-percentile momentum, VXUS targets only 3.3% TPV
 ---
 
 ## ai_tech_dispersion_aware_floor
-**Status:** `logged_for_future_review`
+**Status:** `wont_fix_2026-03-21`
 **Source:** ChatGPT peer review 2026-03-17 (Gemini disagrees — says floor is functioning correctly)
-**Priority:** Low
+**Closed:** 2026-03-21 — Gemini 2.5-pro + Codex joint audit: close as "Won't Fix" unless new evidence; current floor behavior consistent with policy intent
+**Priority:** Closed
 **Scope:** Allocation engine — ai_tech sleeve floor behavior
 
 ChatGPT observes that forcing ai_tech to exactly 22% floor ignores intra-sleeve dispersion: in the 2026-03-17 run, GRID was at 83rd percentile while DTCR/BOTZ were at 28th/33rd. The 22% floor treats them as a monolith. Proposed: if ≥1 ai_tech ticker is above 80th percentile, allow sleeve to sit at 24–26% rather than the hard 22% floor.
@@ -113,9 +131,9 @@ Current Bucket A holds a single Treasury Note maturing December 2026. No formal 
 ---
 
 ## urnm_buy_gate_monitoring
-**Status:** `logged_for_future_review`
+**Status:** `moved_to_ops_monitoring_2026-03-21`
 **Source:** Portfolio-wide gate calibration audit 2026-03-11
-**Priority:** Low
+**Priority:** Ops — not an engineering backlog item
 **Scope:** Execution gate — URNM buy-side only
 **Trigger:** `buy_gap_pp > 3.0`
 
@@ -304,19 +322,37 @@ Bucket A (TREASURY_NOTE ≥ $45K) was computed and flagged as BELOW_MIN but ther
 
 ---
 
-## drawdown_recovery_state_machine_missing
+## drawdown_recovery_state_machine
 **Status:** `logged_for_future_review`
-**Source:** OpenAI Codex audit 2026-03-20
-**Priority:** P1
+**Source:** OpenAI Codex audit 2026-03-20 + Gemini 2.5-pro audit 2026-03-21 (two independent findings merged 2026-03-21)
+**Priority:** P1 — system cannot auto-exit risk-off state as designed; missed gains during recovery rallies
 
-The recovery condition from the policy (`drawdown < 15% for 10 consecutive days OR VTI positive momentum for 5 consecutive days`) is not implemented. Once the drawdown falls below the trigger threshold, `check_drawdown_state()` will immediately return "normal" (no persistence needed for entry), but the recovery condition adds a confirmation delay. Without it, the system could exit and re-enter stress regime rapidly if drawdown hovers near the threshold.
+`check_drawdown_state()` in `mws_analytics.py` is a stateless, point-in-time function. It checks whether the portfolio is *currently* in a drawdown state, but has no memory across runs. The policy (`drawdown_rules.recovery_condition`) specifies two exit conditions:
+1. Drawdown improves to < 15% for **10 consecutive trading days**
+2. VTI shows **positive momentum for 5 consecutive days**
+
+Neither condition can be evaluated without persisted state. Once `soft_limit` or `hard_limit` is activated, it is never automatically lifted — the system stays in risk-off until manually reset, or the point-in-time check sees a non-drawdown reading (which resets immediately, not after the required confirmation window). Additionally, without the confirmation delay the system can oscillate rapidly in and out of stress regime when drawdown hovers near the threshold.
+
+**Impact:** Portfolio can miss entire recovery rallies since the "freeze new buys" rule stays active. Failure mode is being too conservative (stuck in risk-off), not taking excess risk. Escalate to immediate action at first live soft_limit trigger.
+
+**Proposed fix:**
+- New state file `mws_drawdown_state.json` tracking `{state, consecutive_days_recovered, vti_pos_mom_days}`
+- New function `update_and_check_drawdown_state()` replacing `check_drawdown_state()`:
+  - Loads prior state atomically (`.tmp` + `os.replace`)
+  - Checks current drawdown; if in stress regime, increments or resets recovery counters
+  - Tracks VTI positive momentum streak (requires VTI RawScore from `df_scores`)
+  - Transitions to `normal` when either exit condition is satisfied
+  - Persists updated state atomically before returning
+- Implementation note: must be robust to weekend/holiday gaps (counter should not increment on non-trading days)
+
+**Action:** Implement before the next live drawdown event. Low urgency while markets are near all-time highs; escalate to immediate P1 at first soft_limit trigger.
 
 ---
 
 ## precomputed_cache_intraday_staleness
 **Status:** `logged_for_future_review`
 **Source:** OpenAI Codex audit 2026-03-20
-**Priority:** P1 (low urgency — single daily GH Actions run mitigates in practice)
+**Priority:** Medium-Low — operationally mitigated by once-daily GH Actions run; revisit if run frequency increases
 
 `mws_precomputed_targets.json` freshness keyed on `run_date + holdings_hash`. Same-day changes to prices, breadth state, tactical cash state, or drawdown regime are invisible. Only matters if runner is executed multiple times intraday. Fix: include hash of `mws_ticker_history.csv` latest row, `mws_breadth_state.json`, and `mws_tactical_cash_state.json` in freshness check.
 
@@ -365,9 +401,9 @@ Fast-exit check verified date freshness but not ticker universe consistency. If 
 ---
 
 ## drawdown_recovery_not_stateful
-**Status:** `logged_for_future_review`
+**Status:** `merged_2026-03-21` → see `drawdown_recovery_state_machine`
 **Source:** Gemini 2.5-pro audit 2026-03-21 (Finding 3.1), confirmed by OpenAI Codex
-**Priority:** P2 — system is safe (stuck in risk-off, not in risk-on); can miss recovery rallies
+**Priority:** Merged — consolidated into `drawdown_recovery_state_machine` (P1)
 
 `check_drawdown_state()` in `mws_analytics.py` is a point-in-time function. It checks whether the portfolio is *currently* in a drawdown state, but has no memory across runs. The policy (`drawdown_rules.recovery_condition`) specifies two exit conditions:
 1. Drawdown improves to < 15% for **10 consecutive trading days**
