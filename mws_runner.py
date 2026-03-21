@@ -815,7 +815,12 @@ def _build_portfolio_tables(analytics: dict) -> str:
             if base == "TRIM" and gate_sell == "spike_trim":
                 return "SPIKE-TRIM", "#b2ebf2", "spike_trim"
 
-            if base == "BUY" and gate_buy == "defer":
+            # Fix: gate deferral applies to momentum buys only. Compliance buys
+            # (floor/cap enforcement) are explicitly exempt from the execution gate
+            # per policy (execution_gates._meta.does_not_apply_to: cap_floor_compliance).
+            # Without this check, a z-score spike could defer a critical floor-
+            # restoration buy for up to 10 days, leaving the sleeve below its floor.
+            if base == "BUY" and "momentum_buy" in basis and gate_buy == "defer":
                 return "DEFER-BUY", "#ffe082", f"defer|{basis}"
             if base == "BUY":
                 return "BUY",  "#c8e6c9", basis
