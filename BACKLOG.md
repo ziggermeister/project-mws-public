@@ -220,3 +220,117 @@ _mom_cash_scale     = cash_for_discretionary / mom_buy_need if mom_buy_need > 0 
 _mom_turnover_scale = _remaining_turnover     / mom_buy_need if mom_buy_need > 0 else 1.0
 mom_buy_scale       = min(1.0, _mom_cash_scale, _mom_turnover_scale)
 ```
+
+---
+
+## drawdown_rolling_252d_window
+**Status:** `implemented_2026-03-21`
+**Source:** OpenAI Codex audit 2026-03-20
+**Priority:** P0 — active on every run; could keep system stuck in soft/hard_limit indefinitely
+
+`_compute_max_drawdown(wealth)` used `cummax()` over the FULL TWR history (all-time peak). Policy specifies `measurement: peak_to_trough_rolling_252d`. If the portfolio had a deep drawdown years ago, the old all-time high anchors the peak forever and the system could permanently read as hard_limit.
+
+**Fix:** Changed `_compute_max_drawdown(wealth)` → `_compute_max_drawdown(wealth.iloc[-252:])` to measure drawdown from the 1-year rolling high only.
+
+---
+
+## soft_limit_buy_freeze_not_enforced
+**Status:** `implemented_2026-03-21`
+**Source:** OpenAI Codex audit 2026-03-20
+**Priority:** P1 — momentum buys generated during stress; compliance email incorrect during drawdowns
+
+`_action()` did not check `dd["state"]`. During soft_limit (≥22% drawdown), policy mandates freeze of all new momentum buys. The code generated momentum buy signals regardless, leaving freeze enforcement entirely to the LLM. The compliance email (no LLM) would incorrectly recommend momentum buys during stress.
+
+**Fix:** Added `_dd_state` check in `_action()`: if state is soft_limit or hard_limit and the action would be momentum_buy, return `"HOLD", "hold|stress_freeze"` instead.
+
+---
+
+## gate_direction_hardcoded_buy
+**Status:** `implemented_2026-03-21`
+**Source:** OpenAI Codex audit 2026-03-20
+**Priority:** P1 — spike-trim and sell-defer both dead code since launch
+
+`run_analytics()` called `check_execution_gate(trade_direction="BUY")` for ALL tickers. Because `spike_trim` fires only on `direction=SELL` and `sell_defer` fires only on `direction=SELL`, both features were completely inactive — dead code paths that never executed despite being described in policy.
+
+**Fix:** Now computes gates for both BUY and SELL directions per ticker, storing `gate_action_buy` and `gate_action_sell` separately. `_action()` uses the appropriate directional gate. Spike-trim now only fires when the ticker is already headed for a TRIM action (not a BUY). Momentum trim sell-defer returns `hold|sell_defer` to block the trim for the cycle.
+
+---
+
+## l1_cap_enforcement_missing
+**Status:** `logged_for_future_review`
+**Source:** OpenAI Codex audit 2026-03-20
+**Priority:** P1
+
+L1 sleeve caps (growth=60%, real_assets=25%, monetary_hedges=15%, speculative=5%) are computed and displayed but never enforced. Combined buys across L2 sleeves within the same L1 could push the L1 total over its cap while each individual L2 is within its own cap. Requires a post-sizing L1 headroom scaling pass across all child L2 trades.
+
+---
+
+## per_ticker_min_total_not_enforced
+**Status:** `logged_for_future_review`
+**Source:** OpenAI Codex audit 2026-03-20
+**Priority:** P1
+
+Per-ticker `min_total` (TPV-based floor, e.g. VTI: 10%, VXUS: 4%) is never checked as a compliance trigger. The compliance system only enforces L2 sleeve floors (sizing_denom-based). A ticker could fall below its own TPV floor while its L2 sleeve is at its floor. Requires a separate per-ticker compliance buy layer with TPV-based checks, executed with higher precedence than L2 sleeve floors.
+
+---
+
+## bucket_a_minimum_not_enforced
+**Status:** `logged_for_future_review`
+**Source:** OpenAI Codex audit 2026-03-20
+**Priority:** P1
+
+Bucket A (TREASURY_NOTE ≥ $45K) is computed and flagged as BELOW_MIN in the precomputed targets JSON, but there is no code that halts discretionary buys or routes sell proceeds to Bucket A restoration when it is breached. Requires a pre-trade validator that suppresses all momentum/compliance buys and redirects cash when Bucket A is below minimum.
+
+---
+
+## drawdown_recovery_state_machine_missing
+**Status:** `logged_for_future_review`
+**Source:** OpenAI Codex audit 2026-03-20
+**Priority:** P1
+
+The recovery condition from the policy (`drawdown < 15% for 10 consecutive days OR VTI positive momentum for 5 consecutive days`) is not implemented. Once the drawdown falls below the trigger threshold, `check_drawdown_state()` will immediately return "normal" (no persistence needed for entry), but the recovery condition adds a confirmation delay. Without it, the system could exit and re-enter stress regime rapidly if drawdown hovers near the threshold.
+
+---
+
+## precomputed_cache_intraday_staleness
+**Status:** `logged_for_future_review`
+**Source:** OpenAI Codex audit 2026-03-20
+**Priority:** P1 (low urgency — single daily GH Actions run mitigates in practice)
+
+`mws_precomputed_targets.json` freshness keyed on `run_date + holdings_hash`. Same-day changes to prices, breadth state, tactical cash state, or drawdown regime are invisible. Only matters if runner is executed multiple times intraday. Fix: include hash of `mws_ticker_history.csv` latest row, `mws_breadth_state.json`, and `mws_tactical_cash_state.json` in freshness check.
+
+---
+
+## activated_tickers_in_momentum_universe
+**Status:** `logged_for_future_review`
+**Source:** OpenAI Codex audit 2026-03-20
+**Priority:** P2
+
+`run_mws_audit()` may include ACTIVATED (not yet inducted) tickers in the ranking universe even though policy marks them `eligible_for_momentum: false`. These tickers can distort percentile ranks for inducted names without being valid allocatable instruments.
+
+---
+
+## residual_deploy_rule_incorrect
+**Status:** `logged_for_future_review`
+**Source:** OpenAI Codex audit 2026-03-20
+**Priority:** P2
+
+DEPLOY loop greedily fills any positive-blend HOLD ticker sorted by momentum percentile. Policy says: route residual first to underweight inducted tickers by momentum rank, then remainder to VTI only. The current code does not filter for underweight (only checks sleeve cap headroom) and has no explicit VTI fallback.
+
+---
+
+## annual_turnover_not_tracked
+**Status:** `logged_for_future_review`
+**Source:** OpenAI Codex audit 2026-03-20
+**Priority:** P2
+
+Only per-event turnover cap is implemented. Annual YTD turnover (60% cap) and deferred-trade attribution to originating rebalance events are not tracked. Requires a rebalance ledger with rebalance_id and annual YTD accumulator.
+
+---
+
+## fetch_history_fast_exit_skips_universe_changes
+**Status:** `logged_for_future_review`
+**Source:** OpenAI Codex audit 2026-03-20 (also flagged by Gemini)
+**Priority:** P2
+
+Fast-exit check verifies date freshness but not ticker universe consistency. If policy adds or removes tickers on a day where the CSV is otherwise current, the script exits without backfilling the new name or purging the retired one. Fix: check column set against required universe before fast-exit, or include a universe hash in the fast-exit condition.

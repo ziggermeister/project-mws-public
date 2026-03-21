@@ -1125,9 +1125,13 @@ def check_drawdown_state(policy: dict, perf_log: str = PERF_LOG_CSV) -> dict:
             _PHASE_TIMINGS["check_drawdown_state"] = _time.perf_counter() - _t0
             return default
 
-        # Build wealth index from cumulative daily returns, then measure max drawdown
+        # Build wealth index from cumulative daily returns, then measure max drawdown.
+        # Fix: policy specifies peak_to_trough_rolling_252d. Slice to last 252 trading
+        # days so the peak is the 1-year rolling high, not the all-time high.
+        # Without this, a deep drawdown from years ago permanently anchors the peak
+        # and the system can stay stuck in soft_limit/hard_limit indefinitely.
         wealth = (1 + series).cumprod()
-        dd = _compute_max_drawdown(wealth)   # returns negative float
+        dd = _compute_max_drawdown(wealth.iloc[-252:])   # returns negative float
         if dd is None:
             _PHASE_TIMINGS["check_drawdown_state"] = _time.perf_counter() - _t0
             return default

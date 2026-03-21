@@ -109,28 +109,36 @@ def run_analytics() -> dict:
     df_scores = mws_analytics.generate_rankings(policy, hist, candidates, hold)
     mws_analytics.generate_policy_runtime(policy)   # regenerate stripped policy for LLM
 
-    # Per-ticker execution gate (buy direction as default for reporting)
+    # Per-ticker execution gate — compute for BOTH BUY and SELL directions.
+    # Fix: previously hardcoded trade_direction="BUY" for all tickers, making:
+    #   • sell_defer logic dead (never fires — requires direction=SELL)
+    #   • spike_trim logic dead (never fires — requires direction=SELL)
+    # Now computes both directions per ticker; _action() selects the appropriate one.
     gate_rows = []
     gate_cfg = (policy.get("execution_gates", {}) or {}).get("short_term_confirmation", {})
+    _stress_active = dd.get("state") in ("soft_limit", "hard_limit")
     if gate_cfg.get("enabled", False):
         for ticker in candidates:
             t_hist = hist[[ticker]].dropna() if ticker in hist.columns else pd.DataFrame()
             if len(t_hist) < 5:
                 continue
-            result = mws_analytics.check_execution_gate(
-                policy=policy,
-                ticker=ticker,
-                trade_direction="BUY",
-                hist=hist,
-                stress_active=(dd.get("state") == "soft_limit"),
+            r_buy = mws_analytics.check_execution_gate(
+                policy=policy, ticker=ticker, trade_direction="BUY",
+                hist=hist, stress_active=_stress_active,
+            )
+            r_sell = mws_analytics.check_execution_gate(
+                policy=policy, ticker=ticker, trade_direction="SELL",
+                hist=hist, stress_active=_stress_active,
             )
             gate_rows.append({
-                "ticker":       ticker,
-                "gate_action":  result.get("action", "UNKNOWN"),
-                "z_score":      round(result.get("z_score", 0), 3),
-                "vol_clamp":    result.get("vol_clamp_type", "none"),
-                "raw_vol_pct":  round(result.get("raw_vol_2d", 0) * 100, 3),
-                "eff_vol_pct":  round(result.get("effective_vol_2d", 0) * 100, 3),
+                "ticker":            ticker,
+                "gate_action":       r_buy.get("action",  "UNKNOWN"),   # legacy field (BUY)
+                "gate_action_buy":   r_buy.get("action",  "proceed"),
+                "gate_action_sell":  r_sell.get("action", "proceed"),
+                "z_score":           round(r_buy.get("z_score", 0), 3),
+                "vol_clamp":         r_buy.get("vol_clamp_type", "none"),
+                "raw_vol_pct":       round(r_buy.get("raw_vol_2d",   0) * 100, 3),
+                "eff_vol_pct":       round(r_buy.get("effective_vol_2d", 0) * 100, 3),
             })
     df_gates = pd.DataFrame(gate_rows) if gate_rows else pd.DataFrame()
 
@@ -703,7 +711,9 @@ def _build_portfolio_tables(analytics: dict) -> str:
         if df_gates is not None and not df_gates.empty:
             for row in df_gates.to_dict("records"):
                 gates_by_ticker[str(row["ticker"])] = {
-                    "action":  str(row.get("gate_action", "proceed")),
+                    "action":       str(row.get("gate_action",      "proceed")),  # legacy (BUY)
+                    "action_buy":   str(row.get("gate_action_buy",  "proceed")),
+                    "action_sell":  str(row.get("gate_action_sell", "proceed")),
                     "z_score": row.get("z_score"),
                 }
 
@@ -771,17 +781,25 @@ def _build_portfolio_tables(analytics: dict) -> str:
             """Returns (label, bg_color, basis) where basis in
                'compliance_buy' | 'compliance_trim' | 'momentum_buy' |
                'momentum_trim' | 'hold' | 'spike_trim'."""
-            gate_action = gates_by_ticker.get(ticker, {}).get("action", "proceed")
+            _gate       = gates_by_ticker.get(ticker, {})
+            gate_buy    = _gate.get("action_buy",  _gate.get("action", "proceed"))
+            gate_sell   = _gate.get("action_sell", "proceed")
             pct         = scores_by_ticker.get(ticker, {}).get("pct", 0.5)
+            _dd_state   = dd.get("state", "normal")
 
-            if gate_action == "spike_trim":
-                return "SPIKE-TRIM", "#b2ebf2", "spike_trim"
+            # Spike-trim: large upward spike on a ticker that would be trimmed.
+            # Must be evaluated after determining direction — moved below action logic.
 
             if cur_pct < floor_pct - 0.1:
                 base, basis = "BUY",  "compliance_buy"
             elif cur_pct > cap_pct + 0.1:
                 base, basis = "TRIM", "compliance_trim"
             elif pct >= 0.65:
+                # Fix: block momentum buys during soft_limit and hard_limit.
+                # Policy: soft_limit freezes new (momentum) buys; only compliance
+                # buys (floor/cap enforcement) remain active during stress.
+                if _dd_state in ("soft_limit", "hard_limit"):
+                    return "HOLD", "#fff9c4", "hold|stress_freeze"
                 # Absolute momentum filter (v2.9.7): block momentum buy if blend <= 0
                 if scores_by_ticker.get(ticker, {}).get("blend", 0.0) <= 0:
                     return "HOLD", "#fff9c4", "hold|abs_filter"
@@ -791,10 +809,20 @@ def _build_portfolio_tables(analytics: dict) -> str:
             else:
                 return "HOLD", "#fff9c4", "hold"
 
-            if base == "BUY" and gate_action == "defer":
+            # Fix: apply spike_trim only when action direction is SELL (ticker is
+            # being trimmed). Previously checked before action determination,
+            # which could spike-trim a ticker that should be a BUY.
+            if base == "TRIM" and gate_sell == "spike_trim":
+                return "SPIKE-TRIM", "#b2ebf2", "spike_trim"
+
+            if base == "BUY" and gate_buy == "defer":
                 return "DEFER-BUY", "#ffe082", f"defer|{basis}"
             if base == "BUY":
                 return "BUY",  "#c8e6c9", basis
+            # Fix: apply sell-defer for momentum trims only (compliance trims execute
+            # regardless of gate — cap breaches need immediate action).
+            if base == "TRIM" and basis == "momentum_trim" and gate_sell == "defer":
+                return "HOLD", "#fff9c4", "hold|sell_defer"
             return "TRIM", "#ffcdd2", basis
 
         # ── Trade size estimation ─────────────────────────────────────────────
