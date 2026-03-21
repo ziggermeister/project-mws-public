@@ -402,7 +402,6 @@ def run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkey
     total_val = float(holdings["MV"].sum())
     val_asof  = str(hist.index.max().date())
 
-    _dr = policy.get("drawdown_rules", {})
     analytics = {
         "policy":       policy,
         "holdings":     holdings,
@@ -412,8 +411,8 @@ def run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkey
         "drawdown":     {
             "state":      "normal",
             "drawdown":   0.0,
-            "soft_limit": _dr.get("soft_limit", 0.22),
-            "hard_limit": _dr.get("hard_limit", 0.30),
+            "soft_limit": policy["drawdown_rules"]["soft_limit"],
+            "hard_limit": policy["drawdown_rules"]["hard_limit"],
         },
         "df_scores":    scores,
         "df_gates":     gates,

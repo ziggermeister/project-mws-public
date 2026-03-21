@@ -32,12 +32,14 @@ from tests.conftest import (
 
 def _base_holdings():
     """Holdings where sleeves are roughly in-band (VTI dominant, small IAUM and URNM)."""
+    policy = make_policy()
+    ba_min = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
     return make_holdings({
         "VTI":            (100,  230.0, "core_equity"),
         "IAUM":           ( 50,   40.0, "precious_metals"),
         "URNM":           ( 30,   25.0, "strategic_materials"),
         "DBMF":           ( 50,   25.0, "managed_futures"),
-        "TREASURY_NOTE":  (  1, 45000.0, "bucket_a"),
+        "TREASURY_NOTE":  (  1, float(ba_min), "bucket_a"),
         "CASH":           (1000,   1.0, "cash"),
     })
 
@@ -56,17 +58,18 @@ class TestRunnerAction:
         action='BUY' and basis containing 'compliance_buy'.
         """
         # Precious metals floor = 8%, give IAUM only ~1% of portfolio
+        policy = make_policy()
+        ba_min = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
         total = 100_000.0
         holdings = make_holdings({
             "VTI":            (400, total * 0.88 / 400, "core_equity"),
             "IAUM":           (  1,       total * 0.01, "precious_metals"),  # only 1%
-            "TREASURY_NOTE":  (  1,              45000, "bucket_a"),
+            "TREASURY_NOTE":  (  1,        float(ba_min), "bucket_a"),
             "CASH":           (1000,                1.0, "cash"),
         })
         hist   = make_hist(["VTI", "IAUM"], n_rows=300)
         scores = make_scores({"VTI": 0.5, "IAUM": 0.5})
         gates  = make_gate_rows(["VTI", "IAUM"])
-        policy = make_policy()
 
         doc = run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkeypatch)
 
@@ -87,18 +90,19 @@ class TestRunnerAction:
         When sleeve current_pct > cap + 0.1pp, the ticker should have
         action='TRIM' and basis containing 'compliance_trim'.
         """
+        policy = make_policy()
+        ba_min = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
         total = 100_000.0
         # Put IAUM way above precious_metals cap (15%)
         holdings = make_holdings({
             "VTI":            (200, total * 0.60 / 200, "core_equity"),
             "IAUM":           (500,          total * 0.20 / 500, "precious_metals"),  # 20% > 15% cap
-            "TREASURY_NOTE":  (  1,              45000,  "bucket_a"),
+            "TREASURY_NOTE":  (  1,          float(ba_min),  "bucket_a"),
             "CASH":           (  0,                 1.0, "cash"),
         })
         hist   = make_hist(["VTI", "IAUM"], n_rows=300)
         scores = make_scores({"VTI": 0.5, "IAUM": 0.5})
         gates  = make_gate_rows(["VTI", "IAUM"])
-        policy = make_policy()
 
         doc = run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkeypatch)
 
@@ -124,21 +128,22 @@ class TestRunnerAction:
         # VTI at 8% TPV ($16K) — below its min_total of 10% ($20K).
         # VXUS added so core_equity sleeve is in-band (18–38% of sizing_denom),
         # ensuring the compliance_buy fires for ticker min_total, not sleeve floor.
+        policy  = make_policy()
+        ba_min  = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
         vti_mv  = total * 0.08   # $16K → 8% TPV < 10% min_total
         vxus_mv = total * 0.15   # $30K → core_equity total = 23% sizing_denom (in-band)
         iaum_mv = total * 0.10   # $20K → in precious_metals band
-        cash_mv = total - vti_mv - vxus_mv - iaum_mv - 45000
+        cash_mv = total - vti_mv - vxus_mv - iaum_mv - ba_min
         holdings = make_holdings({
             "VTI":           (round(vti_mv / 230),   230.0, "core_equity"),
             "VXUS":          (round(vxus_mv / 60),    60.0, "core_equity"),
             "IAUM":          (round(iaum_mv / 40),    40.0, "precious_metals"),
-            "TREASURY_NOTE": (  1,                 45000.0, "bucket_a"),
+            "TREASURY_NOTE": (  1,           float(ba_min), "bucket_a"),
             "CASH":          (max(1, round(cash_mv)), 1.0, "cash"),
         })
         hist   = make_hist(["VTI", "VXUS", "IAUM"], n_rows=300)
         scores = make_scores({"VTI": 0.5, "VXUS": 0.5, "IAUM": 0.5})
         gates  = make_gate_rows(["VTI", "VXUS", "IAUM"])
-        policy = make_policy()
 
         doc = run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkeypatch)
 
@@ -163,12 +168,14 @@ class TestRunnerAction:
         (execution_gates._meta.does_not_apply_to: cap_floor_compliance).
         A z-score spike should defer momentum_buy but never defer compliance_buy.
         """
+        policy = make_policy()
+        ba_min = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
         total = 100_000.0
         # IAUM at 1% — deep below precious_metals floor of 8% → compliance_buy
         holdings = make_holdings({
             "VTI":           (400, total * 0.89 / 400, "core_equity"),
             "IAUM":          (  1,           total * 0.01, "precious_metals"),
-            "TREASURY_NOTE": (  1,           45000, "bucket_a"),
+            "TREASURY_NOTE": (  1,           float(ba_min), "bucket_a"),
             "CASH":          (1000,            1.0, "cash"),
         })
         hist   = make_hist(["VTI", "IAUM"], n_rows=300)
@@ -176,7 +183,6 @@ class TestRunnerAction:
         # Set gate_action_buy to "defer" for IAUM — should NOT affect compliance buys
         gates  = make_gate_rows(["VTI", "IAUM"],
                                 gate_action_buy={"VTI": "proceed", "IAUM": "defer"})
-        policy = make_policy()
 
         doc = run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkeypatch)
 
@@ -201,18 +207,19 @@ class TestRunnerAction:
         A ticker with high momentum pct (>= 0.65) should return HOLD (stress_freeze)
         when drawdown state is soft_limit.
         """
+        policy = make_policy()
+        ba_min = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
         total = 100_000.0
         holdings = make_holdings({
             "VTI":           (300, total * 0.60 / 300, "core_equity"),
             "IAUM":          (200, total * 0.12 / 200, "precious_metals"),
-            "TREASURY_NOTE": (  1,              45000, "bucket_a"),
+            "TREASURY_NOTE": (  1,         float(ba_min), "bucket_a"),
             "CASH":          (1000,              1.0, "cash"),
         })
         hist   = make_hist(["VTI", "IAUM"], n_rows=300)
         # IAUM has high momentum pct (0.80) and positive RawScore → normally momentum_buy
         scores = make_scores({"VTI": 0.5, "IAUM": 0.80}, tickers_raw={"VTI": 0.05, "IAUM": 0.10})
         gates  = make_gate_rows(["VTI", "IAUM"])
-        policy = make_policy()
 
         import mws_runner
         breadth_path  = str(tmp_path / "bs.json")
@@ -228,7 +235,6 @@ class TestRunnerAction:
         monkeypatch.setattr(mws_runner,    "PRECOMPUTED_TARGETS_FILE",  targets_path)
 
         # Inject soft_limit drawdown state — read thresholds from policy
-        _dr = policy.get("drawdown_rules", {})
         analytics = {
             "policy":    policy,
             "holdings":  holdings,
@@ -236,8 +242,8 @@ class TestRunnerAction:
             "total_val": float(holdings["MV"].sum()),
             "val_asof":  str(hist.index.max().date()),
             "drawdown":  {"state": "soft_limit", "drawdown": -0.23,
-                          "soft_limit": _dr.get("soft_limit", 0.22),
-                          "hard_limit": _dr.get("hard_limit", 0.30)},
+                          "soft_limit": policy["drawdown_rules"]["soft_limit"],
+                          "hard_limit": policy["drawdown_rules"]["hard_limit"]},
             "df_scores": scores,
             "df_gates":  gates,
         }
@@ -266,18 +272,19 @@ class TestRunnerAction:
 
         Floor enforcement (Priority 3) overrides momentum trim (Priority 5).
         """
+        policy = make_policy()
+        ba_min = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
         total = 100_000.0
         holdings = make_holdings({
             "VTI":           (400, total * 0.89 / 400, "core_equity"),
             "IAUM":          (  1,  total * 0.01, "precious_metals"),  # below floor
-            "TREASURY_NOTE": (  1,  45000, "bucket_a"),
+            "TREASURY_NOTE": (  1,  float(ba_min), "bucket_a"),
             "CASH":          (1000,   1.0, "cash"),
         })
         hist   = make_hist(["VTI", "IAUM"], n_rows=300)
         # IAUM has LOW pct (0.20) — would be momentum_trim — but sleeve is below floor
         scores = make_scores({"VTI": 0.5, "IAUM": 0.20})
         gates  = make_gate_rows(["VTI", "IAUM"])
-        policy = make_policy()
 
         doc = run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkeypatch)
         portfolio = doc.get("portfolio", {})
@@ -295,19 +302,20 @@ class TestRunnerAction:
         Conflicting signals: sleeve above cap (normally TRIM) + ticker has high pct
         (which would normally trigger a buy). The compliance_trim should win.
         """
+        policy = make_policy()
+        ba_min = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
         total = 100_000.0
         # IAUM at 20% — above precious_metals cap of 15%
         holdings = make_holdings({
             "VTI":           (200, total * 0.60 / 200, "core_equity"),
             "IAUM":          (200,  total * 0.20 / 200, "precious_metals"),
-            "TREASURY_NOTE": (  1,               45000, "bucket_a"),
+            "TREASURY_NOTE": (  1,           float(ba_min), "bucket_a"),
             "CASH":          (  0,                 1.0, "cash"),
         })
         hist   = make_hist(["VTI", "IAUM"], n_rows=300)
         # IAUM has HIGH pct (0.80) — would be momentum_buy — but sleeve is above cap
         scores = make_scores({"VTI": 0.5, "IAUM": 0.80}, tickers_raw={"VTI": 0.05, "IAUM": 0.10})
         gates  = make_gate_rows(["VTI", "IAUM"])
-        policy = make_policy()
 
         doc = run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkeypatch)
         portfolio = doc.get("portfolio", {})

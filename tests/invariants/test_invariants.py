@@ -47,11 +47,13 @@ def _standard_setup(tmp_path, monkeypatch, drawdown_state="normal",
 
     Returns (doc, tpv) where doc is the parsed JSON and tpv is total portfolio value.
     """
+    policy = make_policy()
+    ba_min = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
     total = 110_000.0
     holdings = make_holdings({
         "VTI":           (200,  total * 0.50 / 200, "core_equity"),
         "IAUM":          (100,  total * 0.10 / 100, "precious_metals"),
-        "TREASURY_NOTE": (  1,  45000.0,             "bucket_a"),
+        "TREASURY_NOTE": (  1,  float(ba_min),       "bucket_a"),
         "CASH":          (500,      1.0,             "cash"),
     })
     if extra_holdings:
@@ -67,7 +69,6 @@ def _standard_setup(tmp_path, monkeypatch, drawdown_state="normal",
     if extra_gates:
         import pandas as pd
         gates = pd.concat([gates, extra_gates], ignore_index=True)
-    policy = make_policy()
 
     import mws_runner
     import mws_analytics
@@ -84,7 +85,6 @@ def _standard_setup(tmp_path, monkeypatch, drawdown_state="normal",
     monkeypatch.setattr(mws_runner,    "PRECOMPUTED_TARGETS_FILE",  targets_path)
 
     tpv = float(holdings["MV"].sum())
-    _dr = policy.get("drawdown_rules", {})
     analytics = {
         "policy":    policy,
         "holdings":  holdings,
@@ -92,8 +92,8 @@ def _standard_setup(tmp_path, monkeypatch, drawdown_state="normal",
         "total_val": tpv,
         "val_asof":  str(hist.index.max().date()),
         "drawdown":  {"state": drawdown_state, "drawdown": 0.0 if drawdown_state == "normal" else -0.23,
-                      "soft_limit": _dr.get("soft_limit", 0.22),
-                      "hard_limit": _dr.get("hard_limit", 0.30)},
+                      "soft_limit": policy["drawdown_rules"]["soft_limit"],
+                      "hard_limit": policy["drawdown_rules"]["hard_limit"]},
         "df_scores": scores,
         "df_gates":  gates,
     }
@@ -205,6 +205,7 @@ class TestPortfolioInvariants:
         gates  = make_gate_rows(["VTI", "IAUM"],
                                 gate_action_buy={"VTI": "defer", "IAUM": "proceed"})
         policy = make_policy()
+        ba_min = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
         # Enable the gate so it actually fires
         policy["execution_gates"]["short_term_confirmation"]["enabled"] = True
 
@@ -212,7 +213,7 @@ class TestPortfolioInvariants:
         holdings = make_holdings({
             "VTI":           (100, total * 0.30 / 100, "core_equity"),
             "IAUM":          ( 50, total * 0.09 /  50, "precious_metals"),
-            "TREASURY_NOTE": (  1, 45000.0,             "bucket_a"),
+            "TREASURY_NOTE": (  1, float(ba_min),       "bucket_a"),
             "CASH":          (5000,   1.0,              "cash"),
         })
 

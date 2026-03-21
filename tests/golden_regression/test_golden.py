@@ -162,10 +162,12 @@ def _assert_golden(scenario_name, doc, tickers_to_lock, est_usd_tol=50.0):
 # ── Standard portfolio setup ──────────────────────────────────────────────────
 
 def _base_portfolio(total=110_000.0):
+    policy = make_policy()
+    ba_min = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
     return make_holdings({
         "VTI":           (200, total * 0.50 / 200, "core_equity"),
         "IAUM":          (100, total * 0.10 / 100, "precious_metals"),
-        "TREASURY_NOTE": (  1,            45000.0,  "bucket_a"),
+        "TREASURY_NOTE": (  1,       float(ba_min), "bucket_a"),
         "CASH":          (500,               1.0,   "cash"),
     })
 
@@ -215,7 +217,6 @@ class TestGoldenRegression:
         monkeypatch.setattr(mws_analytics, "HOLDINGS_CSV",             holdings_csv)
         monkeypatch.setattr(mws_runner,    "PRECOMPUTED_TARGETS_FILE",  targets_path)
 
-        _dr = policy.get("drawdown_rules", {})
         analytics = {
             "policy":    policy,
             "holdings":  holdings,
@@ -223,8 +224,8 @@ class TestGoldenRegression:
             "total_val": float(holdings["MV"].sum()),
             "val_asof":  str(hist.index.max().date()),
             "drawdown":  {"state": "soft_limit", "drawdown": -0.23,
-                          "soft_limit": _dr.get("soft_limit", 0.22),
-                          "hard_limit": _dr.get("hard_limit", 0.30)},
+                          "soft_limit": policy["drawdown_rules"]["soft_limit"],
+                          "hard_limit": policy["drawdown_rules"]["hard_limit"]},
             "df_scores": scores,
             "df_gates":  gates,
         }
@@ -260,7 +261,6 @@ class TestGoldenRegression:
         monkeypatch.setattr(mws_analytics, "HOLDINGS_CSV",             holdings_csv)
         monkeypatch.setattr(mws_runner,    "PRECOMPUTED_TARGETS_FILE",  targets_path)
 
-        _dr = policy.get("drawdown_rules", {})
         analytics = {
             "policy":    policy,
             "holdings":  holdings,
@@ -268,8 +268,8 @@ class TestGoldenRegression:
             "total_val": float(holdings["MV"].sum()),
             "val_asof":  str(hist.index.max().date()),
             "drawdown":  {"state": "hard_limit", "drawdown": -0.31,
-                          "soft_limit": _dr.get("soft_limit", 0.22),
-                          "hard_limit": _dr.get("hard_limit", 0.30)},
+                          "soft_limit": policy["drawdown_rules"]["soft_limit"],
+                          "hard_limit": policy["drawdown_rules"]["hard_limit"]},
             "df_scores": scores,
             "df_gates":  gates,
         }

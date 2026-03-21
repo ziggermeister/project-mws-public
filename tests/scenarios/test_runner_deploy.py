@@ -80,7 +80,6 @@ class TestRunnerDeploy:
                              tickers_raw={"VTI": 0.08, "IAUM": 0.03})
         gates  = make_gate_rows(["VTI", "IAUM"])
 
-        _dr = policy.get("drawdown_rules", {})
         analytics = {
             "policy":    policy,
             "holdings":  holdings,
@@ -88,8 +87,8 @@ class TestRunnerDeploy:
             "total_val": float(holdings["MV"].sum()),
             "val_asof":  str(hist.index.max().date()),
             "drawdown":  {"state": "normal", "drawdown": 0.0,
-                          "soft_limit": _dr.get("soft_limit", 0.22),
-                          "hard_limit": _dr.get("hard_limit", 0.30)},
+                          "soft_limit": policy["drawdown_rules"]["soft_limit"],
+                          "hard_limit": policy["drawdown_rules"]["hard_limit"]},
             "df_scores": scores,
             "df_gates":  gates,
         }
@@ -109,7 +108,6 @@ class TestRunnerDeploy:
         """When cash == 0, no DEPLOY actions should appear."""
         policy  = make_policy()
         ba_min  = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
-        _dr     = policy.get("drawdown_rules", {})
         total   = 200_000.0
         vti_mv  = total * 0.50
         iaum_mv = total * 0.09
@@ -132,8 +130,8 @@ class TestRunnerDeploy:
             "total_val": float(holdings["MV"].sum()),
             "val_asof":  str(hist.index.max().date()),
             "drawdown":  {"state": "normal", "drawdown": 0.0,
-                          "soft_limit": _dr.get("soft_limit", 0.22),
-                          "hard_limit": _dr.get("hard_limit", 0.30)},
+                          "soft_limit": policy["drawdown_rules"]["soft_limit"],
+                          "hard_limit": policy["drawdown_rules"]["hard_limit"]},
             "df_scores": scores,
             "df_gates":  gates,
         }
@@ -160,7 +158,6 @@ class TestRunnerDeploy:
 
         policy = make_policy()
         ba_min = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
-        _dr    = policy.get("drawdown_rules", {})
         holdings = make_holdings({
             "VTI":           (round(vti_mv / 230),  230.0, "core_equity"),
             "IAUM":          (round(iaum_mv / 40),   40.0, "precious_metals"),
@@ -180,8 +177,8 @@ class TestRunnerDeploy:
             "total_val": float(holdings["MV"].sum()),
             "val_asof":  str(hist.index.max().date()),
             "drawdown":  {"state": "normal", "drawdown": 0.0,
-                          "soft_limit": _dr.get("soft_limit", 0.22),
-                          "hard_limit": _dr.get("hard_limit", 0.30)},
+                          "soft_limit": policy["drawdown_rules"]["soft_limit"],
+                          "hard_limit": policy["drawdown_rules"]["hard_limit"]},
             "df_scores": scores,
             "df_gates":  gates,
         }
@@ -207,7 +204,6 @@ class TestRunnerDeploy:
 
         policy = make_policy()
         ba_min = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
-        _dr    = policy.get("drawdown_rules", {})
         holdings = make_holdings({
             "VTI":           (round(vti_mv / 230),  230.0, "core_equity"),
             "IAUM":          (round(iaum_mv / 40),   40.0, "precious_metals"),
@@ -230,8 +226,8 @@ class TestRunnerDeploy:
             "total_val": float(holdings["MV"].sum()),
             "val_asof":  str(hist.index.max().date()),
             "drawdown":  {"state": "normal", "drawdown": 0.0,
-                          "soft_limit": _dr.get("soft_limit", 0.22),
-                          "hard_limit": _dr.get("hard_limit", 0.30)},
+                          "soft_limit": policy["drawdown_rules"]["soft_limit"],
+                          "hard_limit": policy["drawdown_rules"]["hard_limit"]},
             "df_scores": scores,
             "df_gates":  gates,
         }

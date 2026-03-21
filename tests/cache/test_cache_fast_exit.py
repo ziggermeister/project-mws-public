@@ -134,10 +134,11 @@ class TestPrecomputedTargetsFreshness:
         from tests.conftest import make_policy, make_hist, make_holdings, make_scores, make_gate_rows, run_portfolio_tables
 
         policy   = make_policy()
+        ba_min   = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
         holdings = make_holdings({
             "VTI":            (100, 230.0, "core_equity"),
             "IAUM":           (200,  40.0, "precious_metals"),
-            "TREASURY_NOTE":  (1, 45000.0, "bucket_a"),
+            "TREASURY_NOTE":  (1, float(ba_min), "bucket_a"),
             "CASH":           (1,     1.0, "cash"),
         })
         hist     = make_hist(["VTI", "IAUM"], n_rows=300)
@@ -152,10 +153,11 @@ class TestPrecomputedTargetsFreshness:
         from tests.conftest import make_policy, make_hist, make_holdings, make_scores, make_gate_rows, run_portfolio_tables
 
         policy   = make_policy()
+        ba_min   = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
         holdings = make_holdings({
             "VTI":            (100, 230.0, "core_equity"),
             "IAUM":           (200,  40.0, "precious_metals"),
-            "TREASURY_NOTE":  (1, 45000.0, "bucket_a"),
+            "TREASURY_NOTE":  (1, float(ba_min), "bucket_a"),
             "CASH":           (1,     1.0, "cash"),
         })
         hist   = make_hist(["VTI", "IAUM"], n_rows=300)
@@ -176,11 +178,13 @@ class TestPrecomputedTargetsFreshness:
         scores = make_scores({"VTI": 0.5, "IAUM": 0.4})
         gates  = make_gate_rows(["VTI", "IAUM"])
 
+        ba_min = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
+
         def _run(shares_vti, tmp_subdir):
             tmp_subdir.mkdir(parents=True, exist_ok=True)
             holdings = make_holdings({
                 "VTI":            (shares_vti, 230.0, "core_equity"),
-                "TREASURY_NOTE":  (1,          45000.0, "bucket_a"),
+                "TREASURY_NOTE":  (1,          float(ba_min), "bucket_a"),
                 "CASH":           (1,          1.0, "cash"),
             })
             targets_path  = str(tmp_subdir / "precomputed_targets.json")
@@ -196,7 +200,9 @@ class TestPrecomputedTargetsFreshness:
             analytics = {
                 "policy": policy, "holdings": holdings, "hist": hist,
                 "total_val": total_val, "val_asof": str(hist.index.max().date()),
-                "drawdown": {"state": "normal", "drawdown": 0.0, "soft_limit": 0.22, "hard_limit": 0.30},
+                "drawdown": {"state": "normal", "drawdown": 0.0,
+                             "soft_limit": policy["drawdown_rules"]["soft_limit"],
+                             "hard_limit": policy["drawdown_rules"]["hard_limit"]},
                 "df_scores": scores, "df_gates": gates,
             }
             mws_runner._build_portfolio_tables(analytics)
@@ -357,7 +363,8 @@ class TestPolicyHashInvalidation:
             "total_val": float(holdings["MV"].sum()),
             "val_asof":  str(hist.index.max().date()),
             "drawdown":  {"state": "normal", "drawdown": 0.0,
-                          "soft_limit": 0.22, "hard_limit": 0.30},
+                          "soft_limit": policy["drawdown_rules"]["soft_limit"],
+                          "hard_limit": policy["drawdown_rules"]["hard_limit"]},
             "df_scores": scores,
             "df_gates":  gates,
         }
@@ -372,10 +379,11 @@ class TestPolicyHashInvalidation:
         from tests.conftest import make_policy, make_hist, make_holdings, make_scores, make_gate_rows
 
         policy   = make_policy()
+        ba_min   = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
         holdings = make_holdings({
             "VTI":           (100, 230.0, "core_equity"),
             "IAUM":          (200,  40.0, "precious_metals"),
-            "TREASURY_NOTE": (  1, 45000.0, "bucket_a"),
+            "TREASURY_NOTE": (  1, float(ba_min), "bucket_a"),
             "CASH":          (  1,    1.0, "cash"),
         })
         hist   = make_hist(["VTI", "IAUM"], n_rows=300)
@@ -400,9 +408,10 @@ class TestPolicyHashInvalidation:
         import copy
 
         policy   = make_policy()
+        ba_min   = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
         holdings = make_holdings({
             "VTI":           (100, 230.0, "core_equity"),
-            "TREASURY_NOTE": (  1, 45000.0, "bucket_a"),
+            "TREASURY_NOTE": (  1, float(ba_min), "bucket_a"),
             "CASH":          (  1,    1.0, "cash"),
         })
         hist   = make_hist(["VTI"], n_rows=300)
@@ -459,10 +468,11 @@ class TestNativeJsonSerializable:
         from tests.conftest import make_policy, make_hist, make_holdings, make_scores, make_gate_rows
 
         policy   = make_policy()
+        ba_min   = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
         holdings = make_holdings({
             "VTI":           (100, 230.0, "core_equity"),
             "IAUM":          (200,  40.0, "precious_metals"),
-            "TREASURY_NOTE": (  1, 45000.0, "bucket_a"),
+            "TREASURY_NOTE": (  1, float(ba_min), "bucket_a"),
             "CASH":          (500,    1.0, "cash"),
         })
         hist   = make_hist(["VTI", "IAUM"], n_rows=300)
@@ -486,7 +496,8 @@ class TestNativeJsonSerializable:
             "total_val": float(holdings["MV"].sum()),
             "val_asof":  str(hist.index.max().date()),
             "drawdown":  {"state": "normal", "drawdown": 0.0,
-                          "soft_limit": 0.22, "hard_limit": 0.30},
+                          "soft_limit": policy["drawdown_rules"]["soft_limit"],
+                          "hard_limit": policy["drawdown_rules"]["hard_limit"]},
             "df_scores": scores,
             "df_gates":  gates,
         }

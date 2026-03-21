@@ -49,12 +49,14 @@ class TestRunnerConstraints:
         biotech_mv = total * 0.10
         pm_mv      = total * 0.10  # precious_metals (monetary_hedges L1)
 
+        policy = make_policy()
+        ba_min = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
         holdings = make_holdings({
             "VTI":           (round(core_mv / 230),     230.0, "core_equity"),
             "XBI":           (round(biotech_mv / 50),    50.0, "biotech"),
             "IAUM":          (round(pm_mv / 40),         40.0, "precious_metals"),
-            "TREASURY_NOTE": (1,                       45000.0, "bucket_a"),
-            "CASH":          (max(1, round((total - core_mv - biotech_mv - pm_mv - 45000) / 1.0)),
+            "TREASURY_NOTE": (1,                 float(ba_min), "bucket_a"),
+            "CASH":          (max(1, round((total - core_mv - biotech_mv - pm_mv - ba_min) / 1.0)),
                               1.0, "cash"),
         })
         hist   = make_hist(["VTI", "XBI", "IAUM"], n_rows=300)
@@ -64,7 +66,6 @@ class TestRunnerConstraints:
             tickers_raw={"VTI": 0.10, "XBI": 0.08, "IAUM": 0.02},
         )
         gates  = make_gate_rows(["VTI", "XBI", "IAUM"])
-        policy = make_policy()
 
         doc = run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkeypatch)
 
@@ -106,16 +107,17 @@ class TestRunnerConstraints:
         urnm_mv = total * 0.039   # 3.9% — just below 4% max_total
         core_mv = total * 0.60
 
+        policy = make_policy()
+        ba_min = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
         holdings = make_holdings({
             "VTI":           (round(core_mv / 230), 230.0,  "core_equity"),
             "URNM":          (round(urnm_mv / 25),   25.0, "strategic_materials"),
-            "TREASURY_NOTE": (1, 45000.0, "bucket_a"),
-            "CASH":          (max(1, round((total - core_mv - urnm_mv - 45000))), 1.0, "cash"),
+            "TREASURY_NOTE": (1,           float(ba_min), "bucket_a"),
+            "CASH":          (max(1, round((total - core_mv - urnm_mv - ba_min))), 1.0, "cash"),
         })
         hist   = make_hist(["VTI", "URNM"], n_rows=300)
         scores = make_scores({"VTI": 0.5, "URNM": 0.85}, tickers_raw={"VTI": 0.05, "URNM": 0.12})
         gates  = make_gate_rows(["VTI", "URNM"])
-        policy = make_policy()
 
         doc = run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkeypatch)
 
@@ -141,22 +143,23 @@ class TestRunnerConstraints:
         # VTI at 8% TPV ($16K) — below its min_total of 10% ($20K).
         # VXUS fills core_equity sleeve so the sleeve is in-band (18-38% sd),
         # meaning the compliance_buy triggers on ticker min_total, not sleeve floor.
+        policy  = make_policy()
+        ba_min  = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
         vti_mv  = total * 0.08   # $16K
         vxus_mv = total * 0.15   # $30K — core_equity = 29% sd (in-band)
         iaum_mv = total * 0.10   # $20K
-        cash_mv = total - vti_mv - vxus_mv - iaum_mv - 45000
+        cash_mv = total - vti_mv - vxus_mv - iaum_mv - ba_min
 
         holdings = make_holdings({
             "VTI":           (round(vti_mv / 230),   230.0, "core_equity"),
             "VXUS":          (round(vxus_mv / 60),    60.0, "core_equity"),
             "IAUM":          (round(iaum_mv / 40),    40.0, "precious_metals"),
-            "TREASURY_NOTE": (1,                   45000.0, "bucket_a"),
+            "TREASURY_NOTE": (1,              float(ba_min), "bucket_a"),
             "CASH":          (max(1, round(cash_mv)), 1.0, "cash"),
         })
         hist   = make_hist(["VTI", "VXUS", "IAUM"], n_rows=300)
         scores = make_scores({"VTI": 0.5, "VXUS": 0.5, "IAUM": 0.5})
         gates  = make_gate_rows(["VTI", "VXUS", "IAUM"])
-        policy = make_policy()
 
         doc = run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkeypatch)
 
@@ -185,18 +188,21 @@ class TestRunnerConstraints:
         # Set minimum_usd to $50K > $45K so the runner detects a breach.
         # This validates the code reads from the CORRECT policy path:
         #   definitions.buckets.bucket_a_protected_liquidity.minimum_usd
+        # Read default ba_min (45K) for holdings, then override minimum_usd to 50K
+        # to create a deliberate Bucket A breach (45K asset value < 50K minimum).
+        policy = make_policy()
+        ba_min = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
         holdings = make_holdings({
             "VTI":           (400, total * 0.70 / 400, "core_equity"),
             "IAUM":          (100, total * 0.07 / 100, "precious_metals"),
-            "TREASURY_NOTE": (1, 45000.0, "bucket_a"),  # $45K < $50K minimum_usd
-            "CASH":          (max(1, round(total - total * 0.77 - 45000)), 1.0, "cash"),
+            "TREASURY_NOTE": (1,           float(ba_min), "bucket_a"),  # $45K < $50K minimum_usd
+            "CASH":          (max(1, round(total - total * 0.77 - ba_min)), 1.0, "cash"),
         })
         hist   = make_hist(["VTI", "IAUM"], n_rows=300)
         scores = make_scores({"VTI": 0.5, "IAUM": 0.85}, tickers_raw={"VTI": 0.05, "IAUM": 0.12})
         gates  = make_gate_rows(["VTI", "IAUM"])
 
-        # Policy with higher minimum_usd ($50K) at the CORRECT path
-        policy = make_policy()
+        # Override minimum_usd to $50K at the CORRECT path to trigger a breach
         policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"] = 50_000
 
         doc = run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkeypatch)
@@ -222,15 +228,16 @@ class TestRunnerConstraints:
         When sizing_denom ≈ 0 (edge case: all assets are overlays + bucket_a),
         _build_portfolio_tables() must not raise ZeroDivisionError.
         """
+        policy = make_policy()
+        ba_min = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
         holdings = make_holdings({
             "DBMF":          (100, 25.0, "managed_futures"),  # overlay
-            "TREASURY_NOTE": (1, 45000.0, "bucket_a"),
+            "TREASURY_NOTE": (1, float(ba_min), "bucket_a"),
             "CASH":          (1,     1.0, "cash"),
         })
         hist   = make_hist(["DBMF"], n_rows=300)
         scores = make_scores({"DBMF": 0.5})
         gates  = make_gate_rows(["DBMF"])
-        policy = make_policy()
 
         # Should not raise
         try:

@@ -33,12 +33,11 @@ import mws_analytics
 
 def _dd_state(policy, regime, drawdown=0.0):
     """Build a drawdown state dict reading thresholds from policy."""
-    _dr = policy.get("drawdown_rules", {})
     return {
         "state":      regime,
         "drawdown":   drawdown,
-        "soft_limit": _dr.get("soft_limit", 0.22),
-        "hard_limit": _dr.get("hard_limit", 0.30),
+        "soft_limit": policy["drawdown_rules"]["soft_limit"],
+        "hard_limit": policy["drawdown_rules"]["hard_limit"],
     }
 
 
