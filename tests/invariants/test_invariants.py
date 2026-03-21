@@ -83,9 +83,6 @@ def _standard_setup(tmp_path, monkeypatch, drawdown_state="normal",
     monkeypatch.setattr(mws_analytics, "HOLDINGS_CSV",             holdings_csv)
     monkeypatch.setattr(mws_runner,    "PRECOMPUTED_TARGETS_FILE",  targets_path)
 
-    from tests.conftest import _patch_json_dump
-    _patch_json_dump(monkeypatch)
-
     tpv = float(holdings["MV"].sum())
     analytics = {
         "policy":    policy,

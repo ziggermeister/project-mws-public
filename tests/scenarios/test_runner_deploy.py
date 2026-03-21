@@ -26,7 +26,6 @@ from tests.conftest import (
     make_holdings,
     make_scores,
     make_gate_rows,
-    _patch_json_dump,
 )
 
 
@@ -44,7 +43,6 @@ def _run_with_analytics(analytics, tmp_path, monkeypatch):
     monkeypatch.setattr(mws_analytics, "TACTICAL_CASH_STATE_JSON",  tactical_path)
     monkeypatch.setattr(mws_analytics, "HOLDINGS_CSV",             holdings_csv)
     monkeypatch.setattr(mws_runner,    "PRECOMPUTED_TARGETS_FILE",  targets_path)
-    _patch_json_dump(monkeypatch)
 
     mws_runner._build_portfolio_tables(analytics)
 

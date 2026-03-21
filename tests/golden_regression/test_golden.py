@@ -43,7 +43,6 @@ from tests.conftest import (
     make_scores,
     make_gate_rows,
     run_portfolio_tables,
-    _patch_json_dump,
 )
 
 _GOLDEN_DIR = os.path.join(os.path.dirname(__file__), "..", "golden")
@@ -138,6 +137,21 @@ def _assert_golden(scenario_name, doc, tickers_to_lock, est_usd_tol=50.0):
                     f"{ticker}: est_usd {row['est_usd']} differs from golden "
                     f"{expected['est_usd']} by > ${est_usd_tol:.0f}"
                 )
+        # Check gate_action (exact match — Codex P2: was stored but never compared)
+        if expected.get("gate_action") is not None:
+            if row.get("gate_action") != expected["gate_action"]:
+                failures.append(
+                    f"{ticker}: gate_action {row.get('gate_action')!r} != "
+                    f"expected {expected['gate_action']!r}"
+                )
+        # Check current_pct within 2pp tolerance (Codex P2: was stored but never compared)
+        # Drift beyond 2pp indicates a holding-size calculation regression
+        if expected.get("current_pct") is not None and row.get("current_pct") is not None:
+            if abs(row["current_pct"] - expected["current_pct"]) > 2.0:
+                failures.append(
+                    f"{ticker}: current_pct {row['current_pct']:.2f}% differs from golden "
+                    f"{expected['current_pct']:.2f}% by > 2pp"
+                )
 
     assert not failures, (
         f"Golden regression failed for scenario '{scenario_name}':\n"
@@ -200,7 +214,6 @@ class TestGoldenRegression:
         monkeypatch.setattr(mws_analytics, "TACTICAL_CASH_STATE_JSON",  tactical_path)
         monkeypatch.setattr(mws_analytics, "HOLDINGS_CSV",             holdings_csv)
         monkeypatch.setattr(mws_runner,    "PRECOMPUTED_TARGETS_FILE",  targets_path)
-        _patch_json_dump(monkeypatch)
 
         analytics = {
             "policy":    policy,
@@ -244,7 +257,6 @@ class TestGoldenRegression:
         monkeypatch.setattr(mws_analytics, "TACTICAL_CASH_STATE_JSON",  tactical_path)
         monkeypatch.setattr(mws_analytics, "HOLDINGS_CSV",             holdings_csv)
         monkeypatch.setattr(mws_runner,    "PRECOMPUTED_TARGETS_FILE",  targets_path)
-        _patch_json_dump(monkeypatch)
 
         analytics = {
             "policy":    policy,

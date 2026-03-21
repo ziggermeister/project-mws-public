@@ -27,7 +27,6 @@ from tests.conftest import (
 
 import mws_runner
 import mws_analytics
-from tests.conftest import _patch_json_dump
 
 
 # ── Helper: inject drawdown state into analytics ──────────────────────────────
@@ -62,7 +61,6 @@ def _run_with_drawdown(state, tmp_path, monkeypatch, policy=None, holdings=None,
     monkeypatch.setattr(mws_analytics, "TACTICAL_CASH_STATE_JSON",  tactical_path)
     monkeypatch.setattr(mws_analytics, "HOLDINGS_CSV",             holdings_csv)
     monkeypatch.setattr(mws_runner,    "PRECOMPUTED_TARGETS_FILE",  targets_path)
-    _patch_json_dump(monkeypatch)
 
     analytics = {
         "policy":    policy,

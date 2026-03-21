@@ -437,9 +437,6 @@ def run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkey
     monkeypatch.setattr(mws_runner,    "PRECOMPUTED_TARGETS_FILE",   targets_path)
     monkeypatch.setattr(mws_analytics, "HOLDINGS_CSV",              holdings_csv)
 
-    # Patch json.dump to handle numpy.bool_ (Python 3.9 can't serialize numpy booleans)
-    _patch_json_dump(monkeypatch)
-
     # Compute total_val from holdings
     total_val = float(holdings["MV"].sum())
     val_asof  = str(hist.index.max().date())

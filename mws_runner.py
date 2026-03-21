@@ -661,7 +661,7 @@ def _build_portfolio_tables(analytics: dict) -> str:
             .get("bucket_a_protected_liquidity", {})
             .get("minimum_usd", 45000)          # authoritative field: definitions.buckets.bucket_a_protected_liquidity.minimum_usd
         )
-        _bucket_a_breach = bucket_a_mv < _bucket_a_min
+        _bucket_a_breach = bool(bucket_a_mv < _bucket_a_min)  # cast: pandas comparison → numpy.bool_ → bool
 
         # ── Bifurcated denominators — tactical cash management (v2.9.8) ──────
         # sizing_denom    = full deployable pie; cash stays visible so recovery
@@ -1222,7 +1222,7 @@ def _build_portfolio_tables(analytics: dict) -> str:
             comp_buy_scale = min(1.0, _cash_lim_scale)            # hard_limit: cash-only
         else:
             comp_buy_scale = min(1.0, _cash_lim_scale, _turnover_lim_scale)  # normal
-        _comp_turnover_bound = (
+        _comp_turnover_bound = bool(   # cast: chained numpy comparisons can return numpy.bool_
             not _bucket_a_breach
             and not _in_hard_limit
             and _turnover_lim_scale < _cash_lim_scale

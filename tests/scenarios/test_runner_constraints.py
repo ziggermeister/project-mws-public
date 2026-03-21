@@ -24,7 +24,6 @@ from tests.conftest import (
     make_scores,
     make_gate_rows,
     run_portfolio_tables,
-    _patch_json_dump,
 )
 
 

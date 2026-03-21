@@ -148,7 +148,7 @@ def _file_is_post_close(filepath: str) -> bool:
     return mtime >= last_close
 
 
-def _history_is_stale(history_csv: str) -> bool:
+def _history_is_stale(history_csv: str, required_tickers=None) -> bool:
     """
     Return True if the ticker history needs to be refreshed.
 
@@ -156,6 +156,14 @@ def _history_is_stale(history_csv: str) -> bool:
     market is not currently open), prices are already current — skip the CSV
     read entirely.  During live market hours the fast path is bypassed so that
     intraday RT prices are always re-fetched.
+
+    Optional universe check (Bug #17 fix): if required_tickers is provided,
+    also returns True when any required ticker is absent from the CSV columns.
+    This detects same-day universe changes (e.g. a new ticker added to the
+    policy) that would otherwise be silently skipped by the date-only check.
+    The call site in load_system_files omits required_tickers (date-only check)
+    because the policy is not yet loaded at that point; callers with policy
+    context can pass the full ticker list to get universe-aware staleness.
     """
     if _file_is_post_close(history_csv):
         return False                   # file is fresh; no fetch needed
@@ -163,7 +171,15 @@ def _history_is_stale(history_csv: str) -> bool:
         # Wide format: Date is the index (first column); read only that column
         df = pd.read_csv(history_csv, index_col=0, parse_dates=True, usecols=[0])
         latest = df.index.max().strftime("%Y-%m-%d")
-        return latest < _todays_trading_date()
+        if latest < _todays_trading_date():
+            return True               # date stale
+        # Universe check: verify all required tickers have a column
+        if required_tickers:
+            header = pd.read_csv(history_csv, nrows=0)
+            available = set(header.columns)
+            if set(required_tickers) - available:
+                return True           # missing tickers → stale
+        return False
     except Exception:
         return False  # if we can't read the file, let load_system_files handle it
 

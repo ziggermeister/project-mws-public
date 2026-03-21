@@ -25,7 +25,6 @@ from tests.conftest import (
     make_scores,
     make_gate_rows,
     run_portfolio_tables,
-    _patch_json_dump,
 )
 
 
@@ -227,7 +226,6 @@ class TestRunnerAction:
         monkeypatch.setattr(mws_analytics, "TACTICAL_CASH_STATE_JSON",  tactical_path)
         monkeypatch.setattr(mws_analytics, "HOLDINGS_CSV",             holdings_csv)
         monkeypatch.setattr(mws_runner,    "PRECOMPUTED_TARGETS_FILE",  targets_path)
-        _patch_json_dump(monkeypatch)
 
         # Inject soft_limit drawdown state
         analytics = {

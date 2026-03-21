@@ -191,8 +191,6 @@ class TestPrecomputedTargetsFreshness:
             monkeypatch.setattr(_mws,     "BREADTH_STATE_JSON",        str(tmp_subdir / "bs.json"))
             monkeypatch.setattr(_mws,     "TACTICAL_CASH_STATE_JSON",   str(tmp_subdir / "tcs.json"))
             monkeypatch.setattr(mws_runner, "PRECOMPUTED_TARGETS_FILE", targets_path)
-            from tests.conftest import _patch_json_dump
-            _patch_json_dump(monkeypatch)
 
             total_val = float(holdings["MV"].sum())
             analytics = {
@@ -216,45 +214,38 @@ class TestPrecomputedTargetsFreshness:
     @pytest.mark.regression
     def test_bug17_universe_change_invalidates_history(self, tmp_path, monkeypatch):
         """
-        Bug #17 regression: fast-exit should NOT be taken when ticker universe changes.
+        Bug #17 regression: fast-exit must be skipped when a required ticker is absent
+        from the history CSV even though the date is current.
 
-        The old fast-exit logic only checked the date, not whether the ticker
-        columns matched the current policy universe. Adding a new ticker would
-        leave it without price history until the next day's fetch.
+        Fix: _history_is_stale() now accepts an optional required_tickers parameter.
+        When provided, it reads the CSV header after the date check and returns True
+        (stale) if any required ticker is missing from the columns.
 
-        This test verifies that _history_is_stale returns True when the history
-        file exists and is dated today but is MISSING a ticker that should be there.
-
-        Note: _history_is_stale() in the current code checks date only (the
-        column-check was the proposed fix). This test documents the expected
-        behavior of a complete implementation and will pass if the fix is in place.
-        Since the current implementation relies on _file_is_post_close() for the
-        true fast-exit and falls back to date checking, this test verifies the
-        date-based check is at least correct.
+        The no-arg call site in load_system_files is unchanged (date-only check,
+        because the policy is not yet loaded at that point).  Callers with policy
+        context should pass required_tickers to get universe-aware staleness.
         """
         today = "2026-03-20"
         monkeypatch.setattr(mws, "_todays_trading_date", lambda: today)
         monkeypatch.setattr(mws, "_file_is_post_close", lambda path: False)
 
         path = str(tmp_path / "hist.csv")
-        # Write history that is current-dated but missing ticker "NEWT"
+        # Write history dated today, but missing ticker "NEWT"
         dates = pd.bdate_range(end=today, periods=5).strftime("%Y-%m-%d").tolist()
         _write_wide_csv(path, ["VTI"], dates)  # NEWT is NOT in this file
 
-        # Codex P1 fix: this was `assert isinstance(result, bool)` — a no-op assertion
-        # that always passes whether the bug is fixed or not.  Converted to xfail so it:
-        #   (a) documents the unfixed bug clearly in CI output
-        #   (b) fails loudly if the bug IS fixed (unexpected pass → promote to real test)
-        #   (c) does not silently pass masquerading as coverage
-        #
-        # To fix Bug #17: modify _history_is_stale() to accept required_tickers and
-        # return True (stale) when any required ticker is missing from the CSV columns.
-        result = mws._history_is_stale(path)
-        pytest.xfail(
-            "Bug #17: _history_is_stale() only checks date, not ticker universe. "
-            "A history file dated today but missing a newly-added policy ticker "
-            "returns False (fresh), so the new ticker gets no price history. "
-            f"Actual result: {result}. Fix: add column-set check to _history_is_stale()."
+        # Without required_tickers: date-only check → fresh (backward-compatible)
+        result_no_tickers = mws._history_is_stale(path)
+        assert result_no_tickers is False, (
+            "Date-only check (no required_tickers): current-dated file must be fresh"
+        )
+
+        # With required_tickers including the missing ticker → stale
+        result_with_tickers = mws._history_is_stale(path, required_tickers=["VTI", "NEWT"])
+        assert result_with_tickers is True, (
+            "Bug #17: history is current-dated but missing 'NEWT'. "
+            "_history_is_stale(required_tickers=['VTI','NEWT']) must return True "
+            "so the system re-fetches and populates NEWT price history."
         )
 
 
@@ -300,8 +291,6 @@ class TestPolicyHashInvalidation:
         monkeypatch.setattr(_mws,       "TACTICAL_CASH_STATE_JSON", str(tmp_path / "tcs.json"))
         monkeypatch.setattr(mws_runner, "PRECOMPUTED_TARGETS_FILE", targets_path)
 
-        from tests.conftest import _patch_json_dump
-        _patch_json_dump(monkeypatch)
 
         analytics = {
             "policy":    policy,
