@@ -29,7 +29,23 @@ import mws_runner
 import mws_analytics
 
 
-# ── Helper: inject drawdown state into analytics ──────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _dd_state(policy, regime, drawdown=0.0):
+    """Build a drawdown state dict reading thresholds from policy."""
+    _dr = policy.get("drawdown_rules", {})
+    return {
+        "state":      regime,
+        "drawdown":   drawdown,
+        "soft_limit": _dr.get("soft_limit", 0.22),
+        "hard_limit": _dr.get("hard_limit", 0.30),
+    }
+
+
+def _bucket_a_min(policy):
+    """Return the Bucket A minimum USD from policy."""
+    return policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
+
 
 def _run_with_drawdown(state, tmp_path, monkeypatch, policy=None, holdings=None,
                        scores=None, gates=None, hist=None):
@@ -37,12 +53,13 @@ def _run_with_drawdown(state, tmp_path, monkeypatch, policy=None, holdings=None,
     if policy is None:
         policy = make_policy()
     if holdings is None:
-        total = 200_000.0
+        total      = 200_000.0
+        ba_min     = _bucket_a_min(policy)
         holdings = make_holdings({
             "VTI":           (400,  total * 0.60 / 400, "core_equity"),
             "IAUM":          ( 50,  total * 0.04 / 50,  "precious_metals"),  # below floor
-            "TREASURY_NOTE": (  1,  45000.0,             "bucket_a"),
-            "CASH":          (max(1, round(total - total * 0.64 - 45000)), 1.0, "cash"),
+            "TREASURY_NOTE": (  1,  float(ba_min),       "bucket_a"),
+            "CASH":          (max(1, round(total - total * 0.64 - ba_min)), 1.0, "cash"),
         })
     if hist is None:
         hist = make_hist(["VTI", "IAUM"], n_rows=300)
@@ -94,24 +111,24 @@ class TestRunnerWaterfall:
         Setup: large compliance buy needed (> 20% turnover), in hard_limit state.
         Expected: comp_buy_scale == 1.0 (not capped by turnover).
         """
-        total = 200_000.0
-        # IAUM at 2% — deeply below precious_metals floor of 8%
-        holdings = make_holdings({
+        policy    = make_policy()
+        ba_min    = _bucket_a_min(policy)
+        total     = 200_000.0
+        holdings  = make_holdings({
             "VTI":           (400, total * 0.74 / 400, "core_equity"),
             "IAUM":          (  1,  total * 0.02,      "precious_metals"),  # 2% << 8%
-            "TREASURY_NOTE": (  1,  45000.0,            "bucket_a"),
-            "CASH":          (max(1, round(total - total * 0.76 - 45000)), 1.0, "cash"),
+            "TREASURY_NOTE": (  1,  float(ba_min),      "bucket_a"),
+            "CASH":          (max(1, round(total - total * 0.76 - ba_min)), 1.0, "cash"),
         })
         hist   = make_hist(["VTI", "IAUM"], n_rows=300)
         scores = make_scores({"VTI": 0.5, "IAUM": 0.5})
         gates  = make_gate_rows(["VTI", "IAUM"])
 
-        # hard_limit state
-        dd_state = {"state": "hard_limit", "drawdown": -0.32,
-                    "soft_limit": 0.22, "hard_limit": 0.30}
+        dd_state = _dd_state(policy, "hard_limit", -0.32)
 
         doc = _run_with_drawdown(dd_state, tmp_path, monkeypatch,
-                                 holdings=holdings, hist=hist, scores=scores, gates=gates)
+                                 policy=policy, holdings=holdings,
+                                 hist=hist, scores=scores, gates=gates)
 
         tb = doc.get("trade_budget", {})
         comp_buy_scale = tb.get("comp_buy_scale", None)
@@ -132,23 +149,27 @@ class TestRunnerWaterfall:
         Policy (Priority 2): validators.bucket_a_minimum → halt_all_buys_restore_bucket_a.
         This overrides priorities 3-5 (compliance buys are Priority 3).
         """
-        total = 150_000.0
-        # TREASURY_NOTE at $40K — below $45K minimum → Bucket A breach
+        policy   = make_policy()
+        ba_min   = _bucket_a_min(policy)
+        # Deliberately set TREASURY_NOTE below the minimum to trigger Bucket A breach.
+        # Use ba_min - 5000 to ensure the breach is meaningful regardless of policy value.
+        breach_val = float(ba_min) - 5000.0
+        total    = 150_000.0
         holdings = make_holdings({
             "VTI":           (300,  total * 0.65 / 300, "core_equity"),
-            "IAUM":          (  1,  total * 0.02,        "precious_metals"),  # below floor → compliance_buy needed
-            "TREASURY_NOTE": (  1,  40000.0,             "bucket_a"),  # $40K < $45K
-            "CASH":          (max(1, round(total - total * 0.67 - 40000)), 1.0, "cash"),
+            "IAUM":          (  1,  total * 0.02,        "precious_metals"),  # below floor
+            "TREASURY_NOTE": (  1,  breach_val,          "bucket_a"),  # below minimum
+            "CASH":          (max(1, round(total - total * 0.67 - breach_val)), 1.0, "cash"),
         })
         hist   = make_hist(["VTI", "IAUM"], n_rows=300)
         scores = make_scores({"VTI": 0.5, "IAUM": 0.5})
         gates  = make_gate_rows(["VTI", "IAUM"])
 
-        dd_state = {"state": "normal", "drawdown": 0.0,
-                    "soft_limit": 0.22, "hard_limit": 0.30}
+        dd_state = _dd_state(policy, "normal")
 
         doc = _run_with_drawdown(dd_state, tmp_path, monkeypatch,
-                                 holdings=holdings, hist=hist, scores=scores, gates=gates)
+                                 policy=policy, holdings=holdings,
+                                 hist=hist, scores=scores, gates=gates)
 
         tb = doc.get("trade_budget", {})
         comp_buy_scale = tb.get("comp_buy_scale")
@@ -177,14 +198,15 @@ class TestRunnerWaterfall:
         This test verifies that the combined (compliance + momentum) turnover
         does not exceed max_turnover × TPV.
         """
-        total = 200_000.0
-        # Both momentum buy and compliance buy will be triggered
+        policy = make_policy()
+        ba_min = _bucket_a_min(policy)
+        total  = 200_000.0
         holdings = make_holdings({
             "VTI":           (300, total * 0.60 / 300, "core_equity"),
-            "IAUM":          (  1, total * 0.02,        "precious_metals"),  # below floor → comp buy
+            "IAUM":          (  1, total * 0.02,        "precious_metals"),  # below floor
             "URNM":          (200, total * 0.05 / 200, "strategic_materials"),
-            "TREASURY_NOTE": (  1,  45000.0,            "bucket_a"),
-            "CASH":          (max(1, round(total - total * 0.67 - 45000)), 1.0, "cash"),
+            "TREASURY_NOTE": (  1,  float(ba_min),       "bucket_a"),
+            "CASH":          (max(1, round(total - total * 0.67 - ba_min)), 1.0, "cash"),
         })
         hist   = make_hist(["VTI", "IAUM", "URNM"], n_rows=300)
         scores = make_scores(
@@ -193,19 +215,18 @@ class TestRunnerWaterfall:
         )
         gates  = make_gate_rows(["VTI", "IAUM", "URNM"])
 
-        dd_state = {"state": "normal", "drawdown": 0.0,
-                    "soft_limit": 0.22, "hard_limit": 0.30}
+        dd_state = _dd_state(policy, "normal")
 
         doc = _run_with_drawdown(dd_state, tmp_path, monkeypatch,
-                                 holdings=holdings, hist=hist, scores=scores, gates=gates)
+                                 policy=policy, holdings=holdings,
+                                 hist=hist, scores=scores, gates=gates)
 
         tb          = doc.get("trade_budget", {})
         tpv         = doc.get("tpv", total)
         max_turnover = tb.get("turnover_cap_pct", 20.0) / 100
 
-        # Total buys executed
-        comp_buys = tb.get("comp_buy_need", 0) * tb.get("comp_buy_scale", 1.0)
-        mom_buys  = tb.get("mom_buy_need",  0) * tb.get("mom_buy_scale",  1.0)
+        comp_buys  = tb.get("comp_buy_need", 0) * tb.get("comp_buy_scale", 1.0)
+        mom_buys   = tb.get("mom_buy_need",  0) * tb.get("mom_buy_scale",  1.0)
         total_buys = comp_buys + mom_buys
 
         if total_buys > 0:
@@ -221,26 +242,25 @@ class TestRunnerWaterfall:
         In normal (non-hard_limit) state, compliance buys are subject to the
         20% per-event turnover cap (v2.9.9).
         """
-        total = 200_000.0
-        # IAUM at 1% — needs a large compliance buy (6-7% of denom = ~$12K)
+        policy = make_policy()
+        ba_min = _bucket_a_min(policy)
+        total  = 200_000.0
         holdings = make_holdings({
             "VTI":           (400, total * 0.87 / 400, "core_equity"),
             "IAUM":          (  1, total * 0.01,        "precious_metals"),
-            "TREASURY_NOTE": (  1, 45000.0,             "bucket_a"),
-            "CASH":          (max(1, round(total - total * 0.88 - 45000)), 1.0, "cash"),
+            "TREASURY_NOTE": (  1, float(ba_min),        "bucket_a"),
+            "CASH":          (max(1, round(total - total * 0.88 - ba_min)), 1.0, "cash"),
         })
         hist   = make_hist(["VTI", "IAUM"], n_rows=300)
         scores = make_scores({"VTI": 0.5, "IAUM": 0.5})
         gates  = make_gate_rows(["VTI", "IAUM"])
 
-        dd_state = {"state": "normal", "drawdown": 0.0,
-                    "soft_limit": 0.22, "hard_limit": 0.30}
+        dd_state = _dd_state(policy, "normal")
         doc = _run_with_drawdown(dd_state, tmp_path, monkeypatch,
-                                 holdings=holdings, hist=hist, scores=scores, gates=gates)
+                                 policy=policy, holdings=holdings,
+                                 hist=hist, scores=scores, gates=gates)
 
-        tb   = doc.get("trade_budget", {})
-        tpv  = doc.get("tpv", total)
-        # comp_buy_scale should be <= 1.0 (may be turnover-capped or cash-limited)
+        tb = doc.get("trade_budget", {})
         cs = tb.get("comp_buy_scale", 1.0)
         assert 0.0 <= cs <= 1.0, f"comp_buy_scale={cs} out of valid range [0, 1]"
 
@@ -249,24 +269,25 @@ class TestRunnerWaterfall:
         When cash == 0 and no sells, all buy scales must be 0 (nothing to deploy).
         The system must not crash.
         """
-        total = 100_000.0
+        policy = make_policy()
+        ba_min = _bucket_a_min(policy)
+        total  = 100_000.0
         holdings = make_holdings({
             "VTI":           (200, total * 0.60 / 200, "core_equity"),
             "IAUM":          ( 50, total * 0.15 / 50,  "precious_metals"),  # at cap
-            "TREASURY_NOTE": (  1, 45000.0,             "bucket_a"),
+            "TREASURY_NOTE": (  1, float(ba_min),       "bucket_a"),
             "CASH":          (  0, 1.0, "cash"),  # zero cash
         })
         hist   = make_hist(["VTI", "IAUM"], n_rows=300)
         scores = make_scores({"VTI": 0.5, "IAUM": 0.5})
         gates  = make_gate_rows(["VTI", "IAUM"])
 
-        dd_state = {"state": "normal", "drawdown": 0.0,
-                    "soft_limit": 0.22, "hard_limit": 0.30}
+        dd_state = _dd_state(policy, "normal")
 
-        # Must not crash
         try:
             doc = _run_with_drawdown(dd_state, tmp_path, monkeypatch,
-                                     holdings=holdings, hist=hist, scores=scores, gates=gates)
+                                     policy=policy, holdings=holdings,
+                                     hist=hist, scores=scores, gates=gates)
             assert isinstance(doc, dict)
             tb = doc.get("trade_budget", {})
             assert tb.get("cash_on_hand", 0) == pytest.approx(0.0, abs=1.0)

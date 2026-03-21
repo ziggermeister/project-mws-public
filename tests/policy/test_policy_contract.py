@@ -8,7 +8,11 @@ function correctly. A failure here means the policy file has been modified
 in a way that breaks a core system contract — requires human review before
 any automated run proceeds.
 
-All tests are marked @pytest.mark.contract.
+Also includes TestFixtureMirrorsLivePolicy which asserts that make_policy()
+stays in sync with mws_policy.json on the fields that scenario tests depend
+on. Drift here causes scenario tests to pass against wrong thresholds.
+
+All contract tests are marked @pytest.mark.contract.
 """
 import json
 import os
@@ -17,6 +21,8 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from tests.conftest import make_policy as _make_fixture_policy
 
 # Path to the real policy file
 POLICY_PATH = os.path.join(
@@ -212,3 +218,134 @@ class TestPolicyContract:
             assert isinstance(sleeve_data["tickers"], list), (
                 f"Sleeve '{sleeve_name}'.tickers must be a list"
             )
+
+
+# ── Fixture/live-policy consistency ──────────────────────────────────────────
+
+@pytest.mark.contract
+class TestFixtureMirrorsLivePolicy:
+    """
+    Assert that make_policy() (the canonical test fixture) stays in sync with
+    the real mws_policy.json on the fields that scenario tests depend on.
+
+    If these diverge, scenario tests pass but they are testing the wrong
+    thresholds — a silent correctness regression.
+
+    Checked fields:
+      - drawdown_rules.soft_limit and hard_limit
+      - definitions.buckets.bucket_a_protected_liquidity.minimum_usd
+      - governance.execution.max_turnover
+      - sleeves.level2.ai_tech.floor.strong_breadth_floor and weak_breadth_floor
+      - sleeves.level2.precious_metals.cap
+      - sleeves.level2.strategic_materials.cap
+      - ticker_constraints.IAUM.max_total
+      - ticker_constraints.VTI.min_total and max_total
+    """
+
+    @pytest.fixture(scope="class")
+    def live(self):
+        """Load the real mws_policy.json."""
+        if not os.path.exists(POLICY_PATH):
+            pytest.skip(f"mws_policy.json not found at {POLICY_PATH}")
+        with open(POLICY_PATH, encoding="utf-8") as f:
+            return json.load(f)
+
+    @pytest.fixture(scope="class")
+    def fixture(self):
+        """Return the make_policy() fixture dict."""
+        return _make_fixture_policy()
+
+    def _get(self, d, *keys, default=None):
+        """Safe nested get."""
+        for k in keys:
+            if not isinstance(d, dict):
+                return default
+            d = d.get(k, default)
+        return d
+
+    def test_drawdown_soft_limit_matches(self, live, fixture):
+        live_val    = self._get(live,    "drawdown_rules", "soft_limit")
+        fixture_val = self._get(fixture, "drawdown_rules", "soft_limit")
+        assert live_val == fixture_val, (
+            f"drawdown_rules.soft_limit: live={live_val}, fixture={fixture_val}. "
+            "Update make_policy() to match mws_policy.json."
+        )
+
+    def test_drawdown_hard_limit_matches(self, live, fixture):
+        live_val    = self._get(live,    "drawdown_rules", "hard_limit")
+        fixture_val = self._get(fixture, "drawdown_rules", "hard_limit")
+        assert live_val == fixture_val, (
+            f"drawdown_rules.hard_limit: live={live_val}, fixture={fixture_val}. "
+            "Update make_policy() to match mws_policy.json."
+        )
+
+    def test_bucket_a_minimum_usd_matches(self, live, fixture):
+        live_val = self._get(
+            live, "definitions", "buckets",
+            "bucket_a_protected_liquidity", "minimum_usd",
+        )
+        fixture_val = self._get(
+            fixture, "definitions", "buckets",
+            "bucket_a_protected_liquidity", "minimum_usd",
+        )
+        assert live_val == fixture_val, (
+            f"bucket_a.minimum_usd: live={live_val}, fixture={fixture_val}. "
+            "Update make_policy() to match mws_policy.json."
+        )
+
+    def test_max_turnover_matches(self, live, fixture):
+        live_val    = self._get(live,    "governance", "execution", "max_turnover")
+        fixture_val = self._get(fixture, "governance", "execution", "max_turnover")
+        assert live_val == fixture_val, (
+            f"governance.execution.max_turnover: live={live_val}, fixture={fixture_val}. "
+            "Update make_policy() to match mws_policy.json."
+        )
+
+    def test_ai_tech_strong_breadth_floor_matches(self, live, fixture):
+        live_val    = self._get(live,    "sleeves", "level2", "ai_tech", "floor", "strong_breadth_floor")
+        fixture_val = self._get(fixture, "sleeves", "level2", "ai_tech", "floor", "strong_breadth_floor")
+        assert live_val == fixture_val, (
+            f"ai_tech.floor.strong_breadth_floor: live={live_val}, fixture={fixture_val}."
+        )
+
+    def test_ai_tech_weak_breadth_floor_matches(self, live, fixture):
+        live_val    = self._get(live,    "sleeves", "level2", "ai_tech", "floor", "weak_breadth_floor")
+        fixture_val = self._get(fixture, "sleeves", "level2", "ai_tech", "floor", "weak_breadth_floor")
+        assert live_val == fixture_val, (
+            f"ai_tech.floor.weak_breadth_floor: live={live_val}, fixture={fixture_val}."
+        )
+
+    def test_precious_metals_cap_matches(self, live, fixture):
+        live_val    = self._get(live,    "sleeves", "level2", "precious_metals", "cap")
+        fixture_val = self._get(fixture, "sleeves", "level2", "precious_metals", "cap")
+        assert live_val == fixture_val, (
+            f"precious_metals.cap: live={live_val}, fixture={fixture_val}."
+        )
+
+    def test_strategic_materials_cap_matches(self, live, fixture):
+        live_val    = self._get(live,    "sleeves", "level2", "strategic_materials", "cap")
+        fixture_val = self._get(fixture, "sleeves", "level2", "strategic_materials", "cap")
+        assert live_val == fixture_val, (
+            f"strategic_materials.cap: live={live_val}, fixture={fixture_val}."
+        )
+
+    def test_iaum_max_total_matches(self, live, fixture):
+        live_val    = self._get(live,    "ticker_constraints", "IAUM", "max_total")
+        fixture_val = self._get(fixture, "ticker_constraints", "IAUM", "max_total")
+        assert live_val == fixture_val, (
+            f"ticker_constraints.IAUM.max_total: live={live_val}, fixture={fixture_val}."
+        )
+
+    def test_vti_min_total_matches(self, live, fixture):
+        live_val    = self._get(live,    "ticker_constraints", "VTI", "min_total")
+        fixture_val = self._get(fixture, "ticker_constraints", "VTI", "min_total")
+        assert live_val == fixture_val, (
+            f"ticker_constraints.VTI.min_total: live={live_val}, fixture={fixture_val}."
+        )
+
+    def test_vti_max_total_matches(self, live, fixture):
+        live_val    = self._get(live,    "ticker_constraints", "VTI", "max_total")
+        fixture_val = self._get(fixture, "ticker_constraints", "VTI", "max_total")
+        assert live_val == fixture_val, (
+            f"ticker_constraints.VTI.max_total: live={live_val}, fixture={fixture_val}."
+        )

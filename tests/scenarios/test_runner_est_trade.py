@@ -43,17 +43,19 @@ class TestRunnerEstTrade:
         # strategic_materials at 9.5% (cap=10%)
         strategic_mv = total * 0.095
         core_mv      = total * 0.55
+        policy = make_policy()
+        ba_min = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
+        strategic_cap = policy["sleeves"]["level2"]["strategic_materials"]["cap"]
         holdings = make_holdings({
             "VTI":            (round(core_mv / 230), 230.0,  "core_equity"),
             "URNM":           (round(strategic_mv / 25), 25.0, "strategic_materials"),
-            "TREASURY_NOTE":  (1, 45000.0, "bucket_a"),
-            "CASH":           (round((total - core_mv - strategic_mv - 45000) / 1.0), 1.0, "cash"),
+            "TREASURY_NOTE":  (1, float(ba_min), "bucket_a"),
+            "CASH":           (round((total - core_mv - strategic_mv - ba_min) / 1.0), 1.0, "cash"),
         })
         hist   = make_hist(["VTI", "URNM"], n_rows=300)
         # High momentum for URNM → momentum_buy triggered
         scores = make_scores({"VTI": 0.5, "URNM": 0.90}, tickers_raw={"VTI": 0.05, "URNM": 0.15})
         gates  = make_gate_rows(["VTI", "URNM"])
-        policy = make_policy()
 
         doc = run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkeypatch)
 
@@ -61,9 +63,8 @@ class TestRunnerEstTrade:
         sleeves   = doc.get("sleeves",   {})
         if "URNM" in portfolio and portfolio["URNM"]["action"] == "BUY":
             est_usd = portfolio["URNM"]["est_usd"] or 0.0
-            # Compute headroom: (10% cap - 9.5% current) × sizing_denom
+            # Compute headroom: (cap - current) × sizing_denom
             sizing_denom = doc.get("sizing_denom", total)
-            strategic_cap = 0.10
             strategic_pct = sleeves.get("strategic_materials", {}).get("current_pct", 9.5) / 100
             headroom = max(0.0, (strategic_cap - strategic_pct) * sizing_denom)
             assert est_usd <= headroom * 1.02, (  # allow 2% float tolerance
@@ -77,21 +78,22 @@ class TestRunnerEstTrade:
         Bug #1 regression (edge case): when sleeve is exactly at cap, momentum buy
         est_usd must be 0 (or at most the rounding tolerance).
         """
-        total = 200_000.0
-        cap_pct = 0.10  # strategic_materials cap
+        policy       = make_policy()
+        ba_min       = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
+        cap_pct      = policy["sleeves"]["level2"]["strategic_materials"]["cap"]
+        total        = 200_000.0
         strategic_mv = total * cap_pct  # exactly at cap
         core_mv      = total * 0.55
 
         holdings = make_holdings({
             "VTI":           (round(core_mv / 230), 230.0,  "core_equity"),
             "URNM":          (round(strategic_mv / 25), 25.0, "strategic_materials"),
-            "TREASURY_NOTE": (1, 45000.0, "bucket_a"),
-            "CASH":          (max(1, round((total - core_mv - strategic_mv - 45000) / 1.0)), 1.0, "cash"),
+            "TREASURY_NOTE": (1, float(ba_min), "bucket_a"),
+            "CASH":          (max(1, round((total - core_mv - strategic_mv - ba_min) / 1.0)), 1.0, "cash"),
         })
         hist   = make_hist(["VTI", "URNM"], n_rows=300)
         scores = make_scores({"VTI": 0.5, "URNM": 0.90}, tickers_raw={"VTI": 0.05, "URNM": 0.15})
         gates  = make_gate_rows(["VTI", "URNM"])
-        policy = make_policy()
 
         doc = run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkeypatch)
 
@@ -119,16 +121,18 @@ class TestRunnerEstTrade:
         iaum_px  = 40.0
         core_mv  = total * 0.60
 
+        policy      = make_policy()
+        ba_min      = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
+        iaum_max    = policy["ticker_constraints"]["IAUM"]["max_total"]
         holdings = make_holdings({
             "VTI":           (round(core_mv / 230), 230.0, "core_equity"),
             "IAUM":          (round(iaum_mv / iaum_px), iaum_px, "precious_metals"),
-            "TREASURY_NOTE": (1, 45000.0, "bucket_a"),
-            "CASH":          (max(1, round((total - core_mv - iaum_mv - 45000) / 1.0)), 1.0, "cash"),
+            "TREASURY_NOTE": (1, float(ba_min), "bucket_a"),
+            "CASH":          (max(1, round((total - core_mv - iaum_mv - ba_min) / 1.0)), 1.0, "cash"),
         })
         hist   = make_hist(["VTI", "IAUM"], n_rows=300)
         scores = make_scores({"VTI": 0.5, "IAUM": 0.85}, tickers_raw={"VTI": 0.05, "IAUM": 0.12})
         gates  = make_gate_rows(["VTI", "IAUM"])
-        policy = make_policy()
 
         doc = run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkeypatch)
 
@@ -136,10 +140,10 @@ class TestRunnerEstTrade:
         tpv       = doc.get("tpv", total)
         if "IAUM" in portfolio and portfolio["IAUM"]["action"] == "BUY":
             est_usd  = portfolio["IAUM"]["est_usd"] or 0.0
-            max_room = max(0.0, 0.08 * tpv - iaum_mv)   # 8% TPV - current MV
+            max_room = max(0.0, iaum_max * tpv - iaum_mv)
             assert est_usd <= max_room * 1.02, (  # 2% float tolerance
                 f"Bug #6: IAUM est_usd ({est_usd:,.0f}) exceeds per-ticker max_total "
-                f"headroom ({max_room:,.0f}). Would push ticker above 8% TPV limit."
+                f"headroom ({max_room:,.0f}). Would push ticker above {iaum_max:.0%} TPV limit."
             )
 
     @pytest.mark.regression
@@ -161,12 +165,15 @@ class TestRunnerEstTrade:
         iaum_mv    = pm_mv * 0.5
         sivr_mv    = pm_mv * 0.5
 
+        policy = make_policy()
+        ba_min = policy["definitions"]["buckets"]["bucket_a_protected_liquidity"]["minimum_usd"]
+        pm_cap = policy["sleeves"]["level2"]["precious_metals"]["cap"]
         holdings = make_holdings({
             "VTI":           (round(core_mv / 230), 230.0, "core_equity"),
             "IAUM":          (round(iaum_mv / iaum_px), iaum_px, "precious_metals"),
             "SIVR":          (round(sivr_mv / sivr_px), sivr_px, "precious_metals"),
-            "TREASURY_NOTE": (1, 45000.0, "bucket_a"),
-            "CASH":          (max(1, round((total - core_mv - pm_mv - 45000) / 1.0)), 1.0, "cash"),
+            "TREASURY_NOTE": (1, float(ba_min), "bucket_a"),
+            "CASH":          (max(1, round((total - core_mv - pm_mv - ba_min) / 1.0)), 1.0, "cash"),
         })
         hist   = make_hist(["VTI", "IAUM", "SIVR"], n_rows=300)
         # Both IAUM and SIVR have high momentum → both get momentum_buy
@@ -175,7 +182,6 @@ class TestRunnerEstTrade:
             tickers_raw={"VTI": 0.05, "IAUM": 0.08, "SIVR": 0.06},
         )
         gates  = make_gate_rows(["VTI", "IAUM", "SIVR"])
-        policy = make_policy()
 
         doc = run_portfolio_tables(policy, holdings, hist, scores, gates, tmp_path, monkeypatch)
 
@@ -184,7 +190,6 @@ class TestRunnerEstTrade:
         sizing_denom = doc.get("sizing_denom", total)
 
         # Sum est_usd for all momentum buys in precious_metals
-        pm_cap     = 0.15
         pm_current = sleeves.get("precious_metals", {}).get("current_pct", 12.0) / 100
         headroom   = max(0.0, (pm_cap - pm_current) * sizing_denom)
 
