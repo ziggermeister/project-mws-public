@@ -1,3 +1,5 @@
 {
   "date": "2026-03-20",
-  "filter_blocking": 
+  "filter_blocking": false,
+  "consecutive_blocked_days": 0
+}
