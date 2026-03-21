@@ -1229,36 +1229,38 @@ def update_and_check_drawdown_state(
     if existing.get("date") == today_str:
         return existing
 
-    # Determine effective stress state using persisted state (Codex Finding 1 fix).
-    # Bug: old code used dd["state"] (point-in-time fresh check).  When drawdown
-    # recovers below soft_limit (22%) but above recovery threshold (15%),
-    # check_drawdown_state() returns "normal", making in_stress=False and rendering
-    # the consecutive-day counter dead code — it could never increment.
-    # Fix: derive stress from persisted state; only exit via explicit recovery conditions.
+    # Bug fix (F1): use persisted state — NOT the fresh point-in-time state — to decide
+    # whether we are in stress.  check_drawdown_state() immediately returns "normal"
+    # once drawdown drops below soft_limit (22%).  Since the recovery threshold is 15%,
+    # any drawdown < 15% is already < 22%, so the fresh check would return "normal" and
+    # in_stress would be False before the counter ever gets a chance to increment.
+    # Solution: the state machine owns the regime label; enter stress on any fresh
+    # soft_limit / hard_limit signal, but only exit via the explicit recovery conditions.
     persisted_state = existing.get("state", "normal")
     fresh_dd_state  = dd["state"]
+
     if fresh_dd_state in ("soft_limit", "hard_limit"):
-        # Fresh check detects (or escalates to) a stress regime — use it
+        # Fresh drawdown breach — enter or deepen stress immediately
         current_state = fresh_dd_state
     elif persisted_state in ("soft_limit", "hard_limit"):
-        # Fresh check says normal (dd < soft_limit threshold) but we haven't
-        # met the explicit recovery conditions yet — hold the persisted state
+        # Was in stress — hold position; only explicit recovery can exit
         current_state = persisted_state
     else:
         current_state = "normal"
-    current_dd_abs = abs(dd.get("drawdown", 0.0))
+
     in_stress = current_state in ("soft_limit", "hard_limit")
+    current_dd_abs = abs(dd.get("drawdown", 0.0))
     recovery_threshold = float(
         policy.get("drawdown_rules", {}).get("recovery_condition", {}).get("drawdown_below", 0.15)
     )
 
-    # Counter 1: consecutive days below recovery threshold
+    # Counter 1: consecutive days below recovery threshold (while in stress)
     if in_stress and current_dd_abs < recovery_threshold:
         consecutive_days_recovered = existing.get("consecutive_days_recovered", 0) + 1
     else:
         consecutive_days_recovered = 0
 
-    # Counter 2: VTI positive momentum consecutive days
+    # Counter 2: VTI positive momentum consecutive days (while in stress)
     _vti_raw = 0.0
     if (df_scores is not None
             and not df_scores.empty
@@ -1825,14 +1827,7 @@ def generate_policy_runtime(
 
 
 def load_rebalance_ledger(ledger_path: str = REBALANCE_LEDGER_JSON) -> dict:
-    """Load YTD rebalance ledger, pruning events from prior calendar years.
-
-    ``ytd_traded_usd`` tracks **buy-side only** (the annual cap only constrains
-    buys; sells are compliance-driven and cannot be suppressed).  Each event
-    stores both ``buy_usd`` and ``sell_usd`` for reporting, but only ``buy_usd``
-    accumulates toward the cap.  Old events that only have ``traded_usd`` (pre-
-    fix format) fall back to ``traded_usd`` for backward compatibility.
-    """
+    """Load YTD rebalance ledger, pruning events from prior calendar years."""
     current_year = str(datetime.today().year)
     ledger: dict = {"events": [], "ytd_traded_usd": 0.0}
     if os.path.exists(ledger_path):
@@ -1846,52 +1841,37 @@ def load_rebalance_ledger(ledger_path: str = REBALANCE_LEDGER_JSON) -> dict:
             ]
         except Exception as exc:
             logger.warning("rebalance_ledger: could not load %s (%s)", ledger_path, exc)
-    # Sum buy-side only; fall back to traded_usd for pre-fix events
-    ledger["ytd_traded_usd"] = sum(
-        e.get("buy_usd", e.get("traded_usd", 0.0)) for e in ledger["events"]
-    )
+    ledger["ytd_traded_usd"] = sum(e.get("traded_usd", 0.0) for e in ledger["events"])
     return ledger
 
 
 def append_rebalance_event(
-    buy_usd: float,
+    traded_usd: float,
     tpv: float,
-    sell_usd: float = 0.0,
     ledger_path: str = REBALANCE_LEDGER_JSON,
 ) -> dict:
-    """Append a rebalance event to the ledger. Idempotent per calendar day.
-
-    Only ``buy_usd`` counts toward the annual cap (sells are compliance-driven
-    and cannot be suppressed).  Both ``buy_usd`` and ``sell_usd`` are stored for
-    informational reporting.
-    """
+    """Append a rebalance event to the ledger. Idempotent per calendar day."""
     today_str = _todays_trading_date()
     ledger = load_rebalance_ledger(ledger_path)
     # Idempotency: if today already has an entry, skip (prevents double-recording)
     if any(e.get("date") == today_str for e in ledger["events"]):
         logger.info("rebalance_ledger: entry for %s already exists, skipping", today_str)
         return ledger
-    total_usd = buy_usd + sell_usd
     ledger["events"].append({
         "date":           today_str,
-        "buy_usd":        round(buy_usd, 2),
-        "sell_usd":       round(sell_usd, 2),
-        "total_usd":      round(total_usd, 2),
+        "traded_usd":     round(traded_usd, 2),
         "tpv_at_event":   round(tpv, 2),
-        "turnover_pct":   round(total_usd / tpv * 100, 2) if tpv > 0 else 0.0,
+        "turnover_pct":   round(traded_usd / tpv * 100, 2) if tpv > 0 else 0.0,
     })
-    # ytd cap uses buy-side only
-    ledger["ytd_traded_usd"] = sum(
-        e.get("buy_usd", e.get("traded_usd", 0.0)) for e in ledger["events"]
-    )
+    ledger["ytd_traded_usd"] = sum(e.get("traded_usd", 0.0) for e in ledger["events"])
     try:
         _tmp = ledger_path + ".tmp"
         with open(_tmp, "w", encoding="utf-8") as f:
             json.dump(ledger, f, indent=2)
         os.replace(_tmp, ledger_path)
         logger.info(
-            "rebalance_ledger: appended event buy_usd=%.2f sell_usd=%.2f ytd_buy_total=%.2f",
-            buy_usd, sell_usd, ledger["ytd_traded_usd"],
+            "rebalance_ledger: appended event traded_usd=%.2f, ytd_total=%.2f",
+            traded_usd, ledger["ytd_traded_usd"],
         )
     except Exception as exc:
         logger.warning("rebalance_ledger: could not write %s (%s)", ledger_path, exc)
