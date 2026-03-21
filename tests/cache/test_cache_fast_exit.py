@@ -217,13 +217,12 @@ class TestPrecomputedTargetsFreshness:
         Bug #17 regression: fast-exit must be skipped when a required ticker is absent
         from the history CSV even though the date is current.
 
-        Fix: _history_is_stale() now accepts an optional required_tickers parameter.
-        When provided, it reads the CSV header after the date check and returns True
-        (stale) if any required ticker is missing from the columns.
-
-        The no-arg call site in load_system_files is unchanged (date-only check,
-        because the policy is not yet loaded at that point).  Callers with policy
-        context should pass required_tickers to get universe-aware staleness.
+        Fix (two-part):
+        1. _history_is_stale(required_tickers=...) returns True when any required
+           ticker is missing from the CSV columns.
+        2. load_system_files() now loads policy FIRST then calls
+           _history_is_stale(HISTORY_CSV, required_tickers=policy_tickers), so the
+           production workflow actually enforces the universe check end-to-end.
         """
         today = "2026-03-20"
         monkeypatch.setattr(mws, "_todays_trading_date", lambda: today)
@@ -234,18 +233,77 @@ class TestPrecomputedTargetsFreshness:
         dates = pd.bdate_range(end=today, periods=5).strftime("%Y-%m-%d").tolist()
         _write_wide_csv(path, ["VTI"], dates)  # NEWT is NOT in this file
 
-        # Without required_tickers: date-only check → fresh (backward-compatible)
+        # Part 1: helper contract — date-only call is still fresh (backward-compat)
         result_no_tickers = mws._history_is_stale(path)
         assert result_no_tickers is False, (
             "Date-only check (no required_tickers): current-dated file must be fresh"
         )
 
-        # With required_tickers including the missing ticker → stale
+        # Part 1: helper contract — universe-aware call detects missing ticker
         result_with_tickers = mws._history_is_stale(path, required_tickers=["VTI", "NEWT"])
         assert result_with_tickers is True, (
             "Bug #17: history is current-dated but missing 'NEWT'. "
-            "_history_is_stale(required_tickers=['VTI','NEWT']) must return True "
-            "so the system re-fetches and populates NEWT price history."
+            "_history_is_stale(required_tickers=['VTI','NEWT']) must return True."
+        )
+
+    @pytest.mark.regression
+    def test_bug17_load_system_files_passes_policy_tickers(self, tmp_path, monkeypatch):
+        """
+        Bug #17 end-to-end: load_system_files() must call _history_is_stale with
+        required_tickers derived from the loaded policy, not just with the date check.
+
+        Codex gap: the helper test above proves _history_is_stale works, but the
+        production call site must actually pass required_tickers for Bug #17 to be
+        closed end-to-end.
+
+        This test verifies that when load_system_files() runs with a current-dated
+        history that is missing a policy ticker, _refresh_prices() is called.
+        """
+        import json as _json
+
+        today = "2026-03-20"
+        monkeypatch.setattr(mws, "_todays_trading_date", lambda: today)
+        monkeypatch.setattr(mws, "_file_is_post_close", lambda path: False)
+
+        # Write a minimal policy with ticker "NEWT" in ticker_constraints
+        policy_dict = {
+            "ticker_constraints": {"VTI": {}, "NEWT": {}},
+            "governance": {"fixed_asset_prices": {"CASH": 1.0}},
+        }
+        policy_path   = str(tmp_path / "policy.json")
+        history_path  = str(tmp_path / "hist.csv")
+        holdings_path = str(tmp_path / "holdings.csv")
+
+        with open(policy_path, "w") as f:
+            _json.dump(policy_dict, f)
+
+        # History is current-dated but missing "NEWT"
+        dates = pd.bdate_range(end=today, periods=10).strftime("%Y-%m-%d").tolist()
+        _write_wide_csv(history_path, ["VTI"], dates)
+
+        # Minimal holdings CSV
+        pd.DataFrame({"Ticker": ["CASH"], "Shares": [1], "Class": ["cash"]}).to_csv(
+            holdings_path, index=False
+        )
+
+        monkeypatch.setattr(mws, "POLICY_FILENAME", policy_path)
+        monkeypatch.setattr(mws, "HISTORY_CSV",     history_path)
+        monkeypatch.setattr(mws, "HOLDINGS_CSV",    holdings_path)
+
+        # Track whether _refresh_prices was called
+        refresh_called = []
+        monkeypatch.setattr(mws, "_refresh_prices", lambda: refresh_called.append(True))
+
+        # load_system_files() must detect NEWT missing → call _refresh_prices
+        try:
+            mws.load_system_files()
+        except Exception:
+            pass  # holdings may not parse fully — we only care about refresh_called
+
+        assert refresh_called, (
+            "Bug #17 end-to-end: load_system_files() must call _refresh_prices() "
+            "when a policy ticker ('NEWT') is absent from the current-dated history CSV. "
+            "The production call site must pass required_tickers to _history_is_stale()."
         )
 
 

@@ -309,10 +309,6 @@ def load_system_files() -> Tuple[dict, pd.DataFrame, pd.DataFrame]:
 
     logger.info("Phase 0: Loading System Files...")
 
-    # Auto-refresh prices if history is stale before loading anything
-    if os.path.exists(HISTORY_CSV) and _history_is_stale(HISTORY_CSV):
-        _refresh_prices()
-
     def _load_json(path: str) -> dict:
         with open(path, "r", encoding="utf-8") as f:
             raw = f.read()
@@ -324,7 +320,17 @@ def load_system_files() -> Tuple[dict, pd.DataFrame, pd.DataFrame]:
             _fatal(f"[FATAL] {path} must be a JSON object (dict), got {type(obj).__name__}")
         return obj
 
+    # Load policy first so the universe-aware staleness check (Bug #17) has access
+    # to the full ticker list before deciding whether to re-fetch prices.
     policy = _load_json(POLICY_FILENAME)
+
+    # Auto-refresh prices if history is stale (date) or universe has changed (Bug #17).
+    # required_tickers: all tickers in ticker_constraints — if any are absent from the
+    # history CSV columns, _history_is_stale returns True and triggers a re-fetch so
+    # the new ticker gets price history on the same day it is added to the policy.
+    _policy_tickers = list(policy.get("ticker_constraints", {}).keys())
+    if os.path.exists(HISTORY_CSV) and _history_is_stale(HISTORY_CSV, required_tickers=_policy_tickers):
+        _refresh_prices()
 
     try:
         # Wide format: Date index, one column per ticker
