@@ -1614,7 +1614,7 @@ def send_compliance_email(analytics: dict) -> None:
         return
 
     total_val = analytics["total_val"]
-    dd        = analytics["drawdown"]
+    dd        = abs(analytics["drawdown"].get("drawdown", 0))  # drawdown dict → float
 
     if dd >= 0.30:
         regime_label = "🔴 HARD LIMIT"
