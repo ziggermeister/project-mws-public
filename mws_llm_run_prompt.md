@@ -358,18 +358,18 @@ Apply in strict priority order:
 | 5 | Turnover cap (20% per event, 60% annualized) | Clip and partial-execute by violation severity |
 | 6 | Signal-driven optimization | Only after all above satisfied |
 
-**SOFT_LIMIT (≥20% peak-to-trough):**
+**SOFT_LIMIT (≥22% peak-to-trough):**
 - Freeze all new buys
 - Continue cap/floor compliance sells
 - Turnover cap rises to 22%
 - DEFER_SELL window collapses to 3 days
 
-**HARD_LIMIT (≥28% peak-to-trough):**
+**HARD_LIMIT (≥30% peak-to-trough):**
 - Reduce all positions toward L2 sleeve floors
 - Per-ticker min_total may be overridden if floor reduction is insufficient
 - Log all hard_limit overrides as compliance exceptions
 
-**Recovery:** resume NORMAL rebalancing only when drawdown < 12% for 10 consecutive days.
+**Recovery:** resume NORMAL rebalancing only when drawdown < 15% for 10 consecutive days OR VTI shows positive momentum for 5 consecutive days.
 
 ### Turnover Calculation
 

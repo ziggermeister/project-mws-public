@@ -1203,7 +1203,9 @@ def _build_portfolio_tables(analytics: dict) -> str:
         # are subject to the 20% per-event cap. Any unfilled deficit is picked up
         # naturally in the next rebalance cycle when the compliance check re-fires.
         _exec_policy         = policy.get("governance", {}).get("execution", {})
-        _max_turnover_pct    = float(_exec_policy.get("max_turnover", 0.20))
+        _in_soft_limit       = dd.get("state") == "soft_limit"
+        _turnover_key        = "max_turnover_stress" if _in_soft_limit else "max_turnover"
+        _max_turnover_pct    = float(_exec_policy.get(_turnover_key, 0.20))
         _turnover_cap_usd    = total_val * _max_turnover_pct
         _cash_lim_scale      = (total_available   / comp_buy_need) if comp_buy_need > 0 else 1.0
         _turnover_lim_scale  = (_turnover_cap_usd / comp_buy_need) if comp_buy_need > 0 else 1.0
@@ -1545,6 +1547,11 @@ def _build_portfolio_tables(analytics: dict) -> str:
             _regime = dd.get("state", "normal")
             _dd_pct = round(abs(dd.get("drawdown", 0)) * 100, 2)
 
+            # Prebuild O(1) lookup dicts — avoids repeated DataFrame scans in output loops
+            _hold_mv     = hold.groupby("Ticker")["MV"].sum().to_dict()
+            _hold_price  = hold.groupby("Ticker")["Price"].first().to_dict()
+            _hold_shares = hold.groupby("Ticker")["Shares"].first().to_dict()
+
             # Per-ticker records
             _tickers_out: dict = {}
 
@@ -1552,11 +1559,9 @@ def _build_portfolio_tables(analytics: dict) -> str:
             for _t, _d in action_items:
                 _s   = scores_by_ticker.get(_t, {})
                 _g   = gates_by_ticker.get(_t, {})
-                _mv  = float(hold.loc[hold["Ticker"] == _t, "MV"].sum())
-                _px  = float(hold.loc[hold["Ticker"] == _t, "Price"].iloc[0]) \
-                       if not hold.loc[hold["Ticker"] == _t].empty else 0.0
-                _sh  = float(hold.loc[hold["Ticker"] == _t, "Shares"].iloc[0]) \
-                       if not hold.loc[hold["Ticker"] == _t].empty else 0.0
+                _mv  = _hold_mv.get(_t, 0.0)
+                _px  = _hold_price.get(_t, 0.0)
+                _sh  = _hold_shares.get(_t, 0.0)
                 _su, _ssh, _spfx, _snote = scaled_trades.get(_t, (None, None, "~", ""))
                 _tickers_out[_t] = {
                     "shares":        round(_sh, 5),
@@ -1583,11 +1588,9 @@ def _build_portfolio_tables(analytics: dict) -> str:
             for _t, _d, _du, _ds in deploy_items:
                 _s   = scores_by_ticker.get(_t, {})
                 _g   = gates_by_ticker.get(_t, {})
-                _mv  = float(hold.loc[hold["Ticker"] == _t, "MV"].sum())
-                _px  = float(hold.loc[hold["Ticker"] == _t, "Price"].iloc[0]) \
-                       if not hold.loc[hold["Ticker"] == _t].empty else 0.0
-                _sh  = float(hold.loc[hold["Ticker"] == _t, "Shares"].iloc[0]) \
-                       if not hold.loc[hold["Ticker"] == _t].empty else 0.0
+                _mv  = _hold_mv.get(_t, 0.0)
+                _px  = _hold_price.get(_t, 0.0)
+                _sh  = _hold_shares.get(_t, 0.0)
                 _tickers_out[_t] = {
                     "shares":        round(_sh, 5),
                     "price":         round(_px, 4),
@@ -1616,11 +1619,9 @@ def _build_portfolio_tables(analytics: dict) -> str:
                     continue
                 _s   = scores_by_ticker.get(_t, {})
                 _g   = gates_by_ticker.get(_t, {})
-                _mv  = float(hold.loc[hold["Ticker"] == _t, "MV"].sum())
-                _px  = float(hold.loc[hold["Ticker"] == _t, "Price"].iloc[0]) \
-                       if not hold.loc[hold["Ticker"] == _t].empty else 0.0
-                _sh  = float(hold.loc[hold["Ticker"] == _t, "Shares"].iloc[0]) \
-                       if not hold.loc[hold["Ticker"] == _t].empty else 0.0
+                _mv  = _hold_mv.get(_t, 0.0)
+                _px  = _hold_price.get(_t, 0.0)
+                _sh  = _hold_shares.get(_t, 0.0)
                 _tickers_out[_t] = {
                     "shares":        round(_sh, 5),
                     "price":         round(_px, 4),
@@ -1739,8 +1740,10 @@ def _build_portfolio_tables(analytics: dict) -> str:
                 },
             }
 
-            with open(PRECOMPUTED_TARGETS_FILE, "w", encoding="utf-8") as _f:
+            _tmp_path = PRECOMPUTED_TARGETS_FILE + ".tmp"
+            with open(_tmp_path, "w", encoding="utf-8") as _f:
                 json.dump(_targets_doc, _f, indent=2, ensure_ascii=False)
+            os.replace(_tmp_path, PRECOMPUTED_TARGETS_FILE)
             log.info("Precomputed targets written → %s", PRECOMPUTED_TARGETS_FILE)
 
         except Exception as _json_err:

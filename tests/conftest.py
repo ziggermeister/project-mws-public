@@ -187,7 +187,8 @@ def make_policy(**overrides):
                 },
             },
             "execution": {
-                "max_turnover": 0.20,
+                "max_turnover":        0.20,
+                "max_turnover_stress": 0.22,
             },
         },
         # Correct key — bug #4 was using "risk_controls" instead

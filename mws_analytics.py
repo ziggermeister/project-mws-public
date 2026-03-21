@@ -1542,10 +1542,12 @@ def compute_and_persist_breadth_states(
         }
         effective_floors[sleeve_name] = effective_floor
 
-    # Persist updated state
+    # Persist updated state (atomic write via .tmp + os.replace)
     try:
-        with open(state_path, "w", encoding="utf-8") as f:
+        _tmp = state_path + ".tmp"
+        with open(_tmp, "w", encoding="utf-8") as f:
             json.dump(existing, f, indent=2)
+        os.replace(_tmp, state_path)
     except Exception as exc:
         logger.warning("breadth_state: could not write %s (%s)", state_path, exc)
 
@@ -1613,8 +1615,10 @@ def compute_and_persist_tactical_cash_state(
     }
 
     try:
-        with open(state_path, "w", encoding="utf-8") as f:
+        _tmp = state_path + ".tmp"
+        with open(_tmp, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
+        os.replace(_tmp, state_path)
         logger.info(
             "tactical_cash_state: filter_blocking=%s, consecutive_blocked_days=%d",
             filter_blocking, consecutive_blocked_days,

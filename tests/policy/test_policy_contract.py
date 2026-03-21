@@ -235,6 +235,7 @@ class TestFixtureMirrorsLivePolicy:
       - drawdown_rules.soft_limit and hard_limit
       - definitions.buckets.bucket_a_protected_liquidity.minimum_usd
       - governance.execution.max_turnover
+      - governance.execution.max_turnover_stress
       - sleeves.level2.ai_tech.floor.strong_breadth_floor and weak_breadth_floor
       - sleeves.level2.precious_metals.cap
       - sleeves.level2.strategic_materials.cap
@@ -298,6 +299,14 @@ class TestFixtureMirrorsLivePolicy:
         fixture_val = self._get(fixture, "governance", "execution", "max_turnover")
         assert live_val == fixture_val, (
             f"governance.execution.max_turnover: live={live_val}, fixture={fixture_val}. "
+            "Update make_policy() to match mws_policy.json."
+        )
+
+    def test_max_turnover_stress_matches(self, live, fixture):
+        live_val    = self._get(live,    "governance", "execution", "max_turnover_stress")
+        fixture_val = self._get(fixture, "governance", "execution", "max_turnover_stress")
+        assert live_val == fixture_val, (
+            f"governance.execution.max_turnover_stress: live={live_val}, fixture={fixture_val}. "
             "Update make_policy() to match mws_policy.json."
         )
 

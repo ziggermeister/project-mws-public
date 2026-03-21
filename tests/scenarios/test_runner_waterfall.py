@@ -263,6 +263,45 @@ class TestRunnerWaterfall:
         cs = tb.get("comp_buy_scale", 1.0)
         assert 0.0 <= cs <= 1.0, f"comp_buy_scale={cs} out of valid range [0, 1]"
 
+    @pytest.mark.regression
+    def test_soft_limit_uses_max_turnover_stress(self, tmp_path, monkeypatch):
+        """
+        Finding 1 regression: under soft_limit, the runner must use
+        governance.execution.max_turnover_stress (22%) as the turnover cap,
+        not the normal max_turnover (20%).
+
+        Asserts: trade_budget.turnover_cap_pct == 22.0 when dd.state == 'soft_limit'.
+        """
+        policy = make_policy()
+        ba_min = _bucket_a_min(policy)
+        total  = 200_000.0
+        holdings = make_holdings({
+            "VTI":           (400, total * 0.60 / 400, "core_equity"),
+            "IAUM":          ( 50, total * 0.04 / 50,  "precious_metals"),
+            "TREASURY_NOTE": (  1, float(ba_min),       "bucket_a"),
+            "CASH":          (max(1, round(total - total * 0.64 - ba_min)), 1.0, "cash"),
+        })
+        hist   = make_hist(["VTI", "IAUM"], n_rows=300)
+        scores = make_scores({"VTI": 0.5, "IAUM": 0.5})
+        gates  = make_gate_rows(["VTI", "IAUM"])
+
+        dd_state = _dd_state(policy, "soft_limit", -0.24)
+
+        doc = _run_with_drawdown(dd_state, tmp_path, monkeypatch,
+                                 policy=policy, holdings=holdings,
+                                 hist=hist, scores=scores, gates=gates)
+
+        tb = doc.get("trade_budget", {})
+        cap_pct = tb.get("turnover_cap_pct")
+        assert cap_pct is not None, "trade_budget.turnover_cap_pct is missing"
+        assert cap_pct == pytest.approx(
+            policy["governance"]["execution"]["max_turnover_stress"] * 100, abs=0.01
+        ), (
+            f"Under soft_limit, turnover_cap_pct must equal max_turnover_stress "
+            f"({policy['governance']['execution']['max_turnover_stress'] * 100:.1f}%), "
+            f"got {cap_pct:.1f}%"
+        )
+
     def test_zero_cash_all_buy_scales_zero_no_crash(self, tmp_path, monkeypatch):
         """
         When cash == 0 and no sells, all buy scales must be 0 (nothing to deploy).

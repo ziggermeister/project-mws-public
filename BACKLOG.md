@@ -361,3 +361,28 @@ Only per-event turnover cap is implemented. Annual YTD turnover (60% cap) and de
 Fast-exit check verified date freshness but not ticker universe consistency. If policy added or removed tickers, the script exited without backfilling the new name.
 
 **Fix:** Added `_existing_cols` vs `_required_cols` comparison before fast-exit in `mws_fetch_history.py`. Fast-exit only triggers when both the date AND the column set match the required universe. Mismatched universe prints a warning and falls through to a full re-fetch.
+
+---
+
+## drawdown_recovery_not_stateful
+**Status:** `logged_for_future_review`
+**Source:** Gemini 2.5-pro audit 2026-03-21 (Finding 3.1), confirmed by OpenAI Codex
+**Priority:** P2 — system is safe (stuck in risk-off, not in risk-on); can miss recovery rallies
+
+`check_drawdown_state()` in `mws_analytics.py` is a point-in-time function. It checks whether the portfolio is *currently* in a drawdown state, but has no memory across runs. The policy (`drawdown_rules.recovery_condition`) specifies two exit conditions:
+1. Drawdown improves to < 15% for **10 consecutive trading days**
+2. VTI shows **positive momentum for 5 consecutive days**
+
+Neither condition can be evaluated without persisted state. Once `soft_limit` or `hard_limit` is activated, it is never automatically lifted — the system stays in a risk-off state until manually reset or the next run's point-in-time check happens to see a non-drawdown reading (which resets immediately, not after 10 days).
+
+**Impact:** Portfolio can miss entire recovery rallies if it enters a drawdown state, since the "freeze new buys" rule stays active. Severity is moderate — the failure mode is being too conservative (staying in risk-off), not taking excess risk.
+
+**Proposed fix (Gemini pseudocode):**
+- New state file `mws_drawdown_state.json` tracking `{state, consecutive_days_recovered, vti_pos_mom_days}`
+- New function `update_and_check_drawdown_state()` replacing `check_drawdown_state()`:
+  - Loads prior state, checks current drawdown
+  - Increments or resets `consecutive_days_recovered` and `vti_pos_mom_days` counters
+  - Transitions back to `normal` when either exit condition is met
+  - Persists updated state atomically
+
+**Action:** Implement before the next live drawdown event. Low urgency while markets are near all-time highs; escalate to P1 at first soft_limit trigger.
