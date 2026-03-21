@@ -257,29 +257,37 @@ mom_buy_scale       = min(1.0, _mom_cash_scale, _mom_turnover_scale)
 ---
 
 ## l1_cap_enforcement_missing
-**Status:** `logged_for_future_review`
+**Status:** `implemented_2026-03-21`
 **Source:** OpenAI Codex audit 2026-03-20
-**Priority:** P1
+**Priority:** P1 — fixed commit 762f27d
 
-L1 sleeve caps (growth=60%, real_assets=25%, monetary_hedges=15%, speculative=5%) are computed and displayed but never enforced. Combined buys across L2 sleeves within the same L1 could push the L1 total over its cap while each individual L2 is within its own cap. Requires a post-sizing L1 headroom scaling pass across all child L2 trades.
+L1 sleeve caps (growth=60%, real_assets=25%, monetary_hedges=15%, speculative=5%) were computed and displayed but never enforced. Combined buys across L2 sleeves within the same L1 could push the L1 total over its cap while each individual L2 was within its own cap.
+
+**Fix:** Added post-scaling L1 cap pass in `_build_portfolio_tables()`. For each L1 sleeve with a cap, compute `_l1_headroom = cap * sizing_denom - current_l1_mv`, sum all BUY raw needs in that L1, and apply `_l1_scale = min(1, headroom/need)` proportionally to all BUY trades in that L1.
 
 ---
 
 ## per_ticker_min_total_not_enforced
-**Status:** `logged_for_future_review`
+**Status:** `implemented_2026-03-21`
 **Source:** OpenAI Codex audit 2026-03-20
-**Priority:** P1
+**Priority:** P1 — fixed commit 762f27d
 
-Per-ticker `min_total` (TPV-based floor, e.g. VTI: 10%, VXUS: 4%) is never checked as a compliance trigger. The compliance system only enforces L2 sleeve floors (sizing_denom-based). A ticker could fall below its own TPV floor while its L2 sleeve is at its floor. Requires a separate per-ticker compliance buy layer with TPV-based checks, executed with higher precedence than L2 sleeve floors.
+Per-ticker `min_total` (TPV-based floor, e.g. VTI: 10%, VXUS: 4%) was never checked as a compliance trigger. The compliance system only enforced L2 sleeve floors (sizing_denom-based). A ticker could fall below its own TPV floor while its L2 sleeve was at its floor.
+
+**Fix:** Added a pre-check in `_action()` before L2 logic: if `ticker_constraints[ticker].min_total` is defined and `t_mv / total_val < min_total - 0.001` (with band), classify as compliance_buy. Not blocked by stress_freeze (treated as structural floor like L2 compliance).
 
 ---
 
 ## bucket_a_minimum_not_enforced
-**Status:** `logged_for_future_review`
+**Status:** `implemented_2026-03-21`
 **Source:** OpenAI Codex audit 2026-03-20
-**Priority:** P1
+**Priority:** P1 — fixed commits 762f27d, b5beb0a, 9ea17da
 
-Bucket A (TREASURY_NOTE ≥ $45K) is computed and flagged as BELOW_MIN in the precomputed targets JSON, but there is no code that halts discretionary buys or routes sell proceeds to Bucket A restoration when it is breached. Requires a pre-trade validator that suppresses all momentum/compliance buys and redirects cash when Bucket A is below minimum.
+Bucket A (TREASURY_NOTE ≥ $45K) was computed and flagged as BELOW_MIN but there was no code halting discretionary buys when it was breached.
+
+**Fix (762f27d):** Added `_bucket_a_breach` flag. When breached: `mom_buy_scale = 0.0`, DEPLOY gated, `comp_buy_scale = 0.0` (all buys halted).
+**Fix (b5beb0a):** Confirmed compliance buys also correctly gated by `_bucket_a_breach` (Gemini audit found the comp_buy_scale path was initially missed).
+**Fix (9ea17da):** Bucket A minimum now read from authoritative policy field `definitions.buckets.bucket_a_protected_liquidity.minimum_usd` (was using nonexistent `bucket_a.minimum_balance`, silently defaulting to $45K).
 
 ---
 
@@ -302,20 +310,24 @@ The recovery condition from the policy (`drawdown < 15% for 10 consecutive days 
 ---
 
 ## activated_tickers_in_momentum_universe
-**Status:** `logged_for_future_review`
+**Status:** `implemented_2026-03-21`
 **Source:** OpenAI Codex audit 2026-03-20
-**Priority:** P2
+**Priority:** P2 — fixed commit 762f27d
 
-`run_mws_audit()` may include ACTIVATED (not yet inducted) tickers in the ranking universe even though policy marks them `eligible_for_momentum: false`. These tickers can distort percentile ranks for inducted names without being valid allocatable instruments.
+`run_mws_audit()` included ACTIVATED (not yet inducted) tickers in the ranking universe even though policy marks them `eligible_for_momentum: false`, distorting percentile ranks for inducted names.
+
+**Fix:** Changed `stage in ["INDUCTED", "ACTIVATED"]` → `stage == "INDUCTED"` in `run_mws_audit()` candidate-building loop.
 
 ---
 
 ## residual_deploy_rule_incorrect
-**Status:** `logged_for_future_review`
+**Status:** `implemented_2026-03-21` (partial — VTI-last rule)
 **Source:** OpenAI Codex audit 2026-03-20
-**Priority:** P2
+**Priority:** P2 — fixed commit 762f27d
 
-DEPLOY loop greedily fills any positive-blend HOLD ticker sorted by momentum percentile. Policy says: route residual first to underweight inducted tickers by momentum rank, then remainder to VTI only. The current code does not filter for underweight (only checks sleeve cap headroom) and has no explicit VTI fallback.
+DEPLOY loop greedily filled any positive-blend HOLD ticker. VTI was not explicitly last as policy requires.
+
+**Fix:** `_deploy_pool` now excludes VTI, sorted by percentile descending, with VTI appended last. Full underweight-first filtering not yet implemented (sleeve cap headroom check approximates this; full implementation deferred as low-urgency).
 
 ---
 
@@ -329,8 +341,10 @@ Only per-event turnover cap is implemented. Annual YTD turnover (60% cap) and de
 ---
 
 ## fetch_history_fast_exit_skips_universe_changes
-**Status:** `logged_for_future_review`
+**Status:** `implemented_2026-03-21`
 **Source:** OpenAI Codex audit 2026-03-20 (also flagged by Gemini)
-**Priority:** P2
+**Priority:** P2 — fixed commit 762f27d
 
-Fast-exit check verifies date freshness but not ticker universe consistency. If policy adds or removes tickers on a day where the CSV is otherwise current, the script exits without backfilling the new name or purging the retired one. Fix: check column set against required universe before fast-exit, or include a universe hash in the fast-exit condition.
+Fast-exit check verified date freshness but not ticker universe consistency. If policy added or removed tickers, the script exited without backfilling the new name.
+
+**Fix:** Added `_existing_cols` vs `_required_cols` comparison before fast-exit in `mws_fetch_history.py`. Fast-exit only triggers when both the date AND the column set match the required universe. Mismatched universe prints a warning and falls through to a full re-fetch.
