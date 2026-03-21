@@ -1088,15 +1088,20 @@ def check_drawdown_state(policy: dict, perf_log: str = PERF_LOG_CSV) -> dict:
     Returns a dict with keys:
         state     : "normal" | "soft_limit" | "hard_limit"
         drawdown  : float  — current peak-to-trough as a negative fraction (e.g. -0.23)
-        soft_limit: float  — policy soft-limit threshold (e.g. 0.20)
-        hard_limit: float  — policy hard-limit threshold (e.g. 0.28)
+        soft_limit: float  — policy soft-limit threshold (e.g. 0.22)
+        hard_limit: float  — policy hard-limit threshold (e.g. 0.30)
         recovery  : float  — recovery threshold (e.g. 0.12)
     """
     _t0 = _time.perf_counter()
-    risk  = policy.get("risk_controls", {}) or {}
-    soft  = float(risk.get("soft_limit",           0.20))
-    hard  = float(risk.get("hard_limit",           0.28))
-    recov = float(risk.get("recovery_threshold",   0.12))
+    # Fix: policy uses "drawdown_rules" key, not "risk_controls".
+    # "risk_controls" does not exist — falling back to hardcoded defaults caused
+    # soft_limit to fire at 20% (policy: 22%) and hard_limit at 28% (policy: 30%).
+    risk  = policy.get("drawdown_rules", {}) or {}
+    soft  = float(risk.get("soft_limit",  0.22))
+    hard  = float(risk.get("hard_limit",  0.30))
+    recov = float(
+        (risk.get("recovery_condition") or {}).get("drawdown_below", 0.15)
+    )
 
     default: dict = {
         "state": "normal", "drawdown": 0.0,

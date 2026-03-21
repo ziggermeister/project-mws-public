@@ -860,6 +860,19 @@ def _build_portfolio_tables(analytics: dict) -> str:
                     sleeve_room   = max(0.0, cap_frac * denom - l2_total)
                     est_usd       = min(est_usd, sleeve_room)
 
+                # Fix: enforce per-ticker max_total cap (TPV-based) for all buys.
+                # _est_trade() previously only checked sleeve headroom. A ticker can
+                # have its own max_total cap (e.g. SOXQ: 10% TPV) that is tighter
+                # than the sleeve cap. Without this, a buy could push the ticker above
+                # its individual hard limit even while staying under the sleeve cap.
+                if core_basis in ("momentum_buy", "compliance_buy"):
+                    _tc = policy.get("ticker_constraints", {}).get(ticker, {})
+                    _max_tot = _tc.get("max_total")
+                    if _max_tot is not None:
+                        _t_mv         = float(hold.loc[hold["Ticker"] == ticker, "MV"].sum())
+                        _ticker_room  = max(0.0, float(_max_tot) * total_val - _t_mv)
+                        est_usd       = min(est_usd, _ticker_room)
+
                 est_sh  = round(est_usd / t_price) if t_price > 0 and est_usd > 0 else None
                 return est_usd, est_sh, "≈"
 
@@ -1140,8 +1153,16 @@ def _build_portfolio_tables(analytics: dict) -> str:
                                    - deferred_reserve_actual
                                    - policy_reserve_actual)
 
-        # Phase 2: momentum buys from discretionary pool
-        mom_buy_scale  = min(1.0, cash_for_discretionary / mom_buy_need) if mom_buy_need > 0 else 1.0
+        # Phase 2: momentum buys from discretionary pool, capped by both cash
+        # and remaining per-event turnover budget (v2.9.9).
+        # Fix: previously only cash constrained momentum buys. If compliance buys
+        # consumed e.g. 15% of the 20% turnover budget, momentum buys could add
+        # another 10%, yielding 25% total turnover — above the 20% policy cap.
+        _turnover_used_comp   = comp_buy_need * comp_buy_scale
+        _remaining_turnover   = max(0.0, _turnover_cap_usd - _turnover_used_comp)
+        _mom_cash_scale       = (cash_for_discretionary / mom_buy_need) if mom_buy_need > 0 else 1.0
+        _mom_turnover_scale   = (_remaining_turnover     / mom_buy_need) if mom_buy_need > 0 else 1.0
+        mom_buy_scale  = min(1.0, _mom_cash_scale, _mom_turnover_scale)
         cash_after_mom = cash_for_discretionary - mom_buy_need * mom_buy_scale
 
         # Phase 3: deploy residual to highest-momentum HOLD tickers within sleeve cap headroom.
@@ -1166,6 +1187,13 @@ def _build_portfolio_tables(analytics: dict) -> str:
                 l2_total = _l2_mv(d["l2"])
                 cur_frac = l2_total / d["denom"] if d["denom"] > 0 else 0.0
                 headroom = max(0.0, (cap_frac - cur_frac) * d["denom"])
+                # Also cap by per-ticker max_total (TPV-based)
+                _tc_deploy = policy.get("ticker_constraints", {}).get(ticker, {})
+                _max_tot_deploy = _tc_deploy.get("max_total")
+                if _max_tot_deploy is not None:
+                    _t_mv_deploy = float(hold.loc[hold["Ticker"] == ticker, "MV"].sum())
+                    _ticker_headroom_deploy = max(0.0, float(_max_tot_deploy) * total_val - _t_mv_deploy)
+                    headroom = min(headroom, _ticker_headroom_deploy)
                 if headroom < 100:
                     continue
                 deploy_usd = min(residual, headroom)

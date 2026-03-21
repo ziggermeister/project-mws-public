@@ -169,3 +169,54 @@ comp_buy_scale = (
     min(1.0, _cash_lim_scale, _turnover_lim_scale)   # normal: cash + turnover cap
 )
 ```
+
+---
+
+## drawdown_key_wrong_policy_field
+**Status:** `implemented_2026-03-21`
+**Source:** Gemini 2.5-pro re-audit 2026-03-20 (post-fix verification run)
+**Priority:** P0 — active on every run; silently using wrong thresholds since policy v2.9.5
+
+`check_drawdown_state()` in `mws_analytics.py` read thresholds from `policy.get("risk_controls", {})`. That key does not exist. Silent fallback to hardcoded defaults: `soft_limit=0.20`, `hard_limit=0.28`. Policy v2.9.5 raised these to 0.22/0.30 (in `drawdown_rules`), but the code never saw those values.
+
+**Impact:** System entered soft_limit (buy freeze) at 20% drawdown instead of 22%, and hard_limit (forced floor-reduction) at 28% instead of 30%. Every run since v2.9.5 (2026-03-17) was using the wrong thresholds.
+
+**Fix:** Changed `policy.get("risk_controls", {})` → `policy.get("drawdown_rules", {})` with correct defaults (0.22/0.30) and recovery threshold from `recovery_condition.drawdown_below` (0.15).
+
+---
+
+## per_ticker_max_total_not_enforced_in_est_trade
+**Status:** `implemented_2026-03-21`
+**Source:** Gemini 2.5-pro re-audit 2026-03-20
+**Priority:** P0 — can cause per-ticker cap breach on any run with an underweight ticker
+
+`_est_trade()` capped buys only against sleeve headroom (L2 cap). It never checked `ticker_constraints[ticker].max_total` — the TPV-based hard limit per ticker (e.g., SOXQ: 10% TPV). A ticker could be within its sleeve cap but above its own max_total cap after a buy.
+
+**Fix:** After computing `est_usd` in `_est_trade()` for `momentum_buy` and `compliance_buy`, added:
+```python
+_tc = policy.get("ticker_constraints", {}).get(ticker, {})
+_max_tot = _tc.get("max_total")
+if _max_tot is not None:
+    _t_mv        = hold.loc[hold["Ticker"] == ticker, "MV"].sum()
+    _ticker_room = max(0.0, float(_max_tot) * total_val - _t_mv)
+    est_usd      = min(est_usd, _ticker_room)
+```
+Same cap also added to the DEPLOY (residual deployment) loop.
+
+---
+
+## momentum_buy_turnover_cap_missing
+**Status:** `implemented_2026-03-21`
+**Source:** Gemini 2.5-pro re-audit 2026-03-20
+**Priority:** P0 — can cause total per-event turnover to exceed 20% cap
+
+`mom_buy_scale` was constrained only by available cash, not by the remaining per-event turnover budget. If compliance buys consumed 15% of the 20% cap, momentum buys could add another 10%, yielding 25% total — above policy limit.
+
+**Fix:** In Phase 2 of the budget waterfall, compute remaining turnover budget and apply it to `mom_buy_scale`:
+```python
+_turnover_used_comp = comp_buy_need * comp_buy_scale
+_remaining_turnover = max(0.0, _turnover_cap_usd - _turnover_used_comp)
+_mom_cash_scale     = cash_for_discretionary / mom_buy_need if mom_buy_need > 0 else 1.0
+_mom_turnover_scale = _remaining_turnover     / mom_buy_need if mom_buy_need > 0 else 1.0
+mom_buy_scale       = min(1.0, _mom_cash_scale, _mom_turnover_scale)
+```

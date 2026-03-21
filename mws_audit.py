@@ -222,7 +222,7 @@ def run_openai(code_block: str) -> str:
                 resp = client.chat.completions.create(
                     model=model_name,
                     messages=messages,
-                    max_completion_tokens=8192,
+                    max_completion_tokens=16000,
                 )
             else:
                 messages = [
@@ -233,7 +233,7 @@ def run_openai(code_block: str) -> str:
                     model=model_name,
                     messages=messages,
                     temperature=0.2,
-                    max_tokens=8192,
+                    max_tokens=16000,
                 )
 
             return f"# OpenAI ({model_name}) Audit\n\n{resp.choices[0].message.content}"
