@@ -1118,7 +1118,16 @@ def check_drawdown_state(policy: dict, perf_log: str = PERF_LOG_CSV) -> dict:
     try:
         df = pd.read_csv(perf_log, dtype=str)
         df.columns = [c.strip() for c in df.columns]
-        twr_col = next((c for c in df.columns if "twr" in c.lower()), None)
+        # Fix: also recognise the production column name "PortfolioPct" which stores
+        # cumulative TWR as a fraction (e.g. 0.0285 = +2.85% since baseline).
+        # The original lookup only matched columns containing "twr", which missed the
+        # real column written by update_performance_log() — so drawdown was ALWAYS
+        # "normal" in production, silently disabling the entire drawdown-gate feature.
+        twr_col = next(
+            (c for c in df.columns
+             if "twr" in c.lower() or c.lower() in ("portfoliopct", "portfolio_pct")),
+            None,
+        )
         if twr_col is None:
             _PHASE_TIMINGS["check_drawdown_state"] = _time.perf_counter() - _t0
             return default
@@ -1128,13 +1137,16 @@ def check_drawdown_state(policy: dict, perf_log: str = PERF_LOG_CSV) -> dict:
             _PHASE_TIMINGS["check_drawdown_state"] = _time.perf_counter() - _t0
             return default
 
-        # Build wealth index from cumulative daily returns, then measure max drawdown.
+        # Fix: pass the cumulative-return series directly to _compute_max_drawdown,
+        # which is designed to accept cumulative % returns (e.g. 0.06 = +6%) and adds 1
+        # internally to obtain wealth-index levels.  The prior code built a wealth index
+        # via (1+series).cumprod() first and then passed that to _compute_max_drawdown,
+        # which added 1 again — double-compounding the base and making every drawdown
+        # appear ~half as large as it truly was (e.g. a real -35% read as -20%).
+        # The production column "PortfolioPct" already stores cumulative % returns.
         # Fix: policy specifies peak_to_trough_rolling_252d. Slice to last 252 trading
         # days so the peak is the 1-year rolling high, not the all-time high.
-        # Without this, a deep drawdown from years ago permanently anchors the peak
-        # and the system can stay stuck in soft_limit/hard_limit indefinitely.
-        wealth = (1 + series).cumprod()
-        dd = _compute_max_drawdown(wealth.iloc[-252:])   # returns negative float
+        dd = _compute_max_drawdown(series.iloc[-252:])   # returns negative float
         if dd is None:
             _PHASE_TIMINGS["check_drawdown_state"] = _time.perf_counter() - _t0
             return default

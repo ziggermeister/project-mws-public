@@ -1,0 +1,8 @@
+Ticker,Shares,Class
+VTI,100,core_equity
+IAUM,200,precious_metals
+URNM,50,strategic_materials
+DBMF,100,managed_futures
+IBIT,50,crypto
+TREASURY_NOTE,1,bucket_a
+CASH,1,cash
