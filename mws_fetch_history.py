@@ -414,9 +414,12 @@ if INCREMENTAL_DAYS is not None:
             fetch_start = (last_date - timedelta(days=5)).strftime("%Y-%m-%d")
             print(f"Incremental mode: last date in CSV = {last_date.date()}, "
                   f"fetching from {fetch_start} (5-day overlap buffer)")
-            # Fast exit: skip fetch if CSV is already post-close fresh
-            if _csv_is_post_close(OUT_FILE):
-                print(f"✅  {OUT_FILE.name} is post-close fresh — no fetch needed")
+            # Fast exit: skip fetch if CSV content already covers the expected
+            # last trading date. Uses data content (not mtime) so it works
+            # correctly on GitHub Actions where checkout always resets mtime
+            # to the current time, making mtime-based checks unreliable.
+            if last_date.strftime("%Y-%m-%d") >= todays_trading_date():
+                print(f"✅  {OUT_FILE.name} is already up-to-date through {last_date.date()} — no fetch needed")
                 # Write a sentinel timing entry so mws_benchmark.py knows we fast-exited
                 _fast_timing = BASE_DIR / "mws_benchmark_timing.json"
                 try:
@@ -433,7 +436,7 @@ if INCREMENTAL_DAYS is not None:
                         "rt_fallback_s": 0.0, "merge_write_s": 0.0,
                         "tickers_fetched": 0, "tickers_ok": 0,
                         "rows_written": len(existing) if not existing.empty else 0,
-                        "mode": "incremental (fast-exit — post-close fresh)",
+                        "mode": "incremental (fast-exit — content up-to-date)",
                     }
                     _fast_timing.write_text(_jf.dumps(_et, indent=2), encoding="utf-8")
                 except Exception:
