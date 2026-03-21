@@ -1195,7 +1195,12 @@ def _build_portfolio_tables(analytics: dict) -> str:
         mom_sell_proceeds  = sum(raw_trades[t][0] for t in mom_sell_t)
         comp_buy_need      = sum(raw_trades[t][0] for t in comp_buy_t)
         mom_buy_need       = sum(raw_trades[t][0] for t in mom_buy_t)
-        total_available    = cash_mv + comp_sell_proceeds + mom_sell_proceeds
+        # T+1 settlement: sell proceeds do NOT settle same-day.
+        # Buys can only be funded from pre-existing cash, not from proceeds of
+        # same-cycle sells. Using sell proceeds here would cause buy orders that
+        # cannot be filled (cash deficit at the broker) and may trigger margin
+        # interest, good-faith violations, or forced liquidations.
+        total_available    = cash_mv
 
         # Phase 1: compliance buys — first claim on all available cash, capped at
         # per-event turnover limit (v2.9.9). Hard-limit compliance trades (Priority 1)
@@ -1463,10 +1468,9 @@ def _build_portfolio_tables(analytics: dict) -> str:
                 f'<table style="border-collapse:collapse; margin:4px 0 20px;">'
                 f'<tbody>'
                 f'<tr><td colspan="2" style="{_BSH}">Trade Budget</td></tr>'
-                + _brow("Cash on hand", cash_mv)
-                + _brow("+ Sell proceeds (trims / spike-trims)",
+                + _brow("Cash on hand (available to buy)", cash_mv, bold=True)
+                + _brow("Proposed sells — settle T+1 (informational)",
                         comp_sell_proceeds + mom_sell_proceeds)
-                + _brow("= Total available", total_available, bold=True)
                 + _SEP
             )
             if deferred_reserve > 0:

@@ -365,3 +365,95 @@ class TestRunnerWaterfall:
             f"Atomic write left behind a .tmp file at {tmp_targets}. "
             "os.replace() must clean up the .tmp file on success."
         )
+
+    @pytest.mark.regression
+    def test_t1_settlement_total_available_equals_cash_on_hand(self, tmp_path, monkeypatch):
+        """
+        T+1 settlement regression: trade_budget.total_available must equal
+        cash_on_hand only — sell proceeds from the same cycle do NOT settle
+        same-day and must NOT be included.
+
+        Before the fix, total_available = cash_mv + comp_sell_proceeds + mom_sell_proceeds,
+        which caused the system to fund same-day buys with proceeds that wouldn't
+        settle until T+1, potentially creating a cash deficit at the broker.
+        """
+        policy = make_policy()
+        ba_min = _bucket_a_min(policy)
+        total  = 200_000.0
+        # IAUM well above cap → generates a TRIM (sell proceeds exist)
+        # VTI below core_equity floor → might generate compliance buy
+        # Cash is small so the distinction between cash-only vs cash+proceeds matters
+        cash_start = 1_000.0
+        holdings = make_holdings({
+            "VTI":           (100, total * 0.10 / 100, "core_equity"),   # below floor → BUY
+            "IAUM":          (500, total * 0.20 / 500, "precious_metals"),  # 20% >> 15% cap → TRIM
+            "TREASURY_NOTE": (  1, float(ba_min),        "bucket_a"),
+            "CASH":          (max(1, round(cash_start)),  1.0, "cash"),
+        })
+        hist   = make_hist(["VTI", "IAUM"], n_rows=300)
+        scores = make_scores({"VTI": 0.5, "IAUM": 0.5})
+        gates  = make_gate_rows(["VTI", "IAUM"])
+
+        doc = _run_with_drawdown(_dd_state(policy, "normal"), tmp_path, monkeypatch,
+                                 policy=policy, holdings=holdings,
+                                 hist=hist, scores=scores, gates=gates)
+
+        tb = doc.get("trade_budget", {})
+        cash_on_hand    = tb.get("cash_on_hand", 0.0)
+        total_available = tb.get("total_available", 0.0)
+        sell_proceeds   = tb.get("comp_sell_proceeds", 0.0) + tb.get("mom_sell_proceeds", 0.0)
+
+        assert total_available == pytest.approx(cash_on_hand, abs=1.0), (
+            f"T+1 settlement bug: total_available ({total_available:.2f}) must equal "
+            f"cash_on_hand ({cash_on_hand:.2f}), not cash + sell_proceeds "
+            f"({cash_on_hand + sell_proceeds:.2f}). "
+            "Sell proceeds from same-cycle sells settle T+1 and are not available today."
+        )
+
+    @pytest.mark.regression
+    def test_t1_settlement_buys_capped_to_cash_not_sell_proceeds(self, tmp_path, monkeypatch):
+        """
+        T+1 settlement regression: when the system proposes both sells and buys
+        in the same cycle, actual buy execution must be capped to starting cash
+        only — not to cash + sell proceeds.
+
+        Setup: large TRIM sell ($20K+ proceeds) + compliance buy needed for IAUM,
+        with only $500 starting cash. Before the fix, comp buys would be funded
+        by the sell proceeds (comp_buy_scale ≈ 1.0). After the fix, comp buys
+        are strictly limited to $500 (comp_buy_need * comp_buy_scale ≤ cash_on_hand).
+        """
+        policy = make_policy()
+        ba_min = _bucket_a_min(policy)
+        total  = 200_000.0
+        cash_start = 500.0
+        # IAUM at 0% (missing) → large compliance buy needed
+        # VTI at 85% → large compliance trim (generates big sell proceeds)
+        holdings = make_holdings({
+            "VTI":           (850, total * 0.85 / 850, "core_equity"),  # far above cap → TRIM
+            "IAUM":          (  1, total * 0.005,       "precious_metals"),  # tiny → compliance BUY
+            "TREASURY_NOTE": (  1, float(ba_min),        "bucket_a"),
+            "CASH":          (max(1, round(cash_start)),  1.0, "cash"),
+        })
+        hist   = make_hist(["VTI", "IAUM"], n_rows=300)
+        scores = make_scores({"VTI": 0.5, "IAUM": 0.5})
+        gates  = make_gate_rows(["VTI", "IAUM"])
+
+        doc = _run_with_drawdown(_dd_state(policy, "normal"), tmp_path, monkeypatch,
+                                 policy=policy, holdings=holdings,
+                                 hist=hist, scores=scores, gates=gates)
+
+        tb              = doc.get("trade_budget", {})
+        cash_on_hand    = tb.get("cash_on_hand", 0.0)
+        comp_buy_need   = tb.get("comp_buy_need", 0.0)
+        comp_buy_scale  = tb.get("comp_buy_scale", 1.0)
+        sell_proceeds   = tb.get("comp_sell_proceeds", 0.0) + tb.get("mom_sell_proceeds", 0.0)
+
+        actual_comp_buys = comp_buy_need * comp_buy_scale
+
+        # Sell proceeds must be non-trivial for this test to be meaningful
+        if sell_proceeds > 1_000:
+            assert actual_comp_buys <= cash_on_hand + 1.0, (  # 1.0 float tolerance
+                f"T+1 settlement bug: actual compliance buys ({actual_comp_buys:.2f}) "
+                f"exceed starting cash ({cash_on_hand:.2f}). "
+                f"Sell proceeds ({sell_proceeds:.2f}) must not fund same-cycle buys."
+            )

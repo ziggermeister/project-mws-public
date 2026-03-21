@@ -1,9 +1,9 @@
 {
   "VTI": {
-    "action": "DEPLOY",
-    "basis": "residual_deployment",
+    "action": "HOLD",
+    "basis": "hold|stress_freeze",
     "gate_action": "proceed",
-    "est_usd": 532.0,
+    "est_usd": null,
     "current_pct": 28.38
   },
   "IAUM": {
